@@ -32,7 +32,7 @@ The exhaust not being ducted outside the tent yet is recorded in the grow profil
 ## Install: Home Assistant OS / Supervised (recommended)
 
 1. Get this folder onto your HA box's `addons` share. Easiest: install the **Samba share** add-on, open `\\homeassistant\addons` (Mac: Finder → Go → Connect to Server → `smb://homeassistant.local/addons`), and copy the `grow_brain` folder in.
-   (Alternative: push this repo to GitHub and add the repo URL under *Settings → Add-ons → Add-on store → ⋮ → Repositories*.)
+   (Or add `https://github.com/dsdadsasdaaaaaaaa/gro-op` under *Settings → Add-ons → Add-on store → ⋮ → Repositories*.)
 2. *Settings → Add-ons → Add-on store → ⋮ → Check for updates*. "Grow Brain" appears under **Local add-ons**. Install it.
 3. **Configuration** tab:
    * `api_key`: any password you like. You'll type it into the app.
