@@ -1,0 +1,520 @@
+"""HTTP API for the iOS app. See docs/API.md for the contract."""
+
+from __future__ import annotations
+
+import io
+import logging
+import mimetypes
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Optional
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, Response
+
+from . import __version__
+from .advisor import Advisor, AdvisorError
+from .controller import Controller, light_window
+from .devices import ROLE_BY_NAME, ROLES, automap
+from .models import (ChatRequest, DeviceMapUpdate, GrowProfile, GrowProfileUpdate, LogCreate, OverrideRequest,
+                     PauseRequest, SettingsModel, SettingsUpdate, StageChange, TargetsUpdate, TaskCreate)
+from .store import Store, iso, utcnow
+from .targets import STAGES, stage_defaults
+
+log = logging.getLogger(__name__)
+router = APIRouter(prefix="/api")
+
+
+# ------------------------------------------------------------------ wiring
+
+def deps(request: Request):
+    return request.app.state
+
+
+async def require_key(request: Request):
+    st = request.app.state
+    key = request.headers.get("x-api-key") or request.query_params.get("api_key")
+    if key != st.boot.api_key:
+        raise HTTPException(401, "Invalid or missing X-API-Key")
+
+
+auth = [Depends(require_key)]
+
+
+@router.get("/health")
+async def health(request: Request):
+    st = request.app.state
+    return {"ok": True, "version": __version__, "ha_connected": st.controller.ha_ok, "advisor_enabled": st.advisor.enabled}
+
+
+# ------------------------------------------------------------------ status / history
+
+async def _assessment(controller: Controller, targets, sensor, paused, units: str = "c") -> dict:
+    from .targets import c_to_f
+    details, level = [], "good"
+    if not controller.ha_ok:
+        return {"level": "alert", "headline": "Can't reach Home Assistant", "details": [controller.ha.last_error or "connection failed"]}
+    dmap = await controller.store.get_device_map()
+    if not dmap.get("temperature_sensor") or not dmap.get("humidity_sensor"):
+        return {"level": "warn", "headline": "Set up your devices", "details": ["Map the tent sensor and switches in Settings → Devices"]}
+    if sensor.stale:
+        return {"level": "alert", "headline": "Sensor not reporting", "details": ["Automation is in safe mode until the sensor comes back"]}
+
+    def check(val, lo, hi, name, unit, warn_margin, alert_margin, fmt=lambda x: f"{x:g}"):
+        nonlocal level
+        if val is None:
+            return
+        off = lo - val if val < lo else val - hi if val > hi else 0.0
+        if off <= warn_margin * 0.4:  # small dead-band: the controller is already correcting
+            details.append(f"{name} {fmt(val)}{unit} in range {fmt(lo)}–{fmt(hi)}{unit}")
+            return
+        sev = "alert" if off >= alert_margin else "warn"
+        level = "alert" if sev == "alert" or level == "alert" else "warn"
+        details.append(f"{name} {fmt(val)}{unit} {'below' if val < lo else 'above'} target {fmt(lo)}–{fmt(hi)}{unit}")
+
+    if units == "f":
+        check(sensor.temp_c, targets.temp_min_c, targets.temp_max_c, "Temp", "°F", 1.5, 4.0, fmt=lambda c: f"{c_to_f(c):g}")
+    else:
+        check(sensor.temp_c, targets.temp_min_c, targets.temp_max_c, "Temp", "°C", 1.5, 4.0)
+    check(sensor.humidity, targets.humidity_min, targets.humidity_max, "Humidity", "%", 5.0, 12.0)
+    check(sensor.vpd_kpa, targets.vpd_min, targets.vpd_max, "VPD", " kPa", 0.2, 0.5)
+    headline = {"good": "Everything on target", "warn": "Slightly off target, adjusting", "alert": "Out of range"}[level]
+    if paused:
+        headline += " (automation paused)"
+    return {"level": level, "headline": headline, "details": details}
+
+
+@router.get("/status", dependencies=auth)
+async def status(request: Request):
+    st = request.app.state
+    c: Controller = st.controller
+    settings = await c.settings()
+    profile = await c.profile()
+    tz = c.tz(settings)
+    now_local = datetime.now(tz)
+    day_targets, day_in_stage, day_total = await c.effective_targets(profile, settings)
+    scheduled_on, next_change = light_window(now_local, day_targets.light_on_time, day_targets.light_hours)
+    devices = await c.device_statuses()
+    light_dev = next((d for d in devices if d["role"] == "light"), None)
+    light_is_on = light_dev["state"] == "on" if light_dev and light_dev["state"] in ("on", "off") else scheduled_on
+    active_targets = day_targets if light_is_on else day_targets.for_night()
+    paused = await c.paused_until()
+    harvest = None
+    if profile.get("flower_start_date"):
+        try:
+            harvest = (date.fromisoformat(profile["flower_start_date"]) + timedelta(days=int(profile.get("expected_flower_days") or 65))).isoformat()
+        except ValueError:
+            harvest = None
+    alerts = [{"id": e["id"], "level": e["level"], "message": e["message"], "at": e["at"]}
+              for e in await st.store.events(5, min_level="warn", hours=6)]
+    return {
+        "time": iso(utcnow()),
+        "ha_connected": c.ha_ok,
+        "sensor": c.sensor.to_api(),
+        "grow": {**profile, "day_in_stage": day_in_stage, "day_total": day_total, "expected_harvest_date": harvest},
+        "targets": active_targets.to_api(),
+        "light": {"is_on": light_is_on, "next_change_at": iso(next_change), "schedule": _sched(day_targets.light_hours)},
+        "devices": devices,
+        "assessment": await _assessment(c, active_targets, c.sensor, paused, settings.get("units", "c")),
+        "open_tasks": len(await st.store.tasks("open")),
+        "open_photo_requests": len(await st.store.photo_requests("open")),
+        "unread_brief": await st.store.unread_brief(),
+        "alerts": alerts,
+        "control_paused_until": paused,
+    }
+
+
+def _sched(hours: float) -> str:
+    if hours <= 0:
+        return "off"
+    if hours >= 24:
+        return "24/0"
+    return f"{hours:g}/{24 - hours:g}"
+
+
+@router.get("/history", dependencies=auth)
+async def history(request: Request, hours: float = 24):
+    from .targets import c_to_f
+    rows = await request.app.state.store.readings_since(min(max(hours, 1), 24 * 30))
+    step = max(1, len(rows) // 300)
+    pts = [{"t": r["t"], "temp_c": r["temp_c"], "temp_f": c_to_f(r["temp_c"]) if r["temp_c"] is not None else None,
+            "humidity": r["humidity"], "vpd_kpa": r["vpd_kpa"], "light_on": bool(r["light_on"]) if r["light_on"] is not None else None}
+           for r in rows[::step]]
+    return {"points": pts}
+
+
+# ------------------------------------------------------------------ devices
+
+def _roles_api() -> list[dict]:
+    return [{"role": r.role, "label": r.label, "kind": r.kind, "required": r.required, "description": r.description} for r in ROLES]
+
+
+@router.get("/devices", dependencies=auth)
+async def devices(request: Request):
+    return {"devices": await request.app.state.controller.device_statuses(), "roles": _roles_api()}
+
+
+@router.put("/devices/{role}", dependencies=auth)
+async def map_device(role: str, body: DeviceMapUpdate, request: Request):
+    st = request.app.state
+    if role not in ROLE_BY_NAME:
+        raise HTTPException(404, f"Unknown role {role}")
+    await st.store.set_device(role, body.entity_id)
+    st.controller.last_reasons.pop(role, None)
+    await st.store.add_event("info", "system", f"{ROLE_BY_NAME[role].label} mapped to {body.entity_id or 'nothing'}")
+    return next(d for d in await st.controller.device_statuses() if d["role"] == role)
+
+
+@router.post("/devices/{role}/override", dependencies=auth)
+async def override(role: str, body: OverrideRequest, request: Request):
+    st = request.app.state
+    if role not in ROLE_BY_NAME or ROLE_BY_NAME[role].kind != "switch":
+        raise HTTPException(404, f"Unknown switch role {role}")
+    await st.store.set_override(role, body.mode, body.minutes)
+    await st.store.add_event("info", "device", f"{ROLE_BY_NAME[role].label} set to {body.mode}" +
+                             (f" for {body.minutes} min" if body.minutes and body.mode != "auto" else ""))
+    if body.mode in ("on", "off"):
+        dmap = await st.store.get_device_map()
+        if dmap.get(role):
+            await st.controller.ha.turn(dmap[role], body.mode == "on")
+            st.controller.states.setdefault(dmap[role], {})["state"] = body.mode
+            st.controller.last_switched[role] = utcnow()
+    return next(d for d in await st.controller.device_statuses() if d["role"] == role)
+
+
+@router.get("/ha/entities", dependencies=auth)
+async def ha_entities(request: Request):
+    try:
+        return {"entities": await request.app.state.controller.ha.list_candidates()}
+    except Exception as e:
+        raise HTTPException(502, f"Home Assistant not reachable: {e}")
+
+
+@router.post("/ha/automap", dependencies=auth)
+async def ha_automap(request: Request):
+    st = request.app.state
+    try:
+        ents = await st.controller.ha.list_candidates()
+    except Exception as e:
+        raise HTTPException(502, f"Home Assistant not reachable: {e}")
+    mapping = automap(ents)
+    for role, eid in mapping.items():
+        await st.store.set_device(role, eid)
+    await st.store.add_event("info", "system", "Auto-mapped devices: " + ", ".join(f"{ROLE_BY_NAME[r].label}={e}" for r, e in mapping.items()))
+    return {"devices": await st.controller.device_statuses(), "roles": _roles_api()}
+
+
+# ------------------------------------------------------------------ grow profile / stage / targets
+
+@router.get("/grow", dependencies=auth)
+async def get_grow(request: Request):
+    return await request.app.state.controller.profile()
+
+
+@router.put("/grow", dependencies=auth)
+async def put_grow(body: GrowProfileUpdate, request: Request):
+    st = request.app.state
+    profile = GrowProfile(**await st.controller.profile())
+    updated = profile.model_copy(update=body.model_dump(exclude_none=True))
+    if updated.start_date and not updated.stage_started:
+        updated.stage_started = updated.start_date
+    await st.store.set_kv("grow_profile", updated.model_dump())
+    return updated.model_dump()
+
+
+@router.post("/grow/stage", dependencies=auth)
+async def set_stage(body: StageChange, request: Request):
+    st = request.app.state
+    profile = GrowProfile(**await st.controller.profile())
+    today = datetime.now(st.controller.tz(await st.controller.settings())).date().isoformat()
+    profile.stage = body.stage
+    profile.stage_started = today
+    if body.stage == "flower" and not profile.flower_start_date:
+        profile.flower_start_date = today
+    if not profile.start_date:
+        profile.start_date = today
+    await st.store.set_kv("grow_profile", profile.model_dump())
+    old = await st.store.get_kv("targets_override", None) or {}
+    await st.store.del_kv("targets_override")
+    if old.get("light_on_time"):
+        await st.store.set_kv("targets_override", {"values": {}, "source": "stage_default", "light_on_time": old["light_on_time"]})
+    await st.store.add_event("info", "system", f"Stage changed to {body.stage}; targets reset to stage defaults")
+    return profile.model_dump()
+
+
+@router.get("/targets", dependencies=auth)
+async def get_targets(request: Request):
+    t, _, _ = await request.app.state.controller.effective_targets()
+    return t.to_api()
+
+
+@router.put("/targets", dependencies=auth)
+async def put_targets(body: TargetsUpdate, request: Request):
+    st = request.app.state
+    override = await st.store.get_kv("targets_override", None) or {"values": {}, "source": "manual"}
+    vals = dict(override.get("values", {}))
+    upd = body.model_dump(exclude_none=True)
+    if "light_on_time" in upd:
+        override["light_on_time"] = upd.pop("light_on_time")
+    vals.update(upd)
+    await st.store.set_kv("targets_override", {"values": vals, "source": "manual", "light_on_time": override.get("light_on_time", "06:00")})
+    t, _, _ = await st.controller.effective_targets()
+    await st.store.add_event("info", "system", "Targets edited manually")
+    return t.to_api()
+
+
+@router.delete("/targets", dependencies=auth)
+async def reset_targets(request: Request):
+    st = request.app.state
+    old = await st.store.get_kv("targets_override", None) or {}
+    await st.store.del_kv("targets_override")
+    if old.get("light_on_time"):
+        await st.store.set_kv("targets_override", {"values": {}, "source": "stage_default", "light_on_time": old["light_on_time"]})
+    t, _, _ = await st.controller.effective_targets()
+    return t.to_api()
+
+
+# ------------------------------------------------------------------ settings / control
+
+async def _settings_api(request: Request) -> dict:
+    st = request.app.state
+    s = await st.controller.settings()
+    s["model"] = s.get("model") or st.boot.model
+    s["advisor_enabled"] = st.advisor.enabled
+    try:
+        s["notify_services_available"] = await st.controller.ha.list_notify_services()
+    except Exception:
+        s["notify_services_available"] = []
+    return SettingsModel(**s).model_dump()
+
+
+@router.get("/settings", dependencies=auth)
+async def get_settings(request: Request):
+    return await _settings_api(request)
+
+
+@router.put("/settings", dependencies=auth)
+async def put_settings(body: SettingsUpdate, request: Request):
+    st = request.app.state
+    current = await st.store.get_kv("settings", {}) or {}
+    upd = body.model_dump(exclude_unset=True)
+    if "timezone" in upd:
+        from zoneinfo import ZoneInfo
+        try:
+            ZoneInfo(upd["timezone"])
+        except Exception:
+            raise HTTPException(400, f"Unknown timezone {upd['timezone']}")
+    current.update(upd)
+    await st.store.set_kv("settings", current)
+    return await _settings_api(request)
+
+
+@router.post("/control/pause", dependencies=auth)
+async def pause(body: PauseRequest, request: Request):
+    st = request.app.state
+    until = iso(utcnow() + timedelta(minutes=max(1, min(body.minutes, 720))))
+    await st.store.set_kv("control_paused_until", until)
+    await st.store.add_event("warn", "system", f"Automation paused for {body.minutes} min (safety limits still active)")
+    return {"control_paused_until": until}
+
+
+@router.post("/control/resume", dependencies=auth)
+async def resume(request: Request):
+    st = request.app.state
+    await st.store.del_kv("control_paused_until")
+    await st.store.add_event("info", "system", "Automation resumed")
+    return {"control_paused_until": None}
+
+
+# ------------------------------------------------------------------ log
+
+@router.post("/log", dependencies=auth)
+async def create_log(body: LogCreate, request: Request):
+    st = request.app.state
+    entry = await st.store.add_log_entry(body.kind, body.value, body.unit, body.context, body.note)
+    advice = None
+    if st.advisor.enabled:
+        try:
+            advice = await st.advisor.advise_on_log(entry)
+            entry = await st.store.get_log_entry(entry["id"])
+        except AdvisorError as e:
+            advice = {"summary": str(e), "steps": [], "urgency": "info", "photo_requests": [], "tasks": []}
+    else:
+        advice = {"summary": "Logged. (Advisor is off: add an Anthropic API key to get advice.)", "steps": [],
+                  "urgency": "info", "photo_requests": [], "tasks": []}
+    return {"entry": entry, "advice": advice}
+
+
+@router.get("/log", dependencies=auth)
+async def list_log(request: Request, limit: int = 50):
+    return {"entries": await request.app.state.store.log_entries(min(limit, 500))}
+
+
+# ------------------------------------------------------------------ tasks
+
+@router.get("/tasks", dependencies=auth)
+async def list_tasks(request: Request, status: Optional[str] = "open"):
+    return {"tasks": await request.app.state.store.tasks(None if status in (None, "all") else status)}
+
+
+@router.post("/tasks", dependencies=auth)
+async def create_task(body: TaskCreate, request: Request):
+    return await request.app.state.store.add_task(body.title, body.detail, body.due, body.priority, "user")
+
+
+@router.post("/tasks/{tid}/complete", dependencies=auth)
+async def complete_task(tid: int, request: Request):
+    t = await request.app.state.store.set_task_status(tid, "done")
+    if not t:
+        raise HTTPException(404, "No such task")
+    return t
+
+
+@router.post("/tasks/{tid}/reopen", dependencies=auth)
+async def reopen_task(tid: int, request: Request):
+    t = await request.app.state.store.set_task_status(tid, "open")
+    if not t:
+        raise HTTPException(404, "No such task")
+    return t
+
+
+# ------------------------------------------------------------------ photos
+
+@router.get("/photo-requests", dependencies=auth)
+async def photo_requests(request: Request, status: Optional[str] = "open"):
+    return {"requests": await request.app.state.store.photo_requests(None if status in (None, "all") else status)}
+
+
+@router.post("/photo-requests/{rid}/skip", dependencies=auth)
+async def skip_photo_request(rid: int, request: Request):
+    st = request.app.state
+    pr = await st.store.get_photo_request(rid)
+    if not pr:
+        raise HTTPException(404, "No such photo request")
+    await st.store.set_photo_request_status(rid, "skipped")
+    return await st.store.get_photo_request(rid)
+
+
+@router.post("/photos", dependencies=auth)
+async def upload_photo(request: Request, image: UploadFile = File(...), request_id: Optional[int] = Form(None),
+                       note: Optional[str] = Form(None)):
+    st = request.app.state
+    raw = await image.read()
+    if not raw:
+        raise HTTPException(400, "Empty image")
+    from PIL import Image, ImageOps
+    try:
+        im = Image.open(io.BytesIO(raw))
+        im = ImageOps.exif_transpose(im).convert("RGB")
+    except Exception:
+        raise HTTPException(400, "Could not read image")
+    im.thumbnail((2000, 2000))
+    pid = await st.store.add_photo(request_id, note, "")
+    photo_dir: Path = st.photo_dir
+    path = photo_dir / f"{pid}.jpg"
+    im.save(path, "JPEG", quality=88)
+    thumb = im.copy()
+    thumb.thumbnail((400, 400))
+    thumb.save(photo_dir / f"{pid}_thumb.jpg", "JPEG", quality=80)
+    await st.store.db.execute("UPDATE photos SET path=? WHERE id=?", (str(path), pid))
+    await st.store.db.commit()
+
+    req = await st.store.get_photo_request(request_id) if request_id else None
+    if st.advisor.enabled:
+        try:
+            await st.advisor.analyse_photo(pid, path, "image/jpeg", req, note)
+        except AdvisorError as e:
+            await st.store.set_photo_analysis(pid, {"summary": str(e), "health_score": 0, "findings": [], "actions": [],
+                                                    "photo_requests": [], "tasks": []})
+    else:
+        await st.store.set_photo_analysis(pid, {"summary": "Saved. (Advisor is off: add an Anthropic API key to get analysis.)",
+                                                "health_score": 0, "findings": [], "actions": [], "photo_requests": [], "tasks": []})
+        if req:
+            await st.store.set_photo_request_status(req["id"], "done", pid)
+    return _photo_api(await st.store.get_photo(pid))
+
+
+def _photo_api(p: dict) -> dict:
+    p = dict(p)
+    p.pop("path", None)
+    return p
+
+
+@router.get("/photos", dependencies=auth)
+async def list_photos(request: Request, limit: int = 30):
+    return {"photos": [_photo_api(p) for p in await request.app.state.store.photos(min(limit, 200))]}
+
+
+@router.get("/photos/{pid}/image", dependencies=auth)
+async def photo_image(pid: int, request: Request):
+    p = await request.app.state.store.get_photo(pid)
+    if not p or not Path(p["path"]).exists():
+        raise HTTPException(404, "No such photo")
+    return FileResponse(p["path"], media_type="image/jpeg")
+
+
+@router.get("/photos/{pid}/thumb", dependencies=auth)
+async def photo_thumb(pid: int, request: Request):
+    p = await request.app.state.store.get_photo(pid)
+    if not p:
+        raise HTTPException(404, "No such photo")
+    t = Path(p["path"]).with_name(f"{pid}_thumb.jpg")
+    if not t.exists():
+        raise HTTPException(404, "No thumbnail")
+    return FileResponse(t, media_type="image/jpeg")
+
+
+# ------------------------------------------------------------------ brief / chat
+
+@router.get("/brief", dependencies=auth)
+async def get_brief(request: Request):
+    return await request.app.state.store.latest_brief()
+
+
+@router.post("/brief/run", dependencies=auth)
+async def run_brief(request: Request):
+    st = request.app.state
+    if not st.advisor.enabled:
+        raise HTTPException(503, "Advisor is off: add your Anthropic API key in the add-on configuration.")
+    try:
+        return await st.advisor.daily_brief()
+    except AdvisorError as e:
+        raise HTTPException(502, str(e))
+
+
+@router.post("/brief/{bid}/read", dependencies=auth)
+async def read_brief(bid: int, request: Request):
+    await request.app.state.store.mark_brief_read(bid)
+    return {"ok": True}
+
+
+@router.post("/chat", dependencies=auth)
+async def chat(body: ChatRequest, request: Request):
+    st = request.app.state
+    if not st.advisor.enabled:
+        raise HTTPException(503, "Advisor is off: add your Anthropic API key in the add-on configuration.")
+    if not body.message.strip():
+        raise HTTPException(400, "Say something first")
+    try:
+        return await st.advisor.chat(body.message.strip())
+    except AdvisorError as e:
+        raise HTTPException(502, str(e))
+
+
+@router.get("/chat", dependencies=auth)
+async def chat_history(request: Request, limit: int = 50):
+    rows = await request.app.state.store.chat_history(min(limit, 200))
+    return {"messages": [{"id": r["id"], "role": r["role"], "content": r["content"], "created_at": r["created_at"]} for r in rows]}
+
+
+@router.delete("/chat", dependencies=auth)
+async def clear_chat(request: Request):
+    await request.app.state.store.clear_chat()
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ events
+
+@router.get("/events", dependencies=auth)
+async def events(request: Request, limit: int = 50):
+    return {"events": await request.app.state.store.events(min(limit, 500))}

@@ -1,0 +1,10 @@
+.venv/
+data/
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+ios/build/
+ios/DerivedData/
+*.xcuserstate
+xcuserdata/

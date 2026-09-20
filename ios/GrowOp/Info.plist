@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSCameraUsageDescription</key>
+	<string>GrowOp uses the camera so you can photograph your plants for the advisor to check.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>GrowOp needs your photo library so you can send existing plant photos to the advisor.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>com.levi.growop</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>growop</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

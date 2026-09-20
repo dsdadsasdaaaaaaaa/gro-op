@@ -1,0 +1,19 @@
+# Standalone mode (Home Assistant Container / Core, or any Docker host on the same network).
+# For Home Assistant OS use the add-on instead (see README).
+services:
+  grow_brain:
+    build: ./grow_brain
+    container_name: grow_brain
+    restart: unless-stopped
+    ports:
+      - "8099:8099"
+    environment:
+      HA_URL: ${HA_URL:-http://homeassistant.local:8123}
+      HA_TOKEN: ${HA_TOKEN}
+      GROW_API_KEY: ${GROW_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      GROW_MODEL: ${GROW_MODEL:-claude-opus-5}
+      TZ: ${TZ:-UTC}
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data

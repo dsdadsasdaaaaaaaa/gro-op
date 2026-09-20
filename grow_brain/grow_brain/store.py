@@ -1,0 +1,346 @@
+"""SQLite persistence (aiosqlite). One small file in the data dir holds everything."""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Optional
+
+import aiosqlite
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS device_map (role TEXT PRIMARY KEY, entity_id TEXT);
+CREATE TABLE IF NOT EXISTS overrides (role TEXT PRIMARY KEY, mode TEXT NOT NULL, until TEXT);
+CREATE TABLE IF NOT EXISTS readings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, t TEXT NOT NULL,
+    temp_c REAL, humidity REAL, vpd_kpa REAL, co2 REAL, light_on INTEGER
+);
+CREATE INDEX IF NOT EXISTS readings_t ON readings(t);
+CREATE TABLE IF NOT EXISTS device_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, t TEXT NOT NULL, role TEXT NOT NULL, state TEXT NOT NULL, reason TEXT
+);
+CREATE INDEX IF NOT EXISTS device_log_t ON device_log(t);
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, level TEXT NOT NULL, kind TEXT NOT NULL, message TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS log_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, kind TEXT NOT NULL,
+    value REAL, unit TEXT, context TEXT, note TEXT, advice_json TEXT
+);
+CREATE TABLE IF NOT EXISTS photo_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, title TEXT NOT NULL,
+    instructions TEXT NOT NULL, reason TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', photo_id INTEGER
+);
+CREATE TABLE IF NOT EXISTS photos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, request_id INTEGER, note TEXT,
+    path TEXT NOT NULL, analysis_json TEXT
+);
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, detail TEXT, due TEXT,
+    priority TEXT NOT NULL DEFAULT 'normal', status TEXT NOT NULL DEFAULT 'open',
+    created_by TEXT NOT NULL DEFAULT 'user', created_at TEXT NOT NULL, completed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS briefs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, json TEXT NOT NULL, read INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS chat (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
+);
+"""
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso(dt: datetime | None) -> str | None:
+    if dt is None:
+        return None
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def parse_iso(s: str | None) -> datetime | None:
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+class Store:
+    def __init__(self, path: Path):
+        self.path = path
+        self.db: aiosqlite.Connection | None = None
+
+    async def open(self) -> None:
+        self.db = await aiosqlite.connect(self.path)
+        self.db.row_factory = aiosqlite.Row
+        await self.db.executescript(SCHEMA)
+        await self.db.execute("PRAGMA journal_mode=WAL")
+        await self.db.commit()
+
+    async def close(self) -> None:
+        if self.db:
+            await self.db.close()
+
+    # ---- kv ----
+    async def get_kv(self, key: str, default: Any = None) -> Any:
+        async with self.db.execute("SELECT value FROM kv WHERE key=?", (key,)) as cur:
+            row = await cur.fetchone()
+        return json.loads(row["value"]) if row else default
+
+    async def set_kv(self, key: str, value: Any) -> None:
+        await self.db.execute("INSERT OR REPLACE INTO kv(key, value) VALUES(?, ?)", (key, json.dumps(value)))
+        await self.db.commit()
+
+    async def del_kv(self, key: str) -> None:
+        await self.db.execute("DELETE FROM kv WHERE key=?", (key,))
+        await self.db.commit()
+
+    # ---- device map / overrides ----
+    async def get_device_map(self) -> dict[str, str]:
+        async with self.db.execute("SELECT role, entity_id FROM device_map") as cur:
+            return {r["role"]: r["entity_id"] for r in await cur.fetchall() if r["entity_id"]}
+
+    async def set_device(self, role: str, entity_id: str | None) -> None:
+        if entity_id:
+            await self.db.execute("INSERT OR REPLACE INTO device_map(role, entity_id) VALUES(?, ?)", (role, entity_id))
+        else:
+            await self.db.execute("DELETE FROM device_map WHERE role=?", (role,))
+        await self.db.commit()
+
+    async def get_overrides(self) -> dict[str, dict]:
+        async with self.db.execute("SELECT role, mode, until FROM overrides") as cur:
+            rows = await cur.fetchall()
+        out = {}
+        now = utcnow()
+        for r in rows:
+            until = parse_iso(r["until"])
+            if until and until < now:
+                await self.db.execute("DELETE FROM overrides WHERE role=?", (r["role"],))
+                continue
+            out[r["role"]] = {"mode": r["mode"], "until": r["until"]}
+        await self.db.commit()
+        return out
+
+    async def set_override(self, role: str, mode: str, minutes: int | None) -> None:
+        if mode == "auto":
+            await self.db.execute("DELETE FROM overrides WHERE role=?", (role,))
+        else:
+            until = iso(utcnow() + timedelta(minutes=minutes)) if minutes else None
+            await self.db.execute("INSERT OR REPLACE INTO overrides(role, mode, until) VALUES(?, ?, ?)", (role, mode, until))
+        await self.db.commit()
+
+    # ---- readings ----
+    async def add_reading(self, temp_c, humidity, vpd, co2, light_on: bool | None) -> None:
+        await self.db.execute(
+            "INSERT INTO readings(t, temp_c, humidity, vpd_kpa, co2, light_on) VALUES(?,?,?,?,?,?)",
+            (iso(utcnow()), temp_c, humidity, vpd, co2, None if light_on is None else int(light_on)),
+        )
+        await self.db.commit()
+
+    async def readings_since(self, hours: float) -> list[dict]:
+        since = iso(utcnow() - timedelta(hours=hours))
+        async with self.db.execute(
+            "SELECT t, temp_c, humidity, vpd_kpa, co2, light_on FROM readings WHERE t>=? ORDER BY t", (since,)
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def prune(self, keep_days: int = 120) -> None:
+        cutoff = iso(utcnow() - timedelta(days=keep_days))
+        await self.db.execute("DELETE FROM readings WHERE t<?", (cutoff,))
+        await self.db.execute("DELETE FROM device_log WHERE t<?", (cutoff,))
+        await self.db.execute("DELETE FROM events WHERE at<?", (cutoff,))
+        await self.db.commit()
+
+    # ---- device log / events ----
+    async def log_device(self, role: str, state: str, reason: str) -> None:
+        await self.db.execute("INSERT INTO device_log(t, role, state, reason) VALUES(?,?,?,?)",
+                              (iso(utcnow()), role, state, reason))
+        await self.db.commit()
+
+    async def device_log_since(self, hours: float) -> list[dict]:
+        since = iso(utcnow() - timedelta(hours=hours))
+        async with self.db.execute("SELECT t, role, state, reason FROM device_log WHERE t>=? ORDER BY t", (since,)) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def add_event(self, level: str, kind: str, message: str) -> int:
+        cur = await self.db.execute("INSERT INTO events(at, level, kind, message) VALUES(?,?,?,?)",
+                                    (iso(utcnow()), level, kind, message))
+        await self.db.commit()
+        return cur.lastrowid
+
+    async def events(self, limit: int = 50, min_level: str | None = None, hours: float | None = None) -> list[dict]:
+        q = "SELECT id, at, level, kind, message FROM events"
+        conds, args = [], []
+        if min_level == "warn":
+            conds.append("level IN ('warn','alert')")
+        if hours:
+            conds.append("at>=?")
+            args.append(iso(utcnow() - timedelta(hours=hours)))
+        if conds:
+            q += " WHERE " + " AND ".join(conds)
+        q += " ORDER BY id DESC LIMIT ?"
+        args.append(limit)
+        async with self.db.execute(q, args) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    # ---- log entries ----
+    async def add_log_entry(self, kind, value, unit, context, note) -> dict:
+        now = iso(utcnow())
+        cur = await self.db.execute(
+            "INSERT INTO log_entries(created_at, kind, value, unit, context, note) VALUES(?,?,?,?,?,?)",
+            (now, kind, value, unit, context, note))
+        await self.db.commit()
+        return await self.get_log_entry(cur.lastrowid)
+
+    async def set_log_advice(self, entry_id: int, advice: dict) -> None:
+        await self.db.execute("UPDATE log_entries SET advice_json=? WHERE id=?", (json.dumps(advice), entry_id))
+        await self.db.commit()
+
+    async def get_log_entry(self, entry_id: int) -> dict:
+        async with self.db.execute("SELECT * FROM log_entries WHERE id=?", (entry_id,)) as cur:
+            return self._log_row(await cur.fetchone())
+
+    async def log_entries(self, limit: int = 50) -> list[dict]:
+        async with self.db.execute("SELECT * FROM log_entries ORDER BY id DESC LIMIT ?", (limit,)) as cur:
+            return [self._log_row(r) for r in await cur.fetchall()]
+
+    @staticmethod
+    def _log_row(r) -> dict:
+        if r is None:
+            return {}
+        advice = json.loads(r["advice_json"]) if r["advice_json"] else None
+        return {
+            "id": r["id"], "created_at": r["created_at"], "kind": r["kind"], "value": r["value"],
+            "unit": r["unit"], "context": r["context"], "note": r["note"],
+            "advice_summary": advice.get("summary") if advice else None,
+        }
+
+    # ---- photo requests ----
+    async def add_photo_request(self, title: str, instructions: str, reason: str) -> dict:
+        cur = await self.db.execute(
+            "INSERT INTO photo_requests(created_at, title, instructions, reason) VALUES(?,?,?,?)",
+            (iso(utcnow()), title, instructions, reason))
+        await self.db.commit()
+        return await self.get_photo_request(cur.lastrowid)
+
+    async def get_photo_request(self, rid: int) -> dict | None:
+        async with self.db.execute("SELECT * FROM photo_requests WHERE id=?", (rid,)) as cur:
+            r = await cur.fetchone()
+        return dict(r) if r else None
+
+    async def photo_requests(self, status: str | None = "open", limit: int = 50) -> list[dict]:
+        if status:
+            q, args = "SELECT * FROM photo_requests WHERE status=? ORDER BY id DESC LIMIT ?", (status, limit)
+        else:
+            q, args = "SELECT * FROM photo_requests ORDER BY id DESC LIMIT ?", (limit,)
+        async with self.db.execute(q, args) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def set_photo_request_status(self, rid: int, status: str, photo_id: int | None = None) -> None:
+        await self.db.execute("UPDATE photo_requests SET status=?, photo_id=COALESCE(?, photo_id) WHERE id=?",
+                              (status, photo_id, rid))
+        await self.db.commit()
+
+    # ---- photos ----
+    async def add_photo(self, request_id: int | None, note: str | None, path: str) -> int:
+        cur = await self.db.execute("INSERT INTO photos(created_at, request_id, note, path) VALUES(?,?,?,?)",
+                                    (iso(utcnow()), request_id, note, path))
+        await self.db.commit()
+        return cur.lastrowid
+
+    async def set_photo_analysis(self, pid: int, analysis: dict) -> None:
+        await self.db.execute("UPDATE photos SET analysis_json=? WHERE id=?", (json.dumps(analysis), pid))
+        await self.db.commit()
+
+    async def get_photo(self, pid: int) -> dict | None:
+        async with self.db.execute("SELECT * FROM photos WHERE id=?", (pid,)) as cur:
+            r = await cur.fetchone()
+        return self._photo_row(r) if r else None
+
+    async def photos(self, limit: int = 30) -> list[dict]:
+        async with self.db.execute("SELECT * FROM photos ORDER BY id DESC LIMIT ?", (limit,)) as cur:
+            return [self._photo_row(r) for r in await cur.fetchall()]
+
+    @staticmethod
+    def _photo_row(r) -> dict:
+        return {
+            "id": r["id"], "created_at": r["created_at"], "request_id": r["request_id"], "note": r["note"],
+            "path": r["path"], "analysis": json.loads(r["analysis_json"]) if r["analysis_json"] else None,
+            "image_url": f"/api/photos/{r['id']}/image",
+        }
+
+    # ---- tasks ----
+    async def add_task(self, title, detail, due, priority, created_by) -> dict:
+        cur = await self.db.execute(
+            "INSERT INTO tasks(title, detail, due, priority, created_by, created_at) VALUES(?,?,?,?,?,?)",
+            (title, detail, due, priority, created_by, iso(utcnow())))
+        await self.db.commit()
+        return await self.get_task(cur.lastrowid)
+
+    async def get_task(self, tid: int) -> dict | None:
+        async with self.db.execute("SELECT * FROM tasks WHERE id=?", (tid,)) as cur:
+            r = await cur.fetchone()
+        return dict(r) if r else None
+
+    async def tasks(self, status: str | None = "open", limit: int = 100) -> list[dict]:
+        if status:
+            q, args = "SELECT * FROM tasks WHERE status=? ORDER BY COALESCE(due, '9999'), id DESC LIMIT ?", (status, limit)
+        else:
+            q, args = "SELECT * FROM tasks ORDER BY status DESC, COALESCE(due,'9999'), id DESC LIMIT ?", (limit,)
+        async with self.db.execute(q, args) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def set_task_status(self, tid: int, status: str) -> dict | None:
+        await self.db.execute("UPDATE tasks SET status=?, completed_at=? WHERE id=?",
+                              (status, iso(utcnow()) if status == "done" else None, tid))
+        await self.db.commit()
+        return await self.get_task(tid)
+
+    # ---- briefs ----
+    async def add_brief(self, data: dict) -> dict:
+        now = iso(utcnow())
+        cur = await self.db.execute("INSERT INTO briefs(created_at, json) VALUES(?,?)", (now, json.dumps(data)))
+        await self.db.commit()
+        return {"id": cur.lastrowid, "created_at": now, "read": False, **data}
+
+    async def latest_brief(self) -> dict | None:
+        async with self.db.execute("SELECT * FROM briefs ORDER BY id DESC LIMIT 1") as cur:
+            r = await cur.fetchone()
+        if not r:
+            return None
+        return {"id": r["id"], "created_at": r["created_at"], "read": bool(r["read"]), **json.loads(r["json"])}
+
+    async def recent_briefs(self, n: int = 3) -> list[dict]:
+        async with self.db.execute("SELECT * FROM briefs ORDER BY id DESC LIMIT ?", (n,)) as cur:
+            rows = await cur.fetchall()
+        return [{"id": r["id"], "created_at": r["created_at"], **json.loads(r["json"])} for r in rows]
+
+    async def mark_brief_read(self, bid: int) -> None:
+        await self.db.execute("UPDATE briefs SET read=1 WHERE id=?", (bid,))
+        await self.db.commit()
+
+    async def unread_brief(self) -> bool:
+        async with self.db.execute("SELECT read FROM briefs ORDER BY id DESC LIMIT 1") as cur:
+            r = await cur.fetchone()
+        return bool(r) and not bool(r["read"])
+
+    # ---- chat ----
+    async def add_chat(self, role: str, content: str) -> int:
+        cur = await self.db.execute("INSERT INTO chat(role, content, created_at) VALUES(?,?,?)",
+                                    (role, content, iso(utcnow())))
+        await self.db.commit()
+        return cur.lastrowid
+
+    async def chat_history(self, limit: int = 50) -> list[dict]:
+        async with self.db.execute("SELECT * FROM chat ORDER BY id DESC LIMIT ?", (limit,)) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+    async def clear_chat(self) -> None:
+        await self.db.execute("DELETE FROM chat")
+        await self.db.commit()
