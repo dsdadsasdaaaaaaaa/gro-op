@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, Response
 from . import __version__
 from .advisor import Advisor, AdvisorError
 from .controller import Controller, light_window
-from .devices import ROLE_BY_NAME, ROLES, automap
+from .devices import ROLE_BY_NAME, ROLES, SWITCH_ROLES, automap
 from .models import (ChatRequest, DeviceMapUpdate, GrowProfile, GrowProfileUpdate, LogCreate, OverrideRequest,
                      PauseRequest, SettingsModel, SettingsUpdate, StageChange, TargetsUpdate, TaskCreate)
 from .store import Store, iso, utcnow
@@ -50,9 +50,14 @@ async def health(request: Request):
 
 # ------------------------------------------------------------------ status / history
 
-async def _assessment(controller: Controller, targets, sensor, paused, units: str = "c") -> dict:
+async def _assessment(controller: Controller, targets, sensor, paused, units: str = "c", standby: bool = False) -> dict:
     from .targets import c_to_f
     details, level = [], "good"
+    if standby:
+        det = []
+        if sensor.temp_c is not None and not sensor.stale:
+            det.append(f"Tent air {c_to_f(sensor.temp_c):g}°F, {sensor.humidity:g}% RH" if units == "f" else f"Tent air {sensor.temp_c:g}°C, {sensor.humidity:g}% RH")
+        return {"level": "standby", "headline": "Tent is off", "details": det + ["Start it when the seedling goes in"]}
     if not controller.ha_ok:
         return {"level": "alert", "headline": "Can't reach Home Assistant", "details": [controller.ha.last_error or "connection failed"]}
     dmap = await controller.store.get_device_map()
@@ -100,6 +105,7 @@ async def status(request: Request):
     light_is_on = light_dev["state"] == "on" if light_dev and light_dev["state"] in ("on", "off") else scheduled_on
     active_targets = day_targets if light_is_on else day_targets.for_night()
     paused = await c.paused_until()
+    standby = await c.standby()
     harvest = None
     if profile.get("flower_start_date"):
         try:
@@ -116,7 +122,8 @@ async def status(request: Request):
         "targets": active_targets.to_api(),
         "light": {"is_on": light_is_on, "next_change_at": iso(next_change), "schedule": _sched(day_targets.light_hours)},
         "devices": devices,
-        "assessment": await _assessment(c, active_targets, c.sensor, paused, settings.get("units", "c")),
+        "assessment": await _assessment(c, active_targets, c.sensor, paused, settings.get("units", "c"), standby),
+        "standby": standby,
         "open_tasks": len(await st.store.tasks("open")),
         "open_photo_requests": len(await st.store.photo_requests("open")),
         "unread_brief": await st.store.unread_brief(),
@@ -337,8 +344,40 @@ async def pause(body: PauseRequest, request: Request):
 async def resume(request: Request):
     st = request.app.state
     await st.store.del_kv("control_paused_until")
+    await st.store.set_kv("standby", False)
     await st.store.add_event("info", "system", "Automation resumed")
-    return {"control_paused_until": None}
+    return {"control_paused_until": None, "standby": False}
+
+
+@router.post("/control/standby", dependencies=auth)
+async def standby(request: Request):
+    """Tent off: every mapped device switches off and stays off until /control/start."""
+    st = request.app.state
+    await st.store.set_kv("standby", True)
+    await st.store.del_kv("control_paused_until")
+    dmap = await st.store.get_device_map()
+    for role in SWITCH_ROLES:
+        eid = dmap.get(role)
+        if eid:
+            await st.store.set_override(role, "auto", None)
+            if await st.controller.ha.turn(eid, False):
+                st.controller.states.setdefault(eid, {})["state"] = "off"
+                st.controller.last_switched[role] = utcnow()
+                st.controller.last_reasons[role] = "tent in standby"
+    await st.store.add_event("warn", "system", "Tent put in standby: all devices off until you start it")
+    return {"standby": True}
+
+
+@router.post("/control/start", dependencies=auth)
+async def start(request: Request):
+    """Back to fully automatic: clears standby, pause and every manual override."""
+    st = request.app.state
+    await st.store.set_kv("standby", False)
+    await st.store.del_kv("control_paused_until")
+    for role in SWITCH_ROLES:
+        await st.store.set_override(role, "auto", None)
+    await st.store.add_event("info", "system", "Tent started: automation fully on, manual overrides cleared")
+    return {"standby": False, "control_paused_until": None}
 
 
 # ------------------------------------------------------------------ log

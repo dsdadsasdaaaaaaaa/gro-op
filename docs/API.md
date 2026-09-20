@@ -214,5 +214,8 @@ Brief:
 }
 ```
 
-## POST /api/control/pause  Body `{"minutes": 30}` — pauses automatic control (all devices left as-is). POST /api/control/resume.
-Status includes `"control_paused_until": null | "..."`.
+## POST /api/control/pause  Body `{"minutes": 30}` — pauses automatic control (all devices left as-is). POST /api/control/resume (clears pause and standby, keeps overrides).
+## POST /api/control/standby → `{"standby": true}` — tent off: every device switches off and stays off. `assessment.level` becomes `"standby"`, headline "Tent is off".
+## POST /api/control/start → `{"standby": false}` — fully automatic again: clears standby, pause and all manual overrides.
+Status includes `"control_paused_until": null | "..."` and `"standby": true|false`.
+## GET /api/plan → the grow roadmap (phases with status done/current/upcoming, dates, what/watch_for/environment).

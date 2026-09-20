@@ -64,6 +64,8 @@ If you have a paid Apple Developer membership, `ios/scripts/testflight.sh` archi
 
 ## Day to day
 
+* **Tent off / Start**: the big switch on Home. Standby switches every device off and keeps it off (an empty tent while seeds germinate); Start puts everything back on automatic and clears manual overrides.
+* **Grow plan**: the roadmap card on Home opens a phase-by-phase timeline (germination → cup → veg → stretch → bulking → ripening → flush → dry → cure) with dates, what to do and what to watch for. The advisor follows the same plan.
 * **Home** – is everything green? Temperature / humidity / VPD with targets, lights countdown, every device with the reason it's on or off. Tap a device to force it on/off for an hour, or pause automation while you work in the tent.
 * **Advisor** – the morning brief (default 08:00) and a chat. "Should I flip to flower?", "leaves look droopy", "how much should I water?".
 * **Log** – tap pH / EC / Watered / Fed / Height / Note, enter the number, and the advisor tells you what it means and what to do next.

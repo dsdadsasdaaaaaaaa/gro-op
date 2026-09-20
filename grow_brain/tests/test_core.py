@@ -175,3 +175,14 @@ def test_plan_phases_and_anchoring():
     assert current_phase_key("flower", 55, True) == "flower_ripen"
     assert current_phase_key("done", 0, True) is None
     assert len(PHASES) == 9
+
+
+def test_standby_turns_everything_off_but_respects_overrides():
+    ctx = _ctx(30.0, 40.0)  # hot and dry: would normally run exhaust + cooler + humidifier
+    ctx.standby = True
+    d = decide(ctx)
+    assert all(dec.desired is False for dec in d.values())
+    assert d["light"].reason == "tent in standby"
+    ctx = _ctx(30.0, 40.0, overrides={"light": "on"})
+    ctx.standby = True
+    assert decide(ctx)["light"].desired is True  # a manual "on" still wins

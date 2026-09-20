@@ -88,6 +88,7 @@ class ControlContext:
     exhaust_ducted: bool
     paused: bool
     devices: dict[str, DeviceInput] = field(default_factory=dict)
+    standby: bool = False
 
 
 # ---------------------------------------------------------------- light schedule
@@ -121,6 +122,12 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
     def set_(role, desired, reason, force=False):
         if have(role):
             d[role] = Decision(role, desired, reason, force)
+
+    # --- standby: nothing planted, everything off; manual overrides still respected ---
+    if ctx.standby:
+        for role in ctx.devices:
+            set_(role, False, "tent in standby")
+        return _apply_overrides_and_pause(ctx, d)
 
     # --- light: schedule ---
     if ctx.stage in ("drying", "curing", "done"):
@@ -295,6 +302,9 @@ class Controller:
             base = apply_overrides(base, override.get("values", {}), override.get("source", "manual"))
         return base, day_in_stage, day_total
 
+    async def standby(self) -> bool:
+        return bool(await self.store.get_kv("standby", False))
+
     async def paused_until(self) -> Optional[str]:
         p = await self.store.get_kv("control_paused_until", None)
         if p and (parse_iso(p) or utcnow()) > utcnow():
@@ -330,7 +340,7 @@ class Controller:
             light_scheduled_on=scheduled_on, lights_on=lights_on, sensor=self.sensor,
             safety_temp_max_c=float(settings["safety_temp_max_c"]), safety_temp_min_c=float(settings["safety_temp_min_c"]),
             exhaust_ducted=bool(profile.get("exhaust_ducted")), paused=bool(await self.paused_until()),
-            devices=devices,
+            devices=devices, standby=await self.standby(),
         )
 
     def _read_sensors(self, dmap: dict[str, str]) -> SensorSnapshot:
@@ -430,6 +440,8 @@ class Controller:
 
     async def _report_safety(self, ctx: ControlContext, decisions: dict[str, Decision]) -> None:
         active = None
+        if ctx.standby:
+            return
         t = ctx.sensor.temp_c
         if t is not None and not ctx.sensor.stale:
             if t >= ctx.safety_temp_max_c:

@@ -95,6 +95,8 @@ class Advisor:
         paused = await self.controller.paused_until()
         if paused:
             lines.append(f"- Automation PAUSED until {paused}")
+        if await self.controller.standby():
+            lines.append("- TENT IN STANDBY: every device is off on purpose (nothing planted in it yet). Don't flag the environment as a problem; say what to prepare and when to start the tent.")
 
         lines += ["", "## Last 24 h"]
         lines.append(_summarise_readings(await self.store.readings_since(24), units))
