@@ -641,4 +641,10 @@ final class APIClient: @unchecked Sendable {
     }
 
     func resumeControl() async throws { try await sendIgnoringBody("POST", "/api/control/resume") }
+
+    /// Whole-tent OFF: every device off and kept off until `startTent()`.
+    func setStandby() async throws -> StandbyResponse { try await send("POST", "/api/control/standby") }
+
+    /// Back to fully automatic (also clears pause and manual overrides on the backend).
+    func startTent() async throws -> StandbyResponse { try await send("POST", "/api/control/start") }
 }

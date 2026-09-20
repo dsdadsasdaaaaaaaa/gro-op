@@ -37,7 +37,7 @@ struct PhotosView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 10) {
-                        Label("Send a photo", systemImage: "camera.viewfinder").font(.headline)
+                        Label("Send a photo", systemImage: "camera.viewfinder").font(.title3.weight(.semibold))
                         Text("Any photo of your plants — the advisor will check it over.")
                             .font(.subheadline).foregroundStyle(.secondary)
                         HStack(spacing: 10) {
@@ -65,9 +65,9 @@ struct PhotosView: View {
                         }
                     }
                 }
-                .padding()
+                .padding(Theme.spacing)
             }
-            .background(Color(.systemGroupedBackground))
+            .background(Color.bg.ignoresSafeArea())
             .navigationTitle("Photos")
             .navigationDestination(for: Int.self) { id in
                 if let p = app.photos.first(where: { $0.id == id }) {
@@ -145,22 +145,29 @@ struct PhotoRequestCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Image(systemName: "camera.badge.ellipsis").foregroundStyle(.blue)
-                Text(request.title ?? "Photo request").font(.headline)
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle().fill(Color.night.opacity(0.14))
+                    Image(systemName: "camera.fill").font(.system(size: 14, weight: .semibold)).foregroundStyle(Color.night)
+                }
+                .frame(width: 30, height: 30)
+                Text(request.title ?? "Photo request").font(.title3.weight(.semibold))
                 Spacer()
-                Text(Formatting.relative(request.createdAt)).font(.caption).foregroundStyle(.secondary)
+                Text(Formatting.relative(request.createdAt)).font(.caption).foregroundStyle(.tertiary)
             }
             if let i = request.instructions, !i.isEmpty {
-                Text(i)
-                    .font(.body)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.blue.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))
+                HStack(alignment: .top, spacing: 12) {
+                    RoundedRectangle(cornerRadius: 2).fill(Color.brand).frame(width: 4)
+                    Text(i)
+                        .font(.body)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.brand.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
             if let r = request.reason, !r.isEmpty {
-                Text("Why: \(r)").font(.footnote).foregroundStyle(.secondary)
+                Label(r, systemImage: "questionmark.circle").font(.footnote).foregroundStyle(.secondary)
             }
             HStack(spacing: 10) {
                 Button(action: onTake) { Label("Take photo", systemImage: "camera.fill") }
@@ -184,6 +191,12 @@ struct PhotoRequestCard: View {
 struct PhotoGridCell: View {
     let photo: Photo
 
+    private func scoreColor(_ s: Double) -> Color {
+        if s >= 8 { return .good }
+        if s >= 5 { return .warn }
+        return .alertRed
+    }
+
     var body: some View {
         ZStack(alignment: .bottomLeading) {
             PhotoThumbnail(photoID: photo.id)
@@ -191,12 +204,13 @@ struct PhotoGridCell: View {
             if let score = photo.analysis?.healthScore {
                 Text("\(Formatting.number(score))/10")
                     .font(.caption2.weight(.bold))
-                    .padding(.horizontal, 6).padding(.vertical, 3)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .padding(5)
+                    .foregroundStyle(Color.white)
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(scoreColor(score), in: Capsule())
+                    .padding(6)
             }
         }
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
@@ -229,7 +243,7 @@ struct PhotoSubmitSheet: View {
                         }
                         .padding()
                     }
-                    .background(Color(.systemGroupedBackground))
+                    .background(Color.bg.ignoresSafeArea())
                 } else {
                     form
                 }
@@ -269,7 +283,7 @@ struct PhotoSubmitSheet: View {
                     TextField("Anything the advisor should know about this photo", text: $note, axis: .vertical)
                         .lineLimit(2...5)
                         .padding(10)
-                        .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 10))
+                        .background(Color.track, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
                 .card()
 
@@ -281,7 +295,7 @@ struct PhotoSubmitSheet: View {
             .padding()
         }
         .scrollDismissesKeyboard(.interactively)
-        .background(Color(.systemGroupedBackground))
+        .background(Color.bg.ignoresSafeArea())
     }
 
     private func send() async {
@@ -302,9 +316,9 @@ struct PhotoAnalysisView: View {
     let analysis: PhotoAnalysis?
 
     private func scoreColor(_ s: Double) -> Color {
-        if s >= 8 { return .green }
-        if s >= 5 { return .orange }
-        return .red
+        if s >= 8 { return .good }
+        if s >= 5 { return .warn }
+        return .alertRed
     }
 
     var body: some View {
@@ -352,7 +366,7 @@ struct PhotoAnalysisView: View {
             if let actions = a.actions, !actions.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("What to do").font(.subheadline.weight(.semibold))
-                    BulletList(items: actions, symbol: "checkmark.circle.fill", color: .accentColor)
+                    NumberedList(items: actions, color: .brand)
                 }
                 .card()
             }
@@ -375,7 +389,7 @@ struct PhotoDetailView: View {
         ScrollView {
             VStack(spacing: 16) {
                 ZStack {
-                    Color(.tertiarySystemFill)
+                    Color.track
                     if let image {
                         Image(uiImage: image).resizable().scaledToFit()
                     } else {
@@ -390,7 +404,7 @@ struct PhotoDetailView: View {
                     Text(Formatting.shortDateTime(photo.createdAt)).font(.caption).foregroundStyle(.secondary)
                     Spacer()
                     if photo.requestId != nil {
-                        LevelChip(text: "Requested by advisor", color: .blue)
+                        LevelChip(text: "Requested by advisor", color: .night)
                     }
                 }
                 if let n = photo.note, !n.isEmpty {
@@ -401,7 +415,7 @@ struct PhotoDetailView: View {
             }
             .padding()
         }
-        .background(Color(.systemGroupedBackground))
+        .background(Color.bg.ignoresSafeArea())
         .navigationTitle("Photo")
         .navigationBarTitleDisplayMode(.inline)
         .task { image = await app.fullImage(for: photo.id) }

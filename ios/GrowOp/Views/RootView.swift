@@ -89,7 +89,7 @@ struct OnboardingView: View {
                 VStack(spacing: 24) {
                     Image(systemName: "leaf.circle.fill")
                         .font(.system(size: 80))
-                        .foregroundStyle(Color.accentColor)
+                        .foregroundStyle(Color.brand)
                         .padding(.top, 40)
 
                     VStack(spacing: 8) {
@@ -140,7 +140,7 @@ struct OnboardingView: View {
                     if let errorText {
                         Label(errorText, systemImage: "exclamationmark.triangle.fill")
                             .font(.subheadline)
-                            .foregroundStyle(.red)
+                            .foregroundStyle(Color.alertRed)
                             .multilineTextAlignment(.leading)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal)
@@ -161,7 +161,7 @@ struct OnboardingView: View {
                 }
             }
             .scrollDismissesKeyboard(.interactively)
-            .background(Color(.systemGroupedBackground))
+            .background(Color.bg.ignoresSafeArea())
         }
     }
 

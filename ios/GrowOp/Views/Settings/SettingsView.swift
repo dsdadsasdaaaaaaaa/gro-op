@@ -90,6 +90,9 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
+            .scrollContentBackground(.hidden)
+            .background(Color.bg.ignoresSafeArea())
+            .tint(Color.brand)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }
@@ -243,13 +246,13 @@ struct SettingsView: View {
                     Spacer()
                     if let ok = testOK {
                         Image(systemName: ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                            .foregroundStyle(ok ? .green : .red)
+                            .foregroundStyle(ok ? Color.good : Color.alertRed)
                     }
                 }
             }
             .disabled(testing || !candidate.isConfigured)
             if let testResult {
-                Text(testResult).font(.footnote).foregroundStyle(testOK == true ? Color.secondary : Color.red)
+                Text(testResult).font(.footnote).foregroundStyle(testOK == true ? Color.secondary : Color.alertRed)
             }
             if serverChanged {
                 Button("Save and connect") { Task { await saveServer() } }

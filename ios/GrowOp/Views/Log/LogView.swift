@@ -18,23 +18,23 @@ enum LogKind: String, CaseIterable, Identifiable {
 
     var symbol: String {
         switch self {
-        case .ph: return "drop.fill"
-        case .ec: return "bolt.fill"
-        case .water: return "cloud.rain.fill"
-        case .feed: return "fork.knife"
-        case .height: return "ruler.fill"
+        case .ph: return "drop.circle.fill"
+        case .ec: return "bolt.circle.fill"
+        case .water: return "drop.triangle.fill"
+        case .feed: return "fork.knife.circle.fill"
+        case .height: return "arrow.up.and.down.circle.fill"
         case .note: return "text.bubble.fill"
         }
     }
 
     var color: Color {
         switch self {
-        case .ph: return .blue
-        case .ec: return .orange
-        case .water: return .cyan
-        case .feed: return .brown
-        case .height: return .green
-        case .note: return .purple
+        case .ph: return .night
+        case .ec: return .warn
+        case .water: return .brand
+        case .feed: return .good
+        case .height: return .leaf
+        case .note: return .secondary
         }
     }
 
@@ -58,13 +58,20 @@ struct LogView: View {
                     LazyVGrid(columns: columns, spacing: 12) {
                         ForEach(LogKind.allCases) { kind in
                             Button { selectedKind = kind } label: {
-                                VStack(spacing: 8) {
-                                    Image(systemName: kind.symbol).font(.system(size: 28))
-                                    Text(kind.title).font(.headline)
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Image(systemName: kind.symbol)
+                                        .font(.system(size: 30, weight: .semibold))
+                                        .foregroundStyle(kind.color)
+                                    Text(kind.title).font(.headline).foregroundStyle(.primary)
                                 }
-                                .frame(maxWidth: .infinity, minHeight: 90)
-                                .foregroundStyle(kind.color)
-                                .background(kind.color.opacity(0.14), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
+                                .padding(16)
+                                .background(Color.card, in: RoundedRectangle(cornerRadius: Theme.radius, style: .continuous))
+                                .overlay(alignment: .topTrailing) {
+                                    Circle().fill(kind.color.opacity(0.14)).frame(width: 44, height: 44).offset(x: 10, y: -10)
+                                }
+                                .clipShape(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous))
+                                .softShadow()
                             }
                             .buttonStyle(.plain)
                         }
@@ -82,9 +89,9 @@ struct LogView: View {
                     }
                     .card()
                 }
-                .padding()
+                .padding(Theme.spacing)
             }
-            .background(Color(.systemGroupedBackground))
+            .background(Color.bg.ignoresSafeArea())
             .navigationTitle("Log")
             .refreshable { await app.loadLog() }
             .task { await app.loadLog() }
@@ -103,7 +110,7 @@ struct LogEntryRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: kind?.symbol ?? "circle.fill")
-                .foregroundStyle(kind?.color ?? .gray)
+                .foregroundStyle(kind?.color ?? .secondary)
                 .frame(width: 26)
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
@@ -240,6 +247,8 @@ struct LogEntrySheet: View {
                 .listRowBackground(Color.clear)
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(Color.bg.ignoresSafeArea())
         .onAppear { valueFocused = kind != .note }
     }
 
@@ -309,29 +318,32 @@ struct AdviceResultView: View {
     var onDone: () -> Void
 
     var body: some View {
+        let advice = result.advice
+        let urgency = advice?.urgency ?? "info"
+        let color = LevelColor.infoColor(for: urgency)
         ScrollView {
-            VStack(spacing: 16) {
-                let advice = result.advice
-                let urgency = advice?.urgency ?? "info"
-                let color = LevelColor.infoColor(for: urgency)
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Image(systemName: LevelColor.symbol(for: urgency)).foregroundStyle(color)
-                        Text(urgencyTitle(urgency)).font(.headline).foregroundStyle(color)
+            VStack(spacing: Theme.spacing) {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 10) {
+                        Image(systemName: LevelColor.symbol(for: urgency)).font(.title2)
+                        Text(urgencyTitle(urgency)).font(.title3.bold())
                         Spacer()
                     }
+                    .foregroundStyle(Color.white)
                     if let s = advice?.summary, !s.isEmpty {
-                        Text(s).font(.body).fixedSize(horizontal: false, vertical: true)
+                        Text(s).font(.body).foregroundStyle(Color.white.opacity(0.95)).fixedSize(horizontal: false, vertical: true)
                     } else {
-                        Text("Logged. No specific advice this time.").foregroundStyle(.secondary)
+                        Text("Logged. No specific advice this time.").foregroundStyle(Color.white.opacity(0.9))
                     }
                 }
-                .card()
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(color, in: RoundedRectangle(cornerRadius: Theme.radius, style: .continuous))
 
                 if let steps = advice?.steps, !steps.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Next steps").font(.subheadline.weight(.semibold))
-                        BulletList(items: steps, symbol: "arrow.right.circle.fill", color: color)
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Next steps").font(.headline)
+                        NumberedList(items: steps, color: color)
                     }
                     .card()
                 }
@@ -341,9 +353,9 @@ struct AdviceResultView: View {
                 Button("Done", action: onDone)
                     .buttonStyle(BigButtonStyle())
             }
-            .padding()
+            .padding(Theme.spacing)
         }
-        .background(Color(.systemGroupedBackground))
+        .background(Color.bg.ignoresSafeArea())
     }
 
     private func urgencyTitle(_ u: String) -> String {

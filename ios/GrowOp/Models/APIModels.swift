@@ -188,12 +188,19 @@ struct DeviceStatus: Codable, Identifiable {
     var isOn: Bool { state == "on" }
 }
 
+/// Known assessment levels. Unknown strings decode as `.warn` so a newer backend never crashes the app.
+enum AssessmentLevel: String {
+    case good, warn, alert, standby
+}
+
 struct Assessment: Codable {
     var level: String?
     var headline: String?
     var details: [String]?
 
     enum CodingKeys: String, CodingKey { case level, headline, details }
+
+    var levelValue: AssessmentLevel { AssessmentLevel(rawValue: (level ?? "").lowercased()) ?? .warn }
 }
 
 struct AlertItem: Codable, Identifiable {
@@ -217,9 +224,10 @@ struct StatusResponse: Codable {
     var unreadBrief: Bool?
     var alerts: [AlertItem]?
     var controlPausedUntil: String?
+    var standby: Bool?
 
     enum CodingKeys: String, CodingKey {
-        case time, sensor, grow, targets, light, devices, assessment, alerts
+        case time, sensor, grow, targets, light, devices, assessment, alerts, standby
         case haConnected = "ha_connected"
         case openTasks = "open_tasks"
         case openPhotoRequests = "open_photo_requests"
@@ -572,6 +580,15 @@ struct Settings: Codable {
 
 struct PauseRequest: Codable {
     var minutes: Int
+}
+
+struct StandbyResponse: Codable {
+    var standby: Bool?
+    var controlPausedUntil: String?
+    enum CodingKeys: String, CodingKey {
+        case standby
+        case controlPausedUntil = "control_paused_until"
+    }
 }
 
 // MARK: Grow plan (GET /api/plan)

@@ -22,7 +22,9 @@ final class AppState {
     var settings: Settings?
     var brief: Brief?
     var plan: GrowPlan?
+    var history: [HistoryPoint] = []
     @ObservationIgnored private var lastPlanAt: Date?
+    @ObservationIgnored private var lastHistoryAt: Date?
     var chatMessages: [ChatMessage] = []
     var logEntries: [LogEntry] = []
     var openPhotoRequests: [PhotoRequest] = []
@@ -90,6 +92,8 @@ final class AppState {
         brief = nil
         plan = nil
         lastPlanAt = nil
+        history = []
+        lastHistoryAt = nil
         chatMessages = []
         logEntries = []
         openPhotoRequests = []
@@ -134,8 +138,21 @@ final class AppState {
             if plan == nil || growChanged || stale {
                 await loadPlan()
             }
+            let historyStale = lastHistoryAt.map { Date().timeIntervalSince($0) > 300 } ?? true
+            if historyStale { await loadHistory() }
         } catch {
             statusError = error.localizedDescription
+        }
+    }
+
+    // MARK: History (24 h sparklines)
+
+    func loadHistory(force: Bool = false) async {
+        guard isConfigured else { return }
+        if !force, let t = lastHistoryAt, Date().timeIntervalSince(t) < 60 { return }
+        if let h = try? await client.history(hours: 24) {
+            history = (h.points ?? []).sorted { ($0.t ?? "") < ($1.t ?? "") }
+            lastHistoryAt = Date()
         }
     }
 
@@ -330,13 +347,29 @@ final class AppState {
 
     // MARK: Devices / control
 
-    func setOverride(role: String, mode: String) async throws {
-        let minutes: Int? = (mode == "auto") ? nil : 60
+    var isStandby: Bool { status?.standby == true }
+
+    /// `minutes` nil = until changed back to auto (ignored for "auto").
+    func setOverride(role: String, mode: String, minutes: Int? = 60) async throws {
+        let minutes: Int? = (mode == "auto") ? nil : minutes
         let updated = try await client.overrideDevice(role: role, mode: mode, minutes: minutes)
         if var devs = status?.devices, let i = devs.firstIndex(where: { $0.role == role }) {
             devs[i] = updated
             status?.devices = devs
         }
+    }
+
+    func setStandby() async throws {
+        let r = try await client.setStandby()
+        status?.standby = r.standby ?? true
+        await refreshStatus()
+    }
+
+    func startTent() async throws {
+        let r = try await client.startTent()
+        status?.standby = r.standby ?? false
+        status?.controlPausedUntil = nil
+        await refreshStatus()
     }
 
     func pauseControl(minutes: Int = 30) async throws {

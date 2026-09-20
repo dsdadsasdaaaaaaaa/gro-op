@@ -17,78 +17,31 @@ extension View {
     }
 }
 
-// MARK: - Colors for levels / severities
-
-enum LevelColor {
-    static func color(for level: String?) -> Color {
-        switch (level ?? "").lowercased() {
-        case "good", "ok", "info": return .green
-        case "warn", "warning", "attention": return .orange
-        case "alert", "urgent", "error": return .red
-        default: return .gray
-        }
-    }
-
-    static func infoColor(for level: String?) -> Color {
-        // For finding severities / urgencies where "info" is neutral rather than good.
-        switch (level ?? "").lowercased() {
-        case "info": return .blue
-        case "warn", "warning", "attention": return .orange
-        case "alert", "urgent", "error": return .red
-        default: return .gray
-        }
-    }
-
-    static func symbol(for level: String?) -> String {
-        switch (level ?? "").lowercased() {
-        case "good", "ok": return "checkmark.circle.fill"
-        case "warn", "warning", "attention": return "exclamationmark.triangle.fill"
-        case "alert", "urgent", "error": return "exclamationmark.octagon.fill"
-        default: return "info.circle.fill"
-        }
-    }
-}
-
-// MARK: - Card container
-
-struct CardBackground: ViewModifier {
-    func body(content: Content) -> some View {
-        content
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-}
-
-extension View {
-    func card() -> some View { modifier(CardBackground()) }
-}
+// MARK: - Section title
 
 struct SectionTitle: View {
     let text: String
     var body: some View {
         Text(text)
             .font(.headline)
-            .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
-// MARK: - Bullet list
+// MARK: - Lists
 
 struct BulletList: View {
     let items: [String]
     var symbol: String = "circle.fill"
-    var color: Color = .accentColor
+    var color: Color = .brand
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Image(systemName: symbol)
-                        .font(.system(size: symbol == "circle.fill" ? 7 : 14))
+                        .font(.system(size: symbol == "circle.fill" ? 7 : 15))
                         .foregroundStyle(color)
-                        .padding(.top, symbol == "circle.fill" ? 2 : 0)
                     Text(item)
                         .font(.body)
                         .fixedSize(horizontal: false, vertical: true)
@@ -98,19 +51,23 @@ struct BulletList: View {
     }
 }
 
-// MARK: - Big action button
+/// Numbered steps with check circles.
+struct NumberedList: View {
+    let items: [String]
+    var color: Color = .brand
 
-struct BigButtonStyle: ButtonStyle {
-    var color: Color = .accentColor
-    var filled: Bool = true
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.headline)
-            .frame(maxWidth: .infinity, minHeight: 50)
-            .foregroundStyle(filled ? Color.white : color)
-            .background(filled ? color : color.opacity(0.15), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .opacity(configuration.isPressed ? 0.7 : 1)
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(Array(items.enumerated()), id: \.offset) { idx, item in
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    ZStack {
+                        Circle().stroke(color, lineWidth: 1.5).frame(width: 26, height: 26)
+                        Text("\(idx + 1)").font(.caption.weight(.bold)).foregroundStyle(color)
+                    }
+                    Text(item).font(.body).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
     }
 }
 
@@ -121,51 +78,46 @@ struct CreatedItemsView: View {
     var photoRequests: [PhotoRequest]?
 
     var body: some View {
-        if let tasks, !tasks.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                Label("Added to your tasks", systemImage: "checklist")
-                    .font(.subheadline.weight(.semibold))
-                ForEach(tasks) { t in
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: "circle").foregroundStyle(.secondary)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(t.title ?? "Task")
-                            if let due = t.due, !due.isEmpty {
-                                Text("Due \(Formatting.friendlyDay(due))").font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
+        let t = tasks ?? []
+        let r = photoRequests ?? []
+        if !t.isEmpty || !r.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Added for you").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                FlowChips {
+                    ForEach(t) { task in
+                        PillChip(text: task.title ?? "Task", symbol: "checklist", tint: .brand)
+                    }
+                    ForEach(r) { req in
+                        PillChip(text: req.title ?? "Photo", symbol: "camera.fill", tint: .night)
                     }
                 }
-            }
-            .card()
-        }
-        if let reqs = photoRequests, !reqs.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                Label("The advisor would like a photo", systemImage: "camera")
-                    .font(.subheadline.weight(.semibold))
-                ForEach(reqs) { r in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(r.title ?? "Photo").fontWeight(.medium)
-                        if let i = r.instructions, !i.isEmpty {
-                            Text(i).font(.subheadline).foregroundStyle(.secondary)
-                        }
-                    }
+                if !r.isEmpty {
+                    Text("Photo requests are waiting in the Photos tab.").font(.caption).foregroundStyle(.secondary)
                 }
-                Text("Find it in the Photos tab.").font(.caption).foregroundStyle(.secondary)
             }
             .card()
         }
     }
 }
 
-// MARK: - Loading overlay
+/// Simple wrapping chip container.
+struct FlowChips<Content: View>: View {
+    @ViewBuilder var content: Content
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) { content }
+        }
+    }
+}
+
+// MARK: - Loading / empty
 
 struct WorkingView: View {
     var title: String
     var subtitle: String? = nil
     var body: some View {
         VStack(spacing: 14) {
-            ProgressView().controlSize(.large)
+            ProgressView().controlSize(.large).tint(.brand)
             Text(title).font(.headline)
             if let subtitle {
                 Text(subtitle).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
@@ -176,16 +128,17 @@ struct WorkingView: View {
     }
 }
 
-// MARK: - Empty state
-
 struct EmptyStateView: View {
     var symbol: String
     var title: String
     var message: String
     var body: some View {
-        VStack(spacing: 10) {
-            Image(systemName: symbol).font(.system(size: 40)).foregroundStyle(.secondary)
-            Text(title).font(.headline)
+        VStack(spacing: 12) {
+            ZStack {
+                Circle().fill(Color.brand.opacity(0.10)).frame(width: 84, height: 84)
+                Image(systemName: symbol).font(.system(size: 36, weight: .medium)).foregroundStyle(Color.brand)
+            }
+            Text(title).font(.title3.weight(.semibold))
             Text(message).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
@@ -203,7 +156,7 @@ struct PhotoThumbnail: View {
 
     var body: some View {
         ZStack {
-            Color(.tertiarySystemFill)
+            Color.track
             if let image {
                 Image(uiImage: image).resizable().scaledToFill()
             } else if failed {
@@ -217,19 +170,5 @@ struct PhotoThumbnail: View {
             image = await app.thumbnail(for: photoID)
             if image == nil { failed = true }
         }
-    }
-}
-
-// MARK: - Score / level chip
-
-struct LevelChip: View {
-    var text: String
-    var color: Color
-    var body: some View {
-        Text(text)
-            .font(.caption.weight(.semibold))
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(color.opacity(0.18), in: Capsule())
-            .foregroundStyle(color)
     }
 }

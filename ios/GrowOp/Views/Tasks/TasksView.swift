@@ -8,47 +8,60 @@ struct TasksView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
+            ScrollView {
+                VStack(alignment: .leading, spacing: Theme.spacing) {
                     if app.openTasks.isEmpty {
-                        EmptyStateView(symbol: "checkmark.seal", title: "Nothing to do", message: "The advisor will add tasks here when something needs doing.")
-                            .listRowBackground(Color.clear)
-                    }
-                    ForEach(app.openTasks) { t in
-                        TaskRow(task: t) {
-                            do { try await app.completeTask(t) }
-                            catch { alert = AlertMessage(message: error.localizedDescription) }
+                        EmptyStateView(symbol: "checkmark.seal.fill", title: "Nothing to do",
+                                       message: "The advisor adds tasks here when something needs doing. You can add your own with +.")
+                            .card()
+                    } else {
+                        VStack(spacing: 10) {
+                            ForEach(app.openTasks) { t in
+                                TaskRow(task: t) {
+                                    do { try await app.completeTask(t) }
+                                    catch { alert = AlertMessage(message: error.localizedDescription) }
+                                }
+                            }
                         }
                     }
-                } header: {
-                    Text("To do")
-                }
 
-                if showDone {
-                    Section("Done") {
-                        if app.doneTasks.isEmpty {
-                            Text("No completed tasks yet.").foregroundStyle(.secondary)
+                    Button {
+                        withAnimation(.snappy) { showDone.toggle() }
+                        if showDone { Task { await app.loadTasks(includeDone: true) } }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(showDone ? "Hide done" : "Show done")
+                            Image(systemName: "chevron.down").rotationEffect(.degrees(showDone ? 180 : 0))
                         }
-                        ForEach(app.doneTasks) { t in
-                            TaskRow(task: t) {
-                                do { try await app.reopenTask(t) }
-                                catch { alert = AlertMessage(message: error.localizedDescription) }
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    }
+                    .padding(.top, 4)
+
+                    if showDone {
+                        if app.doneTasks.isEmpty {
+                            Text("No completed tasks yet.").font(.subheadline).foregroundStyle(.secondary)
+                        }
+                        VStack(spacing: 10) {
+                            ForEach(app.doneTasks) { t in
+                                TaskRow(task: t) {
+                                    do { try await app.reopenTask(t) }
+                                    catch { alert = AlertMessage(message: error.localizedDescription) }
+                                }
                             }
                         }
                     }
                 }
+                .padding(Theme.spacing)
             }
+            .background(Color.bg.ignoresSafeArea())
             .navigationTitle("Tasks")
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button(showDone ? "Hide done" : "Show done") {
-                        showDone.toggle()
-                        if showDone { Task { await app.loadTasks(includeDone: true) } }
-                    }
-                }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button { showAdd = true } label: { Image(systemName: "plus") }
-                        .accessibilityLabel("Add task")
+                    Button { showAdd = true } label: {
+                        Image(systemName: "plus.circle.fill").font(.title3).foregroundStyle(Color.brand)
+                    }
+                    .accessibilityLabel("Add task")
                 }
             }
             .refreshable { await app.loadTasks(includeDone: showDone) }
@@ -63,11 +76,17 @@ struct TaskRow: View {
     let task: TaskItem
     var onToggle: () async -> Void
     @State private var busy = false
+    @State private var justTapped = false
+
+    private var overdue: Bool {
+        guard let d = Formatting.parseDay(task.due), !task.isDone else { return false }
+        return d < Calendar.current.startOfDay(for: Date())
+    }
 
     private var dueColor: Color {
         guard let d = Formatting.parseDay(task.due), !task.isDone else { return .secondary }
-        if d < Calendar.current.startOfDay(for: Date()) { return .red }
-        if Calendar.current.isDateInToday(d) { return .orange }
+        if overdue { return .alertRed }
+        if Calendar.current.isDateInToday(d) { return .warn }
         return .secondary
     }
 
@@ -76,55 +95,70 @@ struct TaskRow: View {
         guard let d = Formatting.parseDay(due) else { return due }
         if Calendar.current.isDateInToday(d) { return "Today" }
         if Calendar.current.isDateInTomorrow(d) { return "Tomorrow" }
-        if d < Calendar.current.startOfDay(for: Date()) { return "Overdue · \(d.formatted(date: .abbreviated, time: .omitted))" }
+        if overdue { return "Overdue · \(d.formatted(date: .abbreviated, time: .omitted))" }
         return d.formatted(date: .abbreviated, time: .omitted)
     }
 
     var body: some View {
         Button {
+            justTapped = true
             Task {
                 busy = true
                 await onToggle()
                 busy = false
+                justTapped = false
             }
         } label: {
-            HStack(alignment: .top, spacing: 12) {
-                if busy {
-                    ProgressView().frame(width: 28, height: 28)
-                } else {
-                    Image(systemName: task.isDone ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 28))
-                        .foregroundStyle(task.isDone ? Color.accentColor : (task.isHigh ? .red : .secondary))
-                }
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(task.title ?? "Task")
-                            .font(.body.weight(task.isHigh && !task.isDone ? .semibold : .regular))
-                            .strikethrough(task.isDone)
-                            .foregroundStyle(task.isDone ? .secondary : .primary)
-                        if task.isHigh && !task.isDone {
-                            LevelChip(text: "High", color: .red)
-                        }
+            HStack(alignment: .top, spacing: 14) {
+                ZStack {
+                    if busy {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: task.isDone || justTapped ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 32, weight: .regular))
+                            .foregroundStyle(task.isDone || justTapped ? Color.brand : (task.isHigh ? Color.alertRed : Color.secondary.opacity(0.5)))
+                            .symbolEffect(.bounce, value: justTapped)
+                            .contentTransition(.symbolEffect(.replace))
                     }
+                }
+                .frame(width: 32, height: 32)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(task.title ?? "Task")
+                        .font(.body.weight(task.isHigh && !task.isDone ? .semibold : .regular))
+                        .strikethrough(task.isDone)
+                        .foregroundStyle(task.isDone ? .secondary : .primary)
+                        .fixedSize(horizontal: false, vertical: true)
                     if let d = task.detail, !d.isEmpty {
-                        Text(d).font(.subheadline).foregroundStyle(.secondary)
+                        Text(d).font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                     HStack(spacing: 8) {
                         if !dueText.isEmpty {
-                            Label(dueText, systemImage: "calendar").font(.caption).foregroundStyle(dueColor)
+                            LevelChip(text: dueText, color: dueColor)
+                        }
+                        if task.isHigh && !task.isDone {
+                            LevelChip(text: "High priority", color: .alertRed)
                         }
                         if task.createdBy == "advisor" {
-                            Label("Advisor", systemImage: "sparkles").font(.caption).foregroundStyle(.purple)
+                            Label("Advisor", systemImage: "sparkles").font(.caption).foregroundStyle(Color.night)
                         }
                     }
                 }
-                Spacer()
+                Spacer(minLength: 0)
             }
-            .padding(.vertical, 4)
+            .padding(16)
+            .padding(.leading, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.card, in: RoundedRectangle(cornerRadius: Theme.radius, style: .continuous))
+            .overlay(alignment: .leading) {
+                if task.isHigh && !task.isDone {
+                    RoundedRectangle(cornerRadius: 2).fill(Color.alertRed).frame(width: 4).padding(.vertical, 14).padding(.leading, 6)
+                }
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(busy)
+        .opacity(task.isDone ? 0.7 : 1)
     }
 }
 
@@ -152,6 +186,8 @@ struct AddTaskSheet: View {
                     }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(Color.bg.ignoresSafeArea())
             .navigationTitle("New task")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

@@ -29,30 +29,28 @@ struct GrowPlanCard: View {
     let plan: GrowPlan?
     let growStartDate: String?
 
-    private var missingStartDate: Bool {
-        (plan?.startDate ?? growStartDate) == nil
-    }
+    private var missingStartDate: Bool { (plan?.startDate ?? growStartDate) == nil }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Label("Grow plan", systemImage: "map.fill")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
             }
 
             if let plan {
                 if let cur = plan.current {
-                    Text(cur.displayTitle).font(.headline)
+                    Text(cur.displayTitle).font(.title3.weight(.semibold))
                     if let s = cur.subtitle, !s.isEmpty {
                         Text(s).font(.subheadline).foregroundStyle(.secondary)
                     }
                 } else if plan.allDone {
-                    Text("All phases complete").font(.headline)
+                    Text("All phases complete").font(.title3.weight(.semibold))
                 } else {
-                    Text("Plan ready").font(.headline)
+                    Text("Plan ready").font(.title3.weight(.semibold))
                 }
 
                 if !plan.orderedPhases.isEmpty {
@@ -61,7 +59,7 @@ struct GrowPlanCard: View {
 
                 if missingStartDate {
                     Label("Set your start date in Settings → Grow", systemImage: "calendar.badge.exclamationmark")
-                        .font(.footnote).foregroundStyle(.orange)
+                        .font(.footnote.weight(.medium)).foregroundStyle(Color.warn)
                 } else if let next = plan.next {
                     if let date = Formatting.monthDay(next.startDate) {
                         Text("Next: \(next.displayTitle) · \(date)").font(.footnote).foregroundStyle(.secondary)
@@ -78,14 +76,14 @@ struct GrowPlanCard: View {
     }
 }
 
-/// Thin segmented strip: done = green, current = accent with a dot, upcoming = grey.
+/// Thin segmented strip: done = Primary, current = Leaf with a dot, upcoming = track.
 struct PhaseProgressStrip: View {
     let phases: [PlanPhase]
 
     private func color(_ p: PlanPhase) -> Color {
-        if p.isDone { return .green }
-        if p.isCurrent { return .accentColor }
-        return Color(.systemGray4)
+        if p.isDone { return .brand }
+        if p.isCurrent { return .leaf }
+        return .track
     }
 
     var body: some View {
@@ -95,9 +93,9 @@ struct PhaseProgressStrip: View {
                     Capsule().fill(color(p)).frame(height: 6)
                     if p.isCurrent {
                         Circle()
-                            .fill(Color.accentColor)
+                            .fill(Color.brand)
                             .frame(width: 12, height: 12)
-                            .overlay(Circle().stroke(Color(.secondarySystemGroupedBackground), lineWidth: 2))
+                            .overlay(Circle().stroke(Color.card, lineWidth: 2))
                     }
                 }
                 .frame(maxWidth: .infinity)
@@ -118,7 +116,7 @@ struct PlanView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 16) {
                 if let plan = app.plan {
                     header(plan)
                     let phases = plan.orderedPhases
@@ -142,9 +140,9 @@ struct PlanView: View {
                     EmptyStateView(symbol: "map", title: "Plan not available", message: "Couldn't load the grow plan. Pull down to try again.")
                 }
             }
-            .padding()
+            .padding(Theme.spacing)
         }
-        .background(Color(.systemGroupedBackground))
+        .background(Color.bg.ignoresSafeArea())
         .navigationTitle("Grow plan")
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await app.loadPlan() }
@@ -167,23 +165,27 @@ struct PlanView: View {
 
     @ViewBuilder
     private func header(_ plan: GrowPlan) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let start = Formatting.parseDay(plan.startDate) {
-                HStack {
-                    Label("Started \(start.formatted(date: .abbreviated, time: .omitted))", systemImage: "calendar")
-                    Spacer()
-                    if let d = plan.dayTotal { Text("Day \(d)").font(.headline) }
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                if let d = plan.dayTotal {
+                    Text("Day \(d)").font(.hero(40))
                 }
-                .font(.subheadline)
-            } else {
+                Spacer()
+                if let start = Formatting.parseDay(plan.startDate) {
+                    Label("Started \(start.formatted(date: .abbreviated, time: .omitted))", systemImage: "calendar")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+            }
+            if plan.startDate == nil {
                 Label("Set your start date in Settings → Grow to see dates on this plan.", systemImage: "calendar.badge.exclamationmark")
-                    .font(.subheadline).foregroundStyle(.orange)
+                    .font(.subheadline.weight(.medium)).foregroundStyle(Color.warn)
             }
             if let cur = plan.current {
                 Text("You're in **\(cur.displayTitle)**.").font(.subheadline).foregroundStyle(.secondary)
             } else if plan.allDone {
                 Text("This grow is finished. Nice work.").font(.subheadline).foregroundStyle(.secondary)
             }
+            PhaseProgressStrip(phases: plan.orderedPhases)
         }
         .card()
     }
@@ -195,7 +197,7 @@ struct PlanPhaseRow: View {
     let isExpanded: Bool
     var onTap: () -> Void
 
-    private var lineColor: Color { phase.isDone ? .green : Color(.systemGray4) }
+    private var lineColor: Color { phase.isDone ? .brand : .track }
 
     private var chipText: String {
         if phase.isDone { return "Done" }
@@ -204,35 +206,28 @@ struct PlanPhaseRow: View {
     }
 
     private var chipColor: Color {
-        if phase.isDone { return .green }
-        if phase.isCurrent { return .accentColor }
-        return .gray
+        if phase.isDone { return .brand }
+        if phase.isCurrent { return .leaf }
+        return .secondary
     }
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            // Timeline spine
             VStack(spacing: 0) {
-                statusIcon
-                    .frame(width: 28, height: 28)
+                statusIcon.frame(width: 28, height: 28)
                 if !isLast {
-                    Rectangle()
-                        .fill(lineColor)
-                        .frame(width: 2)
-                        .frame(maxHeight: .infinity)
-                        .padding(.vertical, 2)
+                    Rectangle().fill(lineColor).frame(width: 2).frame(maxHeight: .infinity).padding(.vertical, 2)
                 }
             }
             .frame(width: 28)
 
-            // Content
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .firstTextBaseline) {
                     Text(phase.displayTitle)
                         .font(.headline)
                         .foregroundStyle(phase.isUpcoming ? .secondary : .primary)
                     Spacer()
-                    LevelChip(text: chipText, color: chipColor)
+                    LevelChip(text: chipText, color: phase.isCurrent ? .brand : chipColor)
                     Image(systemName: "chevron.down")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.tertiary)
@@ -249,15 +244,15 @@ struct PlanPhaseRow: View {
                 if isExpanded {
                     if let what = phase.what, !what.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("What you do").font(.subheadline.weight(.semibold)).foregroundStyle(Color.accentColor)
-                            BulletList(items: what, symbol: "checkmark.circle.fill", color: .accentColor)
+                            Text("What you do").font(.subheadline.weight(.semibold)).foregroundStyle(Color.brand)
+                            BulletList(items: what, symbol: "checkmark.circle.fill", color: .brand)
                         }
                         .padding(.top, 4)
                     }
                     if let watch = phase.watchFor, !watch.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("Watch for").font(.subheadline.weight(.semibold)).foregroundStyle(.orange)
-                            BulletList(items: watch, symbol: "eye.fill", color: .orange)
+                            Text("Watch for").font(.subheadline.weight(.semibold)).foregroundStyle(Color.warn)
+                            BulletList(items: watch, symbol: "eye.fill", color: .warn)
                         }
                         .padding(.top, 4)
                     }
@@ -265,8 +260,8 @@ struct PlanPhaseRow: View {
                         Label(env, systemImage: "thermometer.medium")
                             .font(.caption.weight(.medium))
                             .padding(.horizontal, 10).padding(.vertical, 6)
-                            .background(Color.accentColor.opacity(0.12), in: Capsule())
-                            .foregroundStyle(Color.accentColor)
+                            .background(Color.brand.opacity(0.12), in: Capsule())
+                            .foregroundStyle(Color.brand)
                             .padding(.top, 2)
                     }
                 }
@@ -274,7 +269,7 @@ struct PlanPhaseRow: View {
             .card()
             .contentShape(Rectangle())
             .onTapGesture(perform: onTap)
-            .padding(.bottom, isLast ? 0 : 10)
+            .padding(.bottom, isLast ? 0 : 12)
         }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
@@ -284,18 +279,12 @@ struct PlanPhaseRow: View {
     @ViewBuilder
     private var statusIcon: some View {
         if phase.isDone {
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 26))
-                .foregroundStyle(.green)
+            Image(systemName: "checkmark.circle.fill").font(.system(size: 26)).foregroundStyle(Color.brand)
         } else if phase.isCurrent {
-            Image(systemName: "circle.circle.fill")
-                .font(.system(size: 26))
-                .foregroundStyle(Color.accentColor)
+            Image(systemName: "circle.circle.fill").font(.system(size: 26)).foregroundStyle(Color.leaf)
                 .symbolEffect(.pulse, options: .repeating)
         } else {
-            Image(systemName: "circle")
-                .font(.system(size: 26))
-                .foregroundStyle(Color(.systemGray3))
+            Image(systemName: "circle").font(.system(size: 26)).foregroundStyle(Color.track)
         }
     }
 }
