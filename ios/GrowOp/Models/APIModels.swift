@@ -574,6 +574,72 @@ struct PauseRequest: Codable {
     var minutes: Int
 }
 
+// MARK: Grow plan (GET /api/plan)
+
+struct PlanPhase: Codable, Identifiable {
+    var key: String
+    var title: String?
+    var subtitle: String?
+    var startDay: Int?
+    var endDay: Int?
+    var startDate: String?
+    var endDate: String?
+    var status: String?
+    var what: [String]?
+    var watchFor: [String]?
+    var environment: String?
+
+    var id: String { key }
+
+    enum CodingKeys: String, CodingKey {
+        case key, title, subtitle, status, what, environment
+        case startDay = "start_day"
+        case endDay = "end_day"
+        case startDate = "start_date"
+        case endDate = "end_date"
+        case watchFor = "watch_for"
+    }
+
+    var displayTitle: String { title ?? key.replacingOccurrences(of: "_", with: " ").capitalized }
+    var isDone: Bool { status == "done" }
+    var isCurrent: Bool { status == "current" }
+    var isUpcoming: Bool { !isDone && !isCurrent }
+}
+
+struct GrowPlan: Codable {
+    var startDate: String?
+    var today: String?
+    var dayTotal: Int?
+    var currentPhase: String?
+    var phases: [PlanPhase]?
+
+    enum CodingKeys: String, CodingKey {
+        case today, phases
+        case startDate = "start_date"
+        case dayTotal = "day_total"
+        case currentPhase = "current_phase"
+    }
+
+    var orderedPhases: [PlanPhase] { phases ?? [] }
+
+    /// The phase flagged `current` (authoritative), falling back to `current_phase` by key.
+    var current: PlanPhase? {
+        orderedPhases.first { $0.isCurrent } ?? orderedPhases.first { $0.key == currentPhase }
+    }
+
+    /// The phase that follows the current one, or the first upcoming phase.
+    var next: PlanPhase? {
+        let phases = orderedPhases
+        if let cur = current, let i = phases.firstIndex(where: { $0.key == cur.key }), i + 1 < phases.count {
+            return phases[i + 1]
+        }
+        if current == nil { return phases.first { $0.isUpcoming } }
+        return nil
+    }
+
+    var allDone: Bool { !orderedPhases.isEmpty && orderedPhases.allSatisfy { $0.isDone } }
+}
+
 // MARK: - Formatting helpers shared by views
 
 enum Formatting {

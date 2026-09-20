@@ -40,15 +40,15 @@ enum APIError: LocalizedError {
             case .cannotConnectToHost:
                 return "Nothing answered at that address. Check the address and port, and that the Grow Brain add-on is running."
             case .networkConnectionLost:
-                return "The connection was blocked. Go to iPhone Settings → Privacy & Security → Local Network and turn GrowOp ON, then try again."
+                return "The connection was reset (\(e.code.rawValue)). Three usual causes: a VPN on this iPhone (turn it off, or allow local network access in the VPN app); the address starting with https:// instead of http://; or Local Network permission (iPhone Settings → Privacy & Security → Local Network → GrowOp ON, then quit and reopen the app)."
             case .notConnectedToInternet:
-                return "No network connection. Check Wi‑Fi or mobile data and try again."
+                return "No network connection (\(e.code.rawValue)). Check Wi‑Fi, and that Local Network is ON for GrowOp in iPhone Settings → Privacy & Security."
             case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate:
-                return "Secure connection failed. Check the address (it may need https://)."
+                return "Secure connection failed (\(e.code.rawValue)). For a Nabu Casa address this almost always means a typo in the long name: paste it from Home Assistant → Settings → Home Assistant Cloud instead of typing it. For a Same Wi‑Fi address, use http:// not https://."
             case .cancelled:
                 return "Cancelled."
             default:
-                return "Network problem: \(e.localizedDescription)"
+                return "Network problem (\(e.code.rawValue)): \(e.localizedDescription)"
             }
         case .decoding(let e):
             return "The server sent something the app didn't understand. (\(e.localizedDescription))"
@@ -629,6 +629,10 @@ final class APIClient: @unchecked Sendable {
     func updateSettings(_ fields: [String: JSONValue]) async throws -> Settings {
         try await send("PUT", "/api/settings", body: fields)
     }
+
+    // MARK: Plan
+
+    func getPlan() async throws -> GrowPlan { try await get("/api/plan") }
 
     // MARK: Control
 

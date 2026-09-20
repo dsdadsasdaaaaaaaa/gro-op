@@ -68,11 +68,14 @@ struct MainTabView: View {
 
 struct OnboardingView: View {
     @Environment(AppState.self) private var app
-    @State private var mode: ConnectionMode = .direct
-    @State private var url: String = ServerConfig.defaultURL
-    @State private var haURL: String = ""
-    @State private var haToken: String = ""
-    @State private var apiKey: String = ""
+    // Prefilled from any previously saved config, or from `-growop.prefill.*` launch arguments
+    // (used to push exact addresses onto the phone without typing).
+    @State private var mode: ConnectionMode = ServerConfig.load().mode
+    @State private var url: String = UserDefaults.standard.string(forKey: "growop.prefill.url")
+        ?? (ServerConfig.load().baseURL.isEmpty ? ServerConfig.defaultURL : ServerConfig.load().baseURL)
+    @State private var haURL: String = UserDefaults.standard.string(forKey: "growop.prefill.haURL") ?? ServerConfig.load().haURL
+    @State private var haToken: String = ServerConfig.load().haToken
+    @State private var apiKey: String = UserDefaults.standard.string(forKey: "growop.prefill.apiKey") ?? ServerConfig.load().apiKey
     @State private var isConnecting = false
     @State private var errorText: String?
 

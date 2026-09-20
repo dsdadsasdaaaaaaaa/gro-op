@@ -21,6 +21,8 @@ final class AppState {
     // MARK: Other cached data
     var settings: Settings?
     var brief: Brief?
+    var plan: GrowPlan?
+    @ObservationIgnored private var lastPlanAt: Date?
     var chatMessages: [ChatMessage] = []
     var logEntries: [LogEntry] = []
     var openPhotoRequests: [PhotoRequest] = []
@@ -86,6 +88,8 @@ final class AppState {
         status = nil
         settings = nil
         brief = nil
+        plan = nil
+        lastPlanAt = nil
         chatMessages = []
         logEntries = []
         openPhotoRequests = []
@@ -119,11 +123,29 @@ final class AppState {
         defer { isRefreshingStatus = false }
         do {
             let st = try await client.status()
+            let previous = status
             status = st
             statusError = nil
             lastStatusAt = Date()
+            // The plan only changes with the grow (stage / start date), so reload it when
+            // those change, when we don't have one yet, or every 10 minutes as a safety net.
+            let growChanged = previous?.grow?.stage != st.grow?.stage || previous?.grow?.startDate != st.grow?.startDate
+            let stale = lastPlanAt.map { Date().timeIntervalSince($0) > 600 } ?? true
+            if plan == nil || growChanged || stale {
+                await loadPlan()
+            }
         } catch {
             statusError = error.localizedDescription
+        }
+    }
+
+    // MARK: Plan
+
+    func loadPlan() async {
+        guard isConfigured else { return }
+        if let p = try? await client.getPlan() {
+            plan = p
+            lastPlanAt = Date()
         }
     }
 

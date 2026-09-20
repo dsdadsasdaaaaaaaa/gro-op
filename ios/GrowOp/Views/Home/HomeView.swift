@@ -39,6 +39,7 @@ struct HomeView: View {
             }
             .sheet(isPresented: $showSettings) { SettingsView() }
             .errorAlert($alert)
+            .task { if app.plan == nil { await app.loadPlan() } }
         }
     }
 
@@ -79,6 +80,7 @@ struct HomeView: View {
 
         lightRow(st)
         growRow(st)
+        planCard(st)
         shortcutsRow(st)
         devicesCard(st)
         alertsCard(st)
@@ -223,6 +225,17 @@ struct HomeView: View {
             Spacer()
         }
         .card()
+    }
+
+    // MARK: Plan
+
+    private func planCard(_ st: StatusResponse) -> some View {
+        NavigationLink {
+            PlanView()
+        } label: {
+            GrowPlanCard(plan: app.plan, growStartDate: st.grow?.startDate)
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: Shortcuts
