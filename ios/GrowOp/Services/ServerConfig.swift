@@ -1,46 +1,107 @@
 import Foundation
 
-/// Where the grow brain lives. Stored in UserDefaults (single-user LAN app).
+/// How the app reaches the grow brain.
+enum ConnectionMode: String, CaseIterable, Codable {
+    /// Plain HTTP to the add-on's own port on the home LAN.
+    case direct
+    /// Through Home Assistant's add-on ingress proxy (works remotely via Nabu Casa).
+    case homeAssistant
+
+    var title: String {
+        switch self {
+        case .direct: return "Same Wi‑Fi"
+        case .homeAssistant: return "Through Home Assistant"
+        }
+    }
+}
+
+/// Where the grow brain lives. Stored in UserDefaults (single-user app).
 struct ServerConfig: Equatable {
-    var baseURL: String
-    var apiKey: String
+    var mode: ConnectionMode = .direct
+    /// Direct mode: the add-on's base URL, e.g. http://homeassistant.local:8099
+    var baseURL: String = ""
+    /// Grow Brain API key (sent as X-API-Key in BOTH modes).
+    var apiKey: String = ""
+    /// Home Assistant mode: HA base URL, e.g. https://xxxx.ui.nabu.casa
+    var haURL: String = ""
+    /// Home Assistant long-lived access token.
+    var haToken: String = ""
+    /// Cached discovery results (refreshed automatically when stale).
+    var haAddonSlug: String? = nil
+    var haIngressPath: String? = nil
 
     static let defaultURL = "http://homeassistant.local:8099"
 
-    private static let urlKey = "growop.server.url"
-    private static let keyKey = "growop.server.apiKey"
+    private enum Keys {
+        static let mode = "growop.server.mode"
+        static let url = "growop.server.url"
+        static let apiKey = "growop.server.apiKey"
+        static let haURL = "growop.server.haURL"
+        static let haToken = "growop.server.haToken"
+        static let haAddonSlug = "growop.server.haAddonSlug"
+        static let haIngressPath = "growop.server.haIngressPath"
+    }
 
     static func load() -> ServerConfig {
         let d = UserDefaults.standard
         return ServerConfig(
-            baseURL: d.string(forKey: urlKey) ?? "",
-            apiKey: d.string(forKey: keyKey) ?? ""
+            mode: ConnectionMode(rawValue: d.string(forKey: Keys.mode) ?? "") ?? .direct,
+            baseURL: d.string(forKey: Keys.url) ?? "",
+            apiKey: d.string(forKey: Keys.apiKey) ?? "",
+            haURL: d.string(forKey: Keys.haURL) ?? "",
+            haToken: d.string(forKey: Keys.haToken) ?? "",
+            haAddonSlug: d.string(forKey: Keys.haAddonSlug),
+            haIngressPath: d.string(forKey: Keys.haIngressPath)
         )
     }
 
     func save() {
         let d = UserDefaults.standard
-        d.set(baseURL, forKey: Self.urlKey)
-        d.set(apiKey, forKey: Self.keyKey)
+        d.set(mode.rawValue, forKey: Keys.mode)
+        d.set(baseURL, forKey: Keys.url)
+        d.set(apiKey, forKey: Keys.apiKey)
+        d.set(haURL, forKey: Keys.haURL)
+        d.set(haToken, forKey: Keys.haToken)
+        d.set(haAddonSlug, forKey: Keys.haAddonSlug)
+        d.set(haIngressPath, forKey: Keys.haIngressPath)
     }
 
     static func clear() {
         let d = UserDefaults.standard
-        d.removeObject(forKey: urlKey)
-        d.removeObject(forKey: keyKey)
+        [Keys.mode, Keys.url, Keys.apiKey, Keys.haURL, Keys.haToken, Keys.haAddonSlug, Keys.haIngressPath]
+            .forEach { d.removeObject(forKey: $0) }
     }
 
-    /// Normalised base URL: adds http:// if missing, strips trailing slash.
-    var normalizedBaseURL: String {
-        var s = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Adds a scheme if missing (http:// for direct, https:// for HA) and strips trailing slashes.
+    static func normalize(_ raw: String, defaultScheme: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if !s.isEmpty, !s.lowercased().hasPrefix("http://"), !s.lowercased().hasPrefix("https://") {
-            s = "http://" + s
+            s = defaultScheme + "://" + s
         }
         while s.hasSuffix("/") { s.removeLast() }
         return s
     }
 
+    /// Direct-mode base URL, normalised.
+    var normalizedBaseURL: String { Self.normalize(baseURL, defaultScheme: "http") }
+
+    /// Home Assistant base URL, normalised.
+    var normalizedHAURL: String { Self.normalize(haURL, defaultScheme: "https") }
+
+    var trimmedAPIKey: String { apiKey.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var trimmedHAToken: String { haToken.trimmingCharacters(in: .whitespacesAndNewlines) }
+
     var isConfigured: Bool {
-        !normalizedBaseURL.isEmpty && !apiKey.trimmingCharacters(in: .whitespaces).isEmpty
+        guard !trimmedAPIKey.isEmpty else { return false }
+        switch mode {
+        case .direct: return !normalizedBaseURL.isEmpty
+        case .homeAssistant: return !normalizedHAURL.isEmpty && !trimmedHAToken.isEmpty
+        }
+    }
+
+    /// True when the user-entered fields differ (ignores cached discovery values).
+    func differsInUserFields(from other: ServerConfig) -> Bool {
+        mode != other.mode || baseURL != other.baseURL || apiKey != other.apiKey
+            || haURL != other.haURL || haToken != other.haToken
     }
 }

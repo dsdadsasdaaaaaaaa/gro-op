@@ -56,7 +56,11 @@ docker compose up -d --build
 5. **Settings → Grow**: set the start date and current stage.
 6. **Settings → Preferences**: pick your phone under *Notifications* so briefs, photo requests and alerts arrive as HA push notifications.
 
-Away from home, the app only works over VPN (Tailscale / WireGuard add-on) since the API is plain HTTP on your LAN. That's on purpose.
+**Away from home (Nabu Casa or any remote HA URL):** in the app choose *Through Home Assistant* and enter your Home Assistant URL (e.g. `https://xxxx.ui.nabu.casa`), a Home Assistant long-lived access token (HA → your profile, bottom left → Security → *Create token*), and the Grow Brain `api_key`. The app then talks to the add-on through Home Assistant's add-on ingress, so nothing extra is exposed to the internet. On the same Wi-Fi, *Same Wi-Fi* mode with `http://homeassistant.local:8099` is faster.
+
+### TestFlight (optional)
+
+If you have a paid Apple Developer membership, `ios/scripts/testflight.sh` archives the app and uploads it to TestFlight so it installs like a normal app and doesn't expire. Prerequisites are listed at the top of the script (sign into Xcode, create the app record in App Store Connect). Expo/EAS does not apply: this is a native Swift project.
 
 ## Day to day
 

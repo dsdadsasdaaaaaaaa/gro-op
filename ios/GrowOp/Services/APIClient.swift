@@ -10,13 +10,20 @@ enum APIError: LocalizedError {
     case network(URLError)
     case decoding(Error)
     case other(Error)
+    // Home Assistant (ingress) mode
+    case haTokenRejected
+    case haAddonNotFound
+    case haIngressSessionFailed(String)
+    case haError(status: Int, message: String?)
+    /// Wraps an error with the name of the connection step that failed.
+    case step(String, Error)
 
     var errorDescription: String? {
         switch self {
         case .notConfigured:
             return "The app isn't connected to your grow brain yet. Open Settings to set it up."
         case .invalidURL(let s):
-            return "\"\(s)\" doesn't look like a valid server address."
+            return "\"\(s)\" doesn't look like a valid address."
         case .unauthorized:
             return "The grow brain rejected the API key. Check it in Settings."
         case .http(let status, let detail):
@@ -25,11 +32,13 @@ enum APIError: LocalizedError {
         case .network(let e):
             switch e.code {
             case .timedOut:
-                return "The grow brain took too long to respond. Try again in a moment."
+                return "The server took too long to respond. Try again in a moment."
             case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed:
-                return "Can't reach the grow brain. Make sure you're on your home Wi-Fi and the server is running."
+                return "Can't reach that address. Check the URL, and if you're using \"Same Wi‑Fi\" make sure you're at home."
             case .notConnectedToInternet, .networkConnectionLost:
-                return "No network connection. Connect to your home Wi-Fi and try again."
+                return "No network connection. Check Wi‑Fi or mobile data and try again."
+            case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate:
+                return "Secure connection failed. Check the address (it may need https://)."
             case .cancelled:
                 return "Cancelled."
             default:
@@ -39,7 +48,198 @@ enum APIError: LocalizedError {
             return "The server sent something the app didn't understand. (\(e.localizedDescription))"
         case .other(let e):
             return e.localizedDescription
+        case .haTokenRejected:
+            return "Home Assistant rejected the access token. Create a new one in Home Assistant (your profile → Security → Create token) and paste it in."
+        case .haAddonNotFound:
+            return "Grow Brain add-on not found in Home Assistant. Make sure it's installed and running."
+        case .haIngressSessionFailed(let why):
+            return "Ingress session failed: Home Assistant wouldn't open a session for the add-on. \(why)"
+        case .haError(let status, let message):
+            if let message, !message.isEmpty { return "Home Assistant replied: \(message) (\(status))" }
+            if status == 404 { return "Home Assistant replied 404. This needs a Home Assistant OS or Supervised install with the Grow Brain add-on." }
+            return "Home Assistant replied with an error (\(status))."
+        case .step(let name, let e):
+            return "\(name): \(e.localizedDescription)"
         }
+    }
+}
+
+// MARK: - Home Assistant response models (Supervisor API envelope)
+
+private struct HAEnvelope<T: Decodable>: Decodable {
+    var result: String?
+    var message: String?
+    var data: T?
+}
+
+private struct HAAddonList: Decodable {
+    var addons: [HAAddon]?
+}
+
+private struct HAAddon: Decodable {
+    var slug: String
+    var name: String?
+}
+
+private struct HAAddonInfo: Decodable {
+    var ingressUrl: String?
+    enum CodingKeys: String, CodingKey { case ingressUrl = "ingress_url" }
+}
+
+private struct HAIngressSessionData: Decodable {
+    var session: String?
+}
+
+// MARK: - Home Assistant ingress resolver
+
+/// Discovers the Grow Brain add-on's ingress path and keeps a fresh ingress session.
+/// One instance per configured connection; concurrent callers share in-flight work.
+actor HAIngress {
+    struct Resolved: Equatable {
+        /// HA base + ingress path (no trailing slash). API paths are appended directly.
+        var base: String
+        /// Value for the `Cookie` header.
+        var cookie: String
+    }
+
+    static let sessionMaxAge: TimeInterval = 10 * 60
+
+    private let session: URLSession
+    private(set) var slug: String?
+    private(set) var ingressPath: String?
+    private var sessionID: String?
+    private var sessionCreatedAt = Date.distantPast
+    private var pendingDiscovery: Task<(String, String), Error>?
+    private var pendingSession: Task<String, Error>?
+
+    init(session: URLSession, slug: String? = nil, ingressPath: String? = nil) {
+        self.session = session
+        self.slug = slug
+        self.ingressPath = ingressPath
+    }
+
+    func resolve(_ cfg: ServerConfig, forceNewSession: Bool = false, forceDiscovery: Bool = false) async throws -> Resolved {
+        let ha = cfg.normalizedHAURL
+        guard !ha.isEmpty, !cfg.trimmedHAToken.isEmpty else { throw APIError.notConfigured }
+        if forceDiscovery || ingressPath == nil || slug == nil {
+            try await discover(cfg)
+        }
+        let sid = try await currentSession(cfg, force: forceNewSession)
+        var path = ingressPath ?? ""
+        while path.hasSuffix("/") { path.removeLast() }
+        if !path.hasPrefix("/") { path = "/" + path }
+        return Resolved(base: ha + path, cookie: "ingress_session=\(sid)")
+    }
+
+    // MARK: Discovery (steps 1 + 2)
+
+    private func discover(_ cfg: ServerConfig) async throws {
+        var created = false
+        let task: Task<(String, String), Error>
+        if let p = pendingDiscovery {
+            task = p
+        } else {
+            let s = session
+            task = Task { try await HAIngress.performDiscovery(cfg, session: s) }
+            pendingDiscovery = task
+            created = true
+        }
+        defer { if created { pendingDiscovery = nil } }
+        let (foundSlug, foundPath) = try await task.value
+        slug = foundSlug
+        ingressPath = foundPath
+    }
+
+    private static func performDiscovery(_ cfg: ServerConfig, session: URLSession) async throws -> (String, String) {
+        let list: HAAddonList = try await supervisor("/api/hassio/addons", cfg: cfg, session: session)
+        let addons = list.addons ?? []
+        guard let addon = addons.first(where: { $0.slug == "grow_brain" || $0.slug.hasSuffix("_grow_brain") }) else {
+            throw APIError.haAddonNotFound
+        }
+        let info: HAAddonInfo = try await supervisor("/api/hassio/addons/\(addon.slug)/info", cfg: cfg, session: session)
+        guard let path = info.ingressUrl, !path.isEmpty else {
+            throw APIError.haError(status: 200, message: "The Grow Brain add-on has no ingress URL. Is ingress enabled and the add-on running?")
+        }
+        return (addon.slug, path)
+    }
+
+    // MARK: Session (step 3)
+
+    private func currentSession(_ cfg: ServerConfig, force: Bool) async throws -> String {
+        if !force, let sid = sessionID, Date().timeIntervalSince(sessionCreatedAt) < Self.sessionMaxAge {
+            return sid
+        }
+        var created = false
+        let task: Task<String, Error>
+        if let p = pendingSession {
+            task = p
+        } else {
+            let s = session
+            task = Task { try await HAIngress.createSession(cfg, session: s) }
+            pendingSession = task
+            created = true
+        }
+        defer { if created { pendingSession = nil } }
+        let sid = try await task.value
+        sessionID = sid
+        sessionCreatedAt = Date()
+        return sid
+    }
+
+    private static func createSession(_ cfg: ServerConfig, session: URLSession) async throws -> String {
+        do {
+            let d: HAIngressSessionData = try await supervisor("/api/hassio/ingress/session", method: "POST", cfg: cfg, session: session)
+            guard let sid = d.session, !sid.isEmpty else {
+                throw APIError.haIngressSessionFailed("No session id was returned.")
+            }
+            return sid
+        } catch let e as APIError {
+            switch e {
+            case .haTokenRejected, .haIngressSessionFailed, .network: throw e
+            default: throw APIError.haIngressSessionFailed(e.localizedDescription)
+            }
+        }
+    }
+
+    // MARK: Supervisor call helper (Bearer token)
+
+    private static func supervisor<T: Decodable>(_ path: String, method: String = "GET", cfg: ServerConfig, session: URLSession) async throws -> T {
+        let base = cfg.normalizedHAURL
+        guard let url = URL(string: base + path), url.host != nil else { throw APIError.invalidURL(base) }
+        var req = URLRequest(url: url)
+        req.httpMethod = method
+        req.timeoutInterval = 20
+        req.setValue("Bearer \(cfg.trimmedHAToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        if method == "POST" {
+            req.httpBody = Data()
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: req)
+        } catch let e as URLError {
+            throw APIError.network(e)
+        } catch {
+            throw APIError.other(error)
+        }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 200
+        if status == 401 || status == 403 { throw APIError.haTokenRejected }
+        let decoder = JSONDecoder()
+        guard (200..<300).contains(status) else {
+            let env = try? decoder.decode(HAEnvelope<T>.self, from: data)
+            throw APIError.haError(status: status, message: env?.message)
+        }
+        let env: HAEnvelope<T>
+        do {
+            env = try decoder.decode(HAEnvelope<T>.self, from: data)
+        } catch {
+            throw APIError.haError(status: status, message: "Unexpected reply. Is this address really Home Assistant?")
+        }
+        if env.result == "error" { throw APIError.haError(status: status, message: env.message) }
+        guard let d = env.data else { throw APIError.haError(status: status, message: "Empty reply from Home Assistant.") }
+        return d
     }
 }
 
@@ -51,6 +251,7 @@ final class APIClient: @unchecked Sendable {
 
     private(set) var config: ServerConfig
     private let session: URLSession
+    private var ingress: HAIngress
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
 
@@ -58,62 +259,126 @@ final class APIClient: @unchecked Sendable {
         self.config = config
         let cfg = URLSessionConfiguration.default
         cfg.timeoutIntervalForRequest = APIClient.shortTimeout
-        cfg.timeoutIntervalForResource = 180
+        cfg.timeoutIntervalForResource = 300
         cfg.waitsForConnectivity = false
         cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        // We manage the ingress cookie ourselves; don't let URLSession add or store any.
+        cfg.httpShouldSetCookies = false
+        cfg.httpCookieAcceptPolicy = .never
+        cfg.httpCookieStorage = nil
         session = URLSession(configuration: cfg)
+        ingress = HAIngress(session: session, slug: config.haAddonSlug, ingressPath: config.haIngressPath)
     }
 
     func update(config: ServerConfig) {
         self.config = config
+        ingress = HAIngress(session: session, slug: config.haAddonSlug, ingressPath: config.haIngressPath)
     }
 
     // MARK: Request plumbing
 
-    private func makeRequest(method: String,
-                             path: String,
-                             query: [URLQueryItem] = [],
-                             body: Data? = nil,
-                             contentType: String? = nil,
-                             timeout: TimeInterval,
-                             auth: Bool = true,
-                             overrideConfig: ServerConfig? = nil) throws -> URLRequest {
-        let cfg = overrideConfig ?? config
-        let base = cfg.normalizedBaseURL
+    private struct RequestSpec {
+        var method: String
+        var path: String
+        var query: [URLQueryItem] = []
+        var body: Data? = nil
+        var contentType: String? = nil
+        var timeout: TimeInterval = APIClient.shortTimeout
+        var auth: Bool = true
+    }
+
+    private func build(_ spec: RequestSpec, base: String, headers: [String: String]) throws -> URLRequest {
         guard !base.isEmpty else { throw APIError.notConfigured }
-        guard var comps = URLComponents(string: base + path) else { throw APIError.invalidURL(base) }
-        if !query.isEmpty { comps.queryItems = query }
+        guard var comps = URLComponents(string: base + spec.path) else { throw APIError.invalidURL(base) }
+        if !spec.query.isEmpty { comps.queryItems = spec.query }
         guard let url = comps.url, url.host != nil else { throw APIError.invalidURL(base) }
         var req = URLRequest(url: url)
-        req.httpMethod = method
-        req.timeoutInterval = timeout
+        req.httpMethod = spec.method
+        req.timeoutInterval = spec.timeout
         req.setValue("application/json", forHTTPHeaderField: "Accept")
-        if auth {
-            req.setValue(cfg.apiKey, forHTTPHeaderField: "X-API-Key")
-        }
-        if let body {
+        for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
+        if let body = spec.body {
             req.httpBody = body
-            req.setValue(contentType ?? "application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue(spec.contentType ?? "application/json", forHTTPHeaderField: "Content-Type")
         }
         return req
     }
 
-    private func perform(_ req: URLRequest) async throws -> Data {
-        let data: Data
-        let response: URLResponse
+    /// Runs a request. Throws only on transport failures; returns the HTTP status and body.
+    private func execute(_ req: URLRequest) async throws -> (Int, Data) {
         do {
-            (data, response) = try await session.data(for: req)
+            let (data, response) = try await session.data(for: req)
+            return ((response as? HTTPURLResponse)?.statusCode ?? 200, data)
         } catch let e as URLError {
             throw APIError.network(e)
         } catch {
             throw APIError.other(error)
         }
-        guard let http = response as? HTTPURLResponse else { return data }
-        if (200..<300).contains(http.statusCode) { return data }
-        if http.statusCode == 401 || http.statusCode == 403 { throw APIError.unauthorized }
+    }
+
+    private func check(_ status: Int, _ data: Data) throws -> Data {
+        if (200..<300).contains(status) { return data }
+        if status == 401 || status == 403 { throw APIError.unauthorized }
         let detail = (try? decoder.decode(APIErrorBody.self, from: data))?.detail
-            ?? String(data: data, encoding: .utf8).flatMap { $0.count < 300 ? $0 : nil }
-        throw APIError.http(status: http.statusCode, detail: detail)
+            ?? String(data: data, encoding: .utf8).flatMap { $0.count < 300 && !$0.contains("<html") ? $0 : nil }
+        throw APIError.http(status: status, detail: detail)
+    }
+
+    /// The one place that decides how a grow-brain request reaches the server.
+    private func perform(_ spec: RequestSpec, config override: ServerConfig? = nil, ingress overrideIngress: HAIngress? = nil) async throws -> Data {
+        let cfg = override ?? config
+        switch cfg.mode {
+        case .direct:
+            var headers: [String: String] = [:]
+            if spec.auth { headers["X-API-Key"] = cfg.trimmedAPIKey }
+            let req = try build(spec, base: cfg.normalizedBaseURL, headers: headers)
+            let (status, data) = try await execute(req)
+            return try check(status, data)
+        case .homeAssistant:
+            return try await performViaHA(spec, cfg: cfg, ingress: overrideIngress ?? ingress)
+        }
+    }
+
+    /// Step 4: call the add-on through HA ingress, with session renewal on 401 and
+    /// ingress-path rediscovery on 404 (each retried once).
+    private func performViaHA(_ spec: RequestSpec, cfg: ServerConfig, ingress: HAIngress) async throws -> Data {
+        func run(_ r: HAIngress.Resolved) async throws -> (Int, Data) {
+            var headers = [
+                "Authorization": "Bearer \(cfg.trimmedHAToken)",
+                "Cookie": r.cookie,
+            ]
+            if spec.auth { headers["X-API-Key"] = cfg.trimmedAPIKey }
+            let req = try build(spec, base: r.base, headers: headers)
+            return try await execute(req)
+        }
+
+        var resolved = try await ingress.resolve(cfg)
+        var (status, data) = try await run(resolved)
+        if status == 401 {
+            resolved = try await ingress.resolve(cfg, forceNewSession: true)
+            (status, data) = try await run(resolved)
+        } else if status == 404 {
+            let previous = resolved.base
+            resolved = try await ingress.resolve(cfg, forceDiscovery: true)
+            if resolved.base != previous {
+                (status, data) = try await run(resolved)
+            }
+        }
+        await persistDiscovery(from: ingress)
+        return try check(status, data)
+    }
+
+    /// Keeps the cached add-on slug / ingress path in the saved config up to date.
+    private func persistDiscovery(from ingress: HAIngress) async {
+        guard ingress === self.ingress else { return }
+        let slug = await ingress.slug
+        let path = await ingress.ingressPath
+        guard let slug, let path else { return }
+        if config.haAddonSlug != slug || config.haIngressPath != path {
+            config.haAddonSlug = slug
+            config.haIngressPath = path
+            config.save()
+        }
     }
 
     private func decode<T: Decodable>(_ data: Data) throws -> T {
@@ -129,41 +394,72 @@ final class APIClient: @unchecked Sendable {
     }
 
     private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = [], timeout: TimeInterval = APIClient.shortTimeout, auth: Bool = true) async throws -> T {
-        let req = try makeRequest(method: "GET", path: path, query: query, timeout: timeout, auth: auth)
-        return try decode(try await perform(req))
+        try decode(try await perform(RequestSpec(method: "GET", path: path, query: query, timeout: timeout, auth: auth)))
     }
 
     private func send<T: Decodable, B: Encodable>(_ method: String, _ path: String, body: B, timeout: TimeInterval = APIClient.shortTimeout) async throws -> T {
-        let req = try makeRequest(method: method, path: path, body: try encode(body), timeout: timeout)
-        return try decode(try await perform(req))
+        try decode(try await perform(RequestSpec(method: method, path: path, body: try encode(body), timeout: timeout)))
     }
 
     private func send<T: Decodable>(_ method: String, _ path: String, timeout: TimeInterval = APIClient.shortTimeout) async throws -> T {
-        let req = try makeRequest(method: method, path: path, timeout: timeout)
-        return try decode(try await perform(req))
+        try decode(try await perform(RequestSpec(method: method, path: path, timeout: timeout)))
     }
 
     private func sendIgnoringBody<B: Encodable>(_ method: String, _ path: String, body: B, timeout: TimeInterval = APIClient.shortTimeout) async throws {
-        let req = try makeRequest(method: method, path: path, body: try encode(body), timeout: timeout)
-        _ = try await perform(req)
+        _ = try await perform(RequestSpec(method: method, path: path, body: try encode(body), timeout: timeout))
     }
 
     private func sendIgnoringBody(_ method: String, _ path: String, timeout: TimeInterval = APIClient.shortTimeout) async throws {
-        let req = try makeRequest(method: method, path: path, timeout: timeout)
-        _ = try await perform(req)
+        _ = try await perform(RequestSpec(method: method, path: path, timeout: timeout))
+    }
+
+    // MARK: Connection test
+
+    struct VerifyResult {
+        /// The candidate config with discovery cache filled in (HA mode).
+        var config: ServerConfig
+        var health: HealthResponse
+        var status: StatusResponse
+    }
+
+    /// Runs the full connection chain for a candidate config without saving anything,
+    /// reporting which step failed.
+    func verify(_ candidate: ServerConfig) async throws -> VerifyResult {
+        var cfg = candidate
+        guard cfg.isConfigured else { throw APIError.notConfigured }
+        var tempIngress: HAIngress? = nil
+        if cfg.mode == .homeAssistant {
+            let ing = HAIngress(session: session)
+            tempIngress = ing
+            // Steps 1–3: find the add-on, read its ingress path, open a session.
+            _ = try await ing.resolve(cfg, forceNewSession: true, forceDiscovery: true)
+            cfg.haAddonSlug = await ing.slug
+            cfg.haIngressPath = await ing.ingressPath
+        }
+        let health: HealthResponse
+        do {
+            health = try decode(try await perform(RequestSpec(method: "GET", path: "/api/health", timeout: 15, auth: false), config: cfg, ingress: tempIngress))
+        } catch {
+            throw APIError.step(cfg.mode == .homeAssistant ? "Reaching the grow brain through Home Assistant" : "Reaching the grow brain", error)
+        }
+        let status: StatusResponse
+        do {
+            status = try decode(try await perform(RequestSpec(method: "GET", path: "/api/status", timeout: APIClient.shortTimeout), config: cfg, ingress: tempIngress))
+        } catch {
+            throw APIError.step("Checking the Grow Brain API key", error)
+        }
+        return VerifyResult(config: cfg, health: health, status: status)
     }
 
     // MARK: Health / status
 
-    /// GET /api/health (no auth). Optionally test a config that isn't saved yet.
+    /// GET /api/health (no API key). Optionally against a config that isn't saved yet.
     func health(using cfg: ServerConfig? = nil) async throws -> HealthResponse {
-        let req = try makeRequest(method: "GET", path: "/api/health", timeout: 10, auth: false, overrideConfig: cfg)
-        return try decode(try await perform(req))
+        try decode(try await perform(RequestSpec(method: "GET", path: "/api/health", timeout: 15, auth: false), config: cfg))
     }
 
     func status(using cfg: ServerConfig? = nil) async throws -> StatusResponse {
-        let req = try makeRequest(method: "GET", path: "/api/status", timeout: APIClient.shortTimeout, overrideConfig: cfg)
-        return try decode(try await perform(req))
+        try decode(try await perform(RequestSpec(method: "GET", path: "/api/status"), config: cfg))
     }
 
     // MARK: Devices
@@ -247,10 +543,10 @@ final class APIClient: @unchecked Sendable {
         body.append(jpeg)
         body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
 
-        let req = try makeRequest(method: "POST", path: "/api/photos", body: body,
-                                  contentType: "multipart/form-data; boundary=\(boundary)",
-                                  timeout: APIClient.longTimeout)
-        return try decode(try await perform(req))
+        let spec = RequestSpec(method: "POST", path: "/api/photos", body: body,
+                               contentType: "multipart/form-data; boundary=\(boundary)",
+                               timeout: APIClient.longTimeout)
+        return try decode(try await perform(spec))
     }
 
     func photos(limit: Int = 30) async throws -> PhotosResponse {
@@ -258,13 +554,11 @@ final class APIClient: @unchecked Sendable {
     }
 
     func photoImageData(id: Int) async throws -> Data {
-        let req = try makeRequest(method: "GET", path: "/api/photos/\(id)/image", timeout: 30)
-        return try await perform(req)
+        try await perform(RequestSpec(method: "GET", path: "/api/photos/\(id)/image", timeout: 30))
     }
 
     func photoThumbData(id: Int) async throws -> Data {
-        let req = try makeRequest(method: "GET", path: "/api/photos/\(id)/thumb", timeout: 20)
-        return try await perform(req)
+        try await perform(RequestSpec(method: "GET", path: "/api/photos/\(id)/thumb", timeout: 20))
     }
 
     // MARK: Tasks
@@ -285,8 +579,7 @@ final class APIClient: @unchecked Sendable {
 
     /// GET /api/brief → Brief or JSON null.
     func brief() async throws -> Brief? {
-        let req = try makeRequest(method: "GET", path: "/api/brief", timeout: APIClient.shortTimeout)
-        let data = try await perform(req)
+        let data = try await perform(RequestSpec(method: "GET", path: "/api/brief"))
         let trimmed = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if trimmed.isEmpty || trimmed == "null" { return nil }
         return try decode(data)

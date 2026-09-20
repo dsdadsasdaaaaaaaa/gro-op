@@ -68,10 +68,17 @@ struct MainTabView: View {
 
 struct OnboardingView: View {
     @Environment(AppState.self) private var app
+    @State private var mode: ConnectionMode = .direct
     @State private var url: String = ServerConfig.defaultURL
+    @State private var haURL: String = ""
+    @State private var haToken: String = ""
     @State private var apiKey: String = ""
     @State private var isConnecting = false
     @State private var errorText: String?
+
+    private var candidate: ServerConfig {
+        ServerConfig(mode: mode, baseURL: url, apiKey: apiKey, haURL: haURL, haToken: haToken)
+    }
 
     var body: some View {
         NavigationStack {
@@ -86,29 +93,43 @@ struct OnboardingView: View {
                         Text("Connect to your grow brain")
                             .font(.title.bold())
                             .multilineTextAlignment(.center)
-                        Text("Enter the address of the grow brain on your home network and the API key it was set up with. You only need to do this once.")
+                        Text(mode == .direct
+                             ? "Enter the address of the grow brain on your home network and the API key it was set up with. You only need to do this once."
+                             : "Connect through Home Assistant so the app works even when you're away from home.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                     }
                     .padding(.horizontal)
 
-                    VStack(alignment: .leading, spacing: 14) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Server address").font(.subheadline.weight(.semibold))
-                            TextField("http://homeassistant.local:8099", text: $url)
-                                .textFieldStyle(.roundedBorder)
-                                .keyboardType(.URL)
-                                .textContentType(.URL)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
+                    Picker("Connection", selection: $mode) {
+                        ForEach(ConnectionMode.allCases, id: \.self) { m in
+                            Text(m.title).tag(m)
                         }
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("API key").font(.subheadline.weight(.semibold))
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal)
+                    .onChange(of: mode) { _, _ in errorText = nil }
+
+                    VStack(alignment: .leading, spacing: 14) {
+                        if mode == .direct {
+                            field("Server address") {
+                                TextField("http://homeassistant.local:8099", text: $url)
+                                    .keyboardType(.URL)
+                                    .textContentType(.URL)
+                            }
+                        } else {
+                            field("Home Assistant URL") {
+                                TextField("https://….ui.nabu.casa", text: $haURL)
+                                    .keyboardType(.URL)
+                                    .textContentType(.URL)
+                            }
+                            field("Home Assistant access token", hint: "Home Assistant → your profile (bottom left) → Security → Create token") {
+                                SecureField("Paste the token here", text: $haToken)
+                            }
+                        }
+                        field("Grow Brain API key") {
                             TextField("Paste the key here", text: $apiKey)
-                                .textFieldStyle(.roundedBorder)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
                         }
                     }
                     .padding(.horizontal)
@@ -118,6 +139,7 @@ struct OnboardingView: View {
                             .font(.subheadline)
                             .foregroundStyle(.red)
                             .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal)
                     }
 
@@ -131,7 +153,7 @@ struct OnboardingView: View {
                         }
                     }
                     .buttonStyle(BigButtonStyle())
-                    .disabled(isConnecting || url.trimmingCharacters(in: .whitespaces).isEmpty || apiKey.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled(isConnecting || !candidate.isConfigured)
                     .padding(.horizontal)
                 }
             }
@@ -140,12 +162,26 @@ struct OnboardingView: View {
         }
     }
 
+    @ViewBuilder
+    private func field<Content: View>(_ title: String, hint: String? = nil, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.subheadline.weight(.semibold))
+            content()
+                .textFieldStyle(.roundedBorder)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+            if let hint {
+                Text(hint).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private func connect() async {
         isConnecting = true
         errorText = nil
         defer { isConnecting = false }
         do {
-            try await app.connect(url: url, key: apiKey)
+            try await app.connect(candidate)
         } catch {
             errorText = error.localizedDescription
         }

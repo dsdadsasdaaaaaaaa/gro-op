@@ -54,30 +54,33 @@ final class AppState {
 
     // MARK: Connection management
 
-    /// Tests a server, and if it answers, saves the config and becomes configured.
+    /// Runs the full connection chain for a candidate config (direct or through Home
+    /// Assistant); if every step succeeds, saves it and becomes configured.
     @discardableResult
-    func connect(url: String, key: String) async throws -> HealthResponse {
-        let candidate = ServerConfig(baseURL: url, apiKey: key)
-        guard candidate.isConfigured else { throw APIError.notConfigured }
-        let health = try await client.health(using: candidate)
-        // Verify the key works too.
-        let st = try await client.status(using: candidate)
-        candidate.save()
-        config = candidate
-        client.update(config: candidate)
+    func connect(_ candidate: ServerConfig) async throws -> HealthResponse {
+        let result = try await client.verify(candidate)
+        result.config.save()
+        config = result.config
+        client.update(config: result.config)
         isConfigured = true
-        status = st
+        status = result.status
         statusError = nil
         lastStatusAt = Date()
         startPolling()
         Task { await refreshSettings() }
-        return health
+        return result.health
+    }
+
+    /// Convenience for direct (same Wi‑Fi) mode.
+    @discardableResult
+    func connect(url: String, key: String) async throws -> HealthResponse {
+        try await connect(ServerConfig(mode: .direct, baseURL: url, apiKey: key))
     }
 
     func disconnect() {
         stopPolling()
         ServerConfig.clear()
-        config = ServerConfig(baseURL: "", apiKey: "")
+        config = ServerConfig()
         client.update(config: config)
         isConfigured = false
         status = nil

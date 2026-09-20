@@ -5,7 +5,10 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     // Server
+    @State private var mode: ConnectionMode = .direct
     @State private var serverURL = ""
+    @State private var haURL = ""
+    @State private var haToken = ""
     @State private var apiKey = ""
     @State private var testing = false
     @State private var testResult: String?
@@ -113,7 +116,10 @@ struct SettingsView: View {
     // MARK: - Loading
 
     private func loadAll() async {
+        mode = app.config.mode
         serverURL = app.config.baseURL.isEmpty ? ServerConfig.defaultURL : app.config.baseURL
+        haURL = app.config.haURL
+        haToken = app.config.haToken
         apiKey = app.config.apiKey
         guard app.isConfigured else { loading = false; return }
         loading = true
@@ -192,13 +198,42 @@ struct SettingsView: View {
 
     // MARK: - Server
 
+    private var candidate: ServerConfig {
+        ServerConfig(mode: mode, baseURL: serverURL, apiKey: apiKey, haURL: haURL, haToken: haToken,
+                     haAddonSlug: app.config.haAddonSlug, haIngressPath: app.config.haIngressPath)
+    }
+
+    private var serverChanged: Bool { candidate.differsInUserFields(from: app.config) }
+
     private var serverSection: some View {
         Section {
-            TextField("http://homeassistant.local:8099", text: $serverURL)
-                .keyboardType(.URL).textContentType(.URL)
+            Picker("Connection", selection: $mode) {
+                ForEach(ConnectionMode.allCases, id: \.self) { m in Text(m.title).tag(m) }
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: mode) { _, _ in testResult = nil; testOK = nil }
+
+            if mode == .direct {
+                TextField("http://homeassistant.local:8099", text: $serverURL)
+                    .keyboardType(.URL).textContentType(.URL)
+                    .autocorrectionDisabled().textInputAutocapitalization(.never)
+            } else {
+                TextField("https://….ui.nabu.casa", text: $haURL)
+                    .keyboardType(.URL).textContentType(.URL)
+                    .autocorrectionDisabled().textInputAutocapitalization(.never)
+                VStack(alignment: .leading, spacing: 4) {
+                    SecureField("Home Assistant access token", text: $haToken)
+                        .autocorrectionDisabled().textInputAutocapitalization(.never)
+                    Text("Home Assistant → your profile (bottom left) → Security → Create token")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if let slug = app.config.haAddonSlug, mode == app.config.mode {
+                    Text("Add-on: \(slug)").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            TextField("Grow Brain API key", text: $apiKey)
                 .autocorrectionDisabled().textInputAutocapitalization(.never)
-            TextField("API key", text: $apiKey)
-                .autocorrectionDisabled().textInputAutocapitalization(.never)
+
             Button {
                 Task { await testConnection() }
             } label: {
@@ -212,13 +247,13 @@ struct SettingsView: View {
                     }
                 }
             }
-            .disabled(testing || serverURL.isEmpty || apiKey.isEmpty)
+            .disabled(testing || !candidate.isConfigured)
             if let testResult {
                 Text(testResult).font(.footnote).foregroundStyle(testOK == true ? Color.secondary : Color.red)
             }
-            if serverURL != app.config.baseURL || apiKey != app.config.apiKey {
+            if serverChanged {
                 Button("Save and connect") { Task { await saveServer() } }
-                    .disabled(testing)
+                    .disabled(testing || !candidate.isConfigured)
             }
             if app.isConfigured {
                 Button("Disconnect", role: .destructive) { confirmDisconnect = true }
@@ -226,7 +261,9 @@ struct SettingsView: View {
         } header: {
             Text("Server")
         } footer: {
-            Text("The grow brain runs on your Home Assistant box. Both fields are needed.")
+            Text(mode == .direct
+                 ? "Talks to the grow brain directly on your home network. Only works while you're on the same Wi‑Fi."
+                 : "Goes through Home Assistant (for example your Nabu Casa address), so it works away from home too. The Grow Brain API key is still needed.")
         }
     }
 
@@ -235,15 +272,14 @@ struct SettingsView: View {
         testResult = nil
         testOK = nil
         defer { testing = false }
-        let cfg = ServerConfig(baseURL: serverURL, apiKey: apiKey)
         do {
-            let h = try await app.client.health(using: cfg)
-            let st = try await app.client.status(using: cfg)
-            var parts: [String] = ["Connected"]
-            if let v = h.version { parts.append("v\(v)") }
-            parts.append(h.haConnected == true ? "Home Assistant OK" : "Home Assistant NOT connected")
-            parts.append(h.advisorEnabled == true ? "advisor on" : "advisor off")
-            if let t = st.sensor?.tempC { parts.append("temp \(Formatting.number(t))°C") }
+            let r = try await app.client.verify(candidate)
+            var parts: [String] = [mode == .homeAssistant ? "Connected through Home Assistant" : "Connected"]
+            if let v = r.health.version { parts.append("v\(v)") }
+            if mode == .homeAssistant, let slug = r.config.haAddonSlug { parts.append("add-on \(slug)") }
+            parts.append(r.health.haConnected == true ? "Home Assistant OK" : "Home Assistant NOT connected")
+            parts.append(r.health.advisorEnabled == true ? "advisor on" : "advisor off")
+            if let t = r.status.sensor?.tempC { parts.append("temp \(Formatting.number(t))°C") }
             testResult = parts.joined(separator: " · ")
             testOK = true
         } catch {
@@ -256,7 +292,7 @@ struct SettingsView: View {
         testing = true
         defer { testing = false }
         do {
-            try await app.connect(url: serverURL, key: apiKey)
+            try await app.connect(candidate)
             testResult = "Saved and connected."
             testOK = true
             await loadAll()
