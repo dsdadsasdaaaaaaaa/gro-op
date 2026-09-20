@@ -12,6 +12,7 @@ enum APIError: LocalizedError {
     case other(Error)
     // Home Assistant (ingress) mode
     case haTokenRejected
+    case haTokenMalformed(Int)
     case haAddonNotFound
     case haIngressSessionFailed(String)
     case haError(status: Int, message: String?)
@@ -49,7 +50,9 @@ enum APIError: LocalizedError {
         case .other(let e):
             return e.localizedDescription
         case .haTokenRejected:
-            return "Home Assistant rejected the access token. Create a new one in Home Assistant (your profile → Security → Create token) and paste it in."
+            return "Home Assistant rejected the access token. Create a new one in Home Assistant (your profile → Security → Create token), copy ALL of it (about 180 characters), and paste it in. The Grow Brain API key goes in the separate field below."
+        case .haTokenMalformed(let n):
+            return "That doesn't look like a Home Assistant long-lived access token (\(n) characters; a real one is about 180 characters with two dots). Create one under your profile → Security → Create token and copy the whole thing."
         case .haAddonNotFound:
             return "Grow Brain add-on not found in Home Assistant. Make sure it's installed and running."
         case .haIngressSessionFailed(let why):
@@ -429,6 +432,10 @@ final class APIClient: @unchecked Sendable {
         guard cfg.isConfigured else { throw APIError.notConfigured }
         var tempIngress: HAIngress? = nil
         if cfg.mode == .homeAssistant {
+            let tok = cfg.trimmedHAToken
+            if tok.count < 100 || tok.filter({ $0 == "." }).count != 2 {
+                throw APIError.step("Checking the Home Assistant token", APIError.haTokenMalformed(tok.count))
+            }
             let ing = HAIngress(session: session)
             tempIngress = ing
             // Steps 1–3: find the add-on, read its ingress path, open a session.
