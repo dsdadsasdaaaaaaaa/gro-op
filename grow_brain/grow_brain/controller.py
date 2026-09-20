@@ -266,9 +266,13 @@ class Controller:
         return s
 
     def tz(self, settings: dict) -> ZoneInfo:
+        name = settings.get("timezone") or self.boot_tz
         try:
-            return ZoneInfo(settings.get("timezone") or self.boot_tz)
+            return ZoneInfo(name)
         except Exception:
+            if not getattr(self, "_tz_warned", False):
+                log.warning("Unknown timezone %r: using UTC. Use a name like America/New_York.", name)
+                self._tz_warned = True
             return ZoneInfo("UTC")
 
     async def profile(self) -> dict:
