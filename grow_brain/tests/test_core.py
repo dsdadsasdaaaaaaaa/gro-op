@@ -131,6 +131,16 @@ def test_suggest_role_and_automap():
     assert suggest_role("sensor.tent_temperature", "Tent Temperature", "temperature", "°C") == "temperature_sensor"
     assert suggest_role("sensor.tent_humidity", "Tent Humidity", "humidity", "%") == "humidity_sensor"
     assert suggest_role("sensor.grow_light_power", "Grow Light Power", "power", "W") is None
+    # real-world false positives seen on Levi's HA
+    assert suggest_role("input_boolean.man_cave_overheat_active", "Overheat Active", None, None) is None
+    assert suggest_role("switch.exhaust_led", "exhaust LED", None, None) is None
+    assert suggest_role("switch.humidifier_auto_off_enabled", "humidifier Auto-off enabled", None, None) is None
+    assert suggest_role("sensor.backup_last_attempted", "Backup Last attempted automatic backup", "timestamp", None) is None
+    assert suggest_role("sensor.man_cave_circadian_color_temp", "Man Cave Circadian Color Temp", None, "K") is None
+    assert suggest_role("sensor.humidifier_auto_off_at", "humidifier Auto-off at", "timestamp", None) is None
+    assert suggest_role("sensor.h5074_8081_temperature", "grow hygrometer Temperature", "temperature", "°C") == "temperature_sensor"
+    assert suggest_role("switch.dehumidifer", "dehumidifer", None, None) == "dehumidifier"
+    assert suggest_role("switch.room", "Grow light", None, None) == "light"
     ents = [
         {"entity_id": "switch.grow_light", "name": "Grow Light", "suggested_role": "light"},
         {"entity_id": "switch.grow_exhaust_fan", "name": "Grow Exhaust Fan", "suggested_role": "exhaust_fan"},

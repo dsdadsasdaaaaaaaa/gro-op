@@ -33,7 +33,7 @@ ROLES: list[RoleDef] = [
     RoleDef("dehumidifier", "Dehumidifier", "switch", False, "Lowers humidity when it is above target.",
             ("dehumidifier", "dehumid", "dry")),
     RoleDef("heater", "Heater", "switch", False, "Raises temperature when it is below target.",
-            ("heater", "heat", "heating mat", "warm")),
+            ("heater", "heat mat", "heating mat", "heating pad"), negative=("overheat", "preheat", "active", "mode")),
     RoleDef("cooler", "AC / cooler", "switch", False, "Lowers temperature when it is above target.",
             ("ac", "a/c", "air con", "cooler", "cooling", "chiller")),
     RoleDef("temperature_sensor", "Temperature sensor", "sensor", True, "Air temperature inside the tent.",
@@ -58,6 +58,13 @@ _PLUG_SENSOR_WORDS = ("power", "energy", "current", "voltage", "kwh", "watt", " 
                       "linkquality", "battery", "uptime", "wifi", "ip", "mac")
 
 
+# Sub-feature entities that smart plugs, cameras etc. expose next to the real switch.
+_SUB_FEATURE_WORDS = (" led", "auto off", "auto-off", "auto update", "auto-update", "status light", "night vision",
+                      "motion", "notifications", "stream", "recording", "detection", "flip ", "wiper", "autofocus",
+                      "announcements", "communications", "do not disturb", "dimmed", "adaptive", "circadian",
+                      "consumption", "auto off at")
+
+
 def _norm(s: str) -> str:
     s = s.lower().replace("_", " ").replace("-", " ").replace(".", " ")
     return re.sub(r"\s+", " ", s).strip()
@@ -69,21 +76,26 @@ def suggest_role(entity_id: str, friendly_name: str | None, device_class: str | 
     text = f" {_norm(friendly_name or '')} {_norm(entity_id.split('.', 1)[1])} "
 
     if domain in SENSOR_DOMAINS:
-        if any(w in text for w in _PLUG_SENSOR_WORDS):
+        if any(w in text for w in _PLUG_SENSOR_WORDS) or any(w in text for w in _SUB_FEATURE_WORDS):
             return None
-        if device_class == "temperature" or unit in ("°C", "°F", "C", "F"):
+        if device_class == "temperature" and unit in ("°C", "°F"):
             return "temperature_sensor"
-        if device_class == "humidity" or unit == "%" and "humid" in text:
+        if device_class == "humidity" and unit == "%":
             return "humidity_sensor"
-        if device_class == "carbon_dioxide" or "co2" in text:
+        if device_class == "carbon_dioxide" or (unit == "ppm" and " co2 " in text):
             return "co2_sensor"
-        if "vpd" in text or "vapor" in text or "vapour" in text:
+        if unit == "kPa" or (" vpd " in text and unit):
             return "vpd_sensor"
-        if "temp" in text:
+        if unit in ("°C", "°F") and re.search(r"\b(temp|temperature)\b", text) and "target" not in text and "outside" not in text:
             return "temperature_sensor"
-        if "humid" in text or " rh " in text:
+        if unit == "%" and re.search(r"\b(humidity|rh)\b", text):
             return "humidity_sensor"
         return None
+
+    if any(w in text for w in _SUB_FEATURE_WORDS):
+        return None
+    if domain == "input_boolean":
+        return None  # helpers/flags, never real devices
 
     if domain not in SWITCH_DOMAINS:
         return None
@@ -121,6 +133,8 @@ def automap(entities: list[dict]) -> dict[str, str]:
             continue
         name = _norm(e.get("name") or "")
         spec = max((len(k) for k in ROLE_BY_NAME[role].keywords if k in name), default=0)
+        if any(w in name for w in ("grow", "tent", "hygrometer")):
+            spec += 100  # an entity the user named after the grow beats any room device
         candidates.setdefault(role, []).append((spec, e["entity_id"]))
     mapping: dict[str, str] = {}
     used: set[str] = set()
