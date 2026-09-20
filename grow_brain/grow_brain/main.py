@@ -9,7 +9,7 @@ from datetime import datetime
 
 import uvicorn
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from . import __version__
 from .advisor import Advisor
@@ -92,6 +92,22 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(title="Grow Brain", version=__version__, lifespan=lifespan)
     app.include_router(router)
+
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    async def root():
+        # Shown in the Home Assistant sidebar panel (ingress). The real UI is the GrowOp iPhone app.
+        st = app.state
+        ok = st.controller.ha_ok
+        return f"""<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'>
+<title>Grow Brain</title><style>body{{font-family:-apple-system,system-ui,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem;line-height:1.5}}
+code{{background:#eee;padding:.1rem .3rem;border-radius:.2rem}}</style></head><body>
+<h1>🌱 Grow Brain {__version__}</h1>
+<p>Status: <b>{'running, Home Assistant connected' if ok else 'running, waiting for Home Assistant'}</b>.
+Advisor: <b>{'on' if st.advisor.enabled else 'off (no Anthropic key)'}</b>.</p>
+<p>Everything is controlled from the <b>GrowOp</b> iPhone app. On the same Wi‑Fi use
+<code>http://homeassistant.local:8099</code>; from anywhere, choose <i>Connect through Home Assistant</i>
+in the app and paste your Home Assistant URL plus a long-lived access token.</p>
+</body></html>"""
 
     @app.exception_handler(Exception)
     async def _unhandled(request, exc):
