@@ -1,5 +1,5 @@
 name: Grow Brain
-version: "0.1.0"
+version: "0.1.1"
 slug: grow_brain
 description: Fully automated grow tent controller with a Claude-powered grow advisor. Pairs with the GrowOp iPhone app.
 url: https://github.com/dsdadsasdaaaaaaaa/gro-op

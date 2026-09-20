@@ -1,6 +1,0 @@
-# Plain official Python image for every architecture: multi-arch, Debian wheels for every dependency,
-# no dependence on Home Assistant base-image tag names.
-build_from:
-  aarch64: python:3.12-slim
-  amd64: python:3.12-slim
-  armv7: python:3.12-slim
