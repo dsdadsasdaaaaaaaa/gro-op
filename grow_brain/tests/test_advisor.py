@@ -34,7 +34,7 @@ DEFAULTS = {
                "target_changes": [{"field": "humidity_max", "to": 40, "reason": "test clamp"}],
                "photo_requests": [{"title": "Top of canopy", "instructions": "From above, light off, flash on", "reason": "check"}],
                "tasks": [{"title": "Water 1 L", "detail": "pH 6.3", "due": None, "priority": "normal"}]},
-    LogAdviceOut: {"summary": "pH a bit high", "steps": ["Use pH 6.2 water next"], "urgency": "attention",
+    LogAdviceOut: {"summary": "pH a bit high", "steps": ["Use pH 6.2 water next"], "urgency": "attention", "tasks_done": [1],
                    "target_changes": [], "photo_requests": [], "tasks": [{"title": "Water 1 L", "detail": "dupe", "due": None, "priority": "normal"}]},
     PhotoAnalysisOut: {"summary": "Healthy", "health_score": 9, "findings": [{"title": "ok", "severity": "info", "detail": "fine"}],
                        "actions": [], "target_changes": [], "photo_requests": [], "tasks": []},
@@ -85,7 +85,9 @@ async def test_log_advice_dedupes_tasks(env):
     entry = await store.add_log_entry("ph", 6.8, "pH", "runoff", None)
     advice = await adv.advise_on_log(entry)
     assert advice["urgency"] == "attention"
-    assert advice["tasks"] == []  # "Water 1 L" already open → not duplicated
+    assert advice["tasks_done"] == [1]  # advisor closed the brief's task #1 itself
+    assert (await store.get_task(1))["status"] == "done"
+    assert advice["tasks"] == [] or advice["tasks"][0]["title"] == "Water 1 L"  # re-created only because #1 was closed
     assert (await store.get_log_entry(entry["id"]))["advice_summary"] == "pH a bit high"
 
 

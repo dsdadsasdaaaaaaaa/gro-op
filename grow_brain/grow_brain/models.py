@@ -151,6 +151,7 @@ class TargetChange(BaseModel):
 
 
 class BriefOut(BaseModel):
+    tasks_done: list[int] = Field(default_factory=list, description="Ids of OPEN tasks that are now finished or obsolete (the grower did them, or the plan changed). Close them here instead of asking the grower to.")
     headline: str = Field(description="One line, e.g. 'Day 26 – healthy, humidity creeping up'")
     summary: str = Field(description="3–6 plain-language sentences for a beginner")
     concerns: list[str] = Field(default_factory=list)
@@ -161,6 +162,7 @@ class BriefOut(BaseModel):
 
 
 class LogAdviceOut(BaseModel):
+    tasks_done: list[int] = Field(default_factory=list, description="Ids of OPEN tasks that are now finished or obsolete (the grower did them, or the plan changed). Close them here instead of asking the grower to.")
     summary: str
     steps: list[str] = Field(description="Concrete next steps, most important first")
     urgency: Literal["info", "attention", "urgent"] = "info"
@@ -176,6 +178,7 @@ class Finding(BaseModel):
 
 
 class PhotoAnalysisOut(BaseModel):
+    tasks_done: list[int] = Field(default_factory=list, description="Ids of OPEN tasks that are now finished or obsolete (the grower did them, or the plan changed). Close them here instead of asking the grower to.")
     summary: str
     health_score: int = Field(ge=0, le=10)
     findings: list[Finding] = Field(default_factory=list)
@@ -186,6 +189,7 @@ class PhotoAnalysisOut(BaseModel):
 
 
 class ChatOut(BaseModel):
+    tasks_done: list[int] = Field(default_factory=list, description="Ids of OPEN tasks that are now finished or obsolete (the grower did them, or the plan changed). Close them here instead of asking the grower to.")
     reply: str = Field(description="The conversational answer, markdown-light plain text")
     target_changes: list[TargetChange] = Field(default_factory=list)
     photo_requests: list[PhotoRequestDraft] = Field(default_factory=list)

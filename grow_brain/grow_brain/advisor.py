@@ -191,7 +191,16 @@ class Advisor:
     async def _apply(self, out: BaseModel, settings: dict, source: str) -> dict:
         """Persist tasks / photo requests / target changes from a structured reply. Returns API-shaped dicts."""
         created_tasks, created_prs, applied_changes = [], [], []
-        open_titles = {t["title"].strip().lower() for t in await self.store.tasks("open")}
+        open_tasks = await self.store.tasks("open")
+        open_ids = {t["id"] for t in open_tasks}
+        closed = []
+        for tid in getattr(out, "tasks_done", []) or []:
+            if tid in open_ids:
+                await self.store.set_task_status(tid, "done")
+                closed.append(tid)
+        if closed:
+            await self.store.add_event("info", "advisor", f"Advisor closed task(s) {', '.join('#' + str(t) for t in closed)}")
+        open_titles = {t["title"].strip().lower() for t in open_tasks if t["id"] not in closed}
         for td in getattr(out, "tasks", []) or []:
             if td.title.strip().lower() in open_titles:
                 continue
@@ -208,7 +217,7 @@ class Advisor:
         if created_prs:
             await self.notifier.send("photo_request", f"The advisor would like {len(created_prs)} photo(s): " +
                                      "; ".join(p["title"] for p in created_prs), title="Photo request", url="growop://photos")
-        return {"tasks": created_tasks, "photo_requests": created_prs, "target_changes": applied_changes}
+        return {"tasks": created_tasks, "photo_requests": created_prs, "target_changes": applied_changes, "tasks_done": closed}
 
     async def _apply_target_changes(self, changes: list[TargetChange], settings: dict, source: str) -> list[dict]:
         targets, _, _ = await self.controller.effective_targets()

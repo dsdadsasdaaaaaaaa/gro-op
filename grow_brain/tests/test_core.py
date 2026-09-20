@@ -152,3 +152,26 @@ def test_suggest_role_and_automap():
     assert m["light"] == "switch.grow_light" and m["exhaust_fan"] == "switch.grow_exhaust_fan"
     assert m["circulation_fan"] == "switch.grow_clip_fan"
     assert m["temperature_sensor"] == "sensor.tent_temperature"
+
+
+def test_plan_phases_and_anchoring():
+    from datetime import date
+    from grow_brain.plan import build_plan, PHASES, current_phase_key
+    prof = {"stage": "seedling", "start_date": "2026-09-19", "stage_started": "2026-09-19", "expected_flower_days": 65}
+    plan = build_plan(prof, date(2026, 9, 20), 1, 1, planted=False)
+    assert plan["current_phase"] == "germination"
+    assert [p["status"] for p in plan["phases"]][:3] == ["current", "upcoming", "upcoming"]
+    assert plan["phases"][0]["start_date"] == "2026-09-19"
+    plan = build_plan(prof, date(2026, 9, 22), 3, 3, planted=True)
+    assert plan["current_phase"] == "seedling"
+    # flower anchoring: harvest = flower start + 65 days, flush is the last 7
+    prof2 = {"stage": "flower", "start_date": "2026-09-19", "stage_started": "2026-11-10", "flower_start_date": "2026-11-10", "expected_flower_days": 65}
+    plan = build_plan(prof2, date(2026, 11, 20), 10, 62, planted=True)
+    byk = {p["key"]: p for p in plan["phases"]}
+    assert plan["current_phase"] == "flower_stretch" and byk["veg"]["status"] == "done"
+    assert byk["flower_stretch"]["start_date"] == "2026-11-10"
+    assert byk["dry"]["start_date"] == "2027-01-14"  # 2026-11-10 + 65 days
+    assert byk["flush"]["start_date"] == "2027-01-07"
+    assert current_phase_key("flower", 55, True) == "flower_ripen"
+    assert current_phase_key("done", 0, True) is None
+    assert len(PHASES) == 9

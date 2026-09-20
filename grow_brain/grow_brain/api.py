@@ -19,6 +19,7 @@ from .devices import ROLE_BY_NAME, ROLES, automap
 from .models import (ChatRequest, DeviceMapUpdate, GrowProfile, GrowProfileUpdate, LogCreate, OverrideRequest,
                      PauseRequest, SettingsModel, SettingsUpdate, StageChange, TargetsUpdate, TaskCreate)
 from .store import Store, iso, utcnow
+from .plan import build_plan
 from .targets import STAGES, stage_defaults
 
 log = logging.getLogger(__name__)
@@ -122,6 +123,20 @@ async def status(request: Request):
         "alerts": alerts,
         "control_paused_until": paused,
     }
+
+
+@router.get("/plan", dependencies=auth)
+async def plan(request: Request):
+    st = request.app.state
+    c: Controller = st.controller
+    settings = await c.settings()
+    profile = await c.profile()
+    _, day_in_stage, day_total = await c.effective_targets(profile, settings)
+    today = datetime.now(c.tz(settings)).date()
+    entries = await st.store.log_entries(200)
+    planted = any(e["kind"] == "transplant" or (e.get("context") or "").lower() in ("planted", "planting")
+                  for e in entries if e["created_at"][:10] >= (profile.get("stage_started") or "0000"))
+    return build_plan(profile, today, day_in_stage, day_total, planted)
 
 
 def _sched(hours: float) -> str:
