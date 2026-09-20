@@ -131,6 +131,12 @@ struct AdvisorView: View {
     // MARK: Input
 
     private var inputBar: some View {
+        VStack(alignment: .leading, spacing: 6) {
+        if let p = app.selectedPlant, app.plants.count >= 1 {
+            Label("Asking about \(p.displayName)", systemImage: "leaf.fill")
+                .font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+        }
         HStack(alignment: .bottom, spacing: 10) {
             TextField("Ask the advisor…", text: $draft, axis: .vertical)
                 .lineLimit(1...5)
@@ -148,6 +154,7 @@ struct AdvisorView: View {
             }
             .disabled(!canSend)
             .accessibilityLabel("Send")
+        }
         }
         .padding(.horizontal, Theme.spacing).padding(.vertical, 10)
         .background(Color.bg)
@@ -193,6 +200,21 @@ struct BriefCard: View {
             }
             if let s = brief.summary, !s.isEmpty {
                 Text(s).font(.body).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if let per = brief.perPlant, !per.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(per) { pp in
+                        HStack(alignment: .top, spacing: 10) {
+                            LeafGlyph()
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(pp.name ?? "Plant").font(.caption.weight(.semibold)).foregroundStyle(Color.brand)
+                                if let h = pp.headline, !h.isEmpty { Text(h).font(.subheadline.weight(.semibold)) }
+                                if let sm = pp.summary, !sm.isEmpty { Text(sm).font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+                            }
+                        }
+                    }
+                }
+                .padding(.top, 2)
             }
             if let c = brief.concerns, !c.isEmpty {
                 CollapsibleSection(title: "Concerns", symbol: "exclamationmark.triangle.fill", tint: .warn, count: c.count, isOpen: $showConcerns) {

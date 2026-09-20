@@ -25,9 +25,10 @@ struct PhotosView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
-                    if !app.openPhotoRequests.isEmpty {
+                    PlantSwitcher()
+                    if !app.openRequestsForSelected.isEmpty {
                         SectionTitle(text: "The advisor wants to see")
-                        ForEach(app.openPhotoRequests) { r in
+                        ForEach(app.openRequestsForSelected) { r in
                             PhotoRequestCard(request: r,
                                              onTake: { startCamera(for: r) },
                                              onChoose: { startLibrary(for: r) },
@@ -51,11 +52,11 @@ struct PhotosView: View {
 
                     VStack(alignment: .leading, spacing: 10) {
                         SectionTitle(text: "Past photos")
-                        if app.photos.isEmpty {
+                        if app.photosForSelected.isEmpty {
                             Text("No photos yet.").font(.subheadline).foregroundStyle(.secondary)
                         } else {
                             LazyVGrid(columns: gridColumns, spacing: 6) {
-                                ForEach(app.photos) { p in
+                                ForEach(app.photosForSelected) { p in
                                     NavigationLink(value: p.id) {
                                         PhotoGridCell(photo: p)
                                     }
@@ -303,7 +304,8 @@ struct PhotoSubmitSheet: View {
         defer { sending = false }
         do {
             let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
-            result = try await app.uploadPhoto(image: pending.image, requestId: pending.request?.id, note: trimmed.isEmpty ? nil : trimmed)
+            result = try await app.uploadPhoto(image: pending.image, requestId: pending.request?.id, note: trimmed.isEmpty ? nil : trimmed,
+                                               plantId: pending.request?.plantId ?? app.selectedPlantId)
         } catch {
             alert = AlertMessage(title: "Couldn't send the photo", message: error.localizedDescription)
         }

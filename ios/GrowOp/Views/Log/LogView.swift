@@ -51,6 +51,7 @@ struct LogView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 20) {
+                    PlantSwitcher()
                     Text("Tell the advisor what you did or measured. It replies with advice right away.")
                         .font(.subheadline).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -79,12 +80,12 @@ struct LogView: View {
 
                     VStack(alignment: .leading, spacing: 10) {
                         SectionTitle(text: "Recent entries")
-                        if app.logEntries.isEmpty {
+                        if app.logEntriesForSelected.isEmpty {
                             Text("Nothing logged yet.").font(.subheadline).foregroundStyle(.secondary)
                         }
-                        ForEach(app.logEntries) { e in
+                        ForEach(app.logEntriesForSelected) { e in
                             LogEntryRow(entry: e)
-                            if e.id != app.logEntries.last?.id { Divider() }
+                            if e.id != app.logEntriesForSelected.last?.id { Divider() }
                         }
                     }
                     .card()
@@ -179,7 +180,7 @@ struct LogEntrySheet: View {
                     form
                 }
             }
-            .navigationTitle(result == nil ? "Log \(kind.title)" : "Advice")
+            .navigationTitle(result == nil ? (app.selectedPlant.map { "Log \(kind.title) · \($0.shortName)" } ?? "Log \(kind.title)") : "Advice")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if result == nil && !submitting {

@@ -34,13 +34,6 @@ struct SettingsView: View {
     @State private var showStageConfirm = false
     @State private var changingStage = false
 
-    // Devices
-    @State private var roles: [DeviceRole] = []
-    @State private var mapping: [String: String] = [:]
-    @State private var entities: [HAEntity] = []
-    @State private var automapping = false
-    @State private var busyRole: String?
-
     // Targets
     @State private var targets: Targets?
     @State private var tMin: Double?
@@ -64,6 +57,7 @@ struct SettingsView: View {
 
     @State private var alert: AlertMessage?
     @State private var loading = true
+    @State private var showAddPlant = false
 
     private static let hhmm: DateFormatter = {
         let f = DateFormatter()
@@ -80,9 +74,9 @@ struct SettingsView: View {
                     if loading {
                         Section { HStack { ProgressView(); Text("Loading settings…").foregroundStyle(.secondary) } }
                     } else {
-                        growSection
+                        plantsSection
+                        tentSection
                         stageSection
-                        devicesSection
                         targetsSection
                         preferencesSection
                     }
@@ -127,14 +121,10 @@ struct SettingsView: View {
         guard app.isConfigured else { loading = false; return }
         loading = true
         async let g = try? app.client.grow()
-        async let d = try? app.client.devices()
-        async let e = try? app.client.haEntities()
         async let t = try? app.client.targets()
         async let s = try? app.client.settings()
-        let (gr, dv, en, tg, st) = await (g, d, e, t, s)
+        let (gr, tg, st) = await (g, t, s)
         if let gr { applyGrow(gr) }
-        if let dv { applyDevices(dv) }
-        entities = en?.entities ?? []
         if let tg { applyTargets(tg) }
         if let st {
             app.settings = st
@@ -142,6 +132,7 @@ struct SettingsView: View {
         } else if let st = app.settings {
             applySettings(st)
         }
+        await app.loadPlants()
         loading = false
     }
 
@@ -158,17 +149,6 @@ struct SettingsView: View {
         exhaustDucted = g.exhaustDucted ?? false
         notes = g.notes ?? ""
         stageSelection = g.stage ?? ""
-    }
-
-    private func applyDevices(_ d: DevicesResponse) {
-        roles = d.roles ?? []
-        var m: [String: String] = [:]
-        for dev in d.devices ?? [] { m[dev.role] = dev.entityId ?? "" }
-        mapping = m
-        if roles.isEmpty {
-            // Fall back to roles implied by the devices list.
-            roles = (d.devices ?? []).map { DeviceRole(role: $0.role, label: $0.label, kind: $0.kind, required: nil, description: nil) }
-        }
     }
 
     private func applyTargets(_ t: Targets) {
@@ -305,28 +285,58 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Grow
+    // MARK: - Plants
 
-    private var growSection: some View {
-        Section("Grow") {
-            TextField("Strain", text: $strain)
-            TextField("Breeder", text: $breeder)
-            TextField("Seed type (e.g. feminized photoperiod)", text: $seedType)
-            Picker("Medium", selection: $medium) {
-                ForEach(GrowProfile.mediums, id: \.self) { Text($0.capitalized).tag($0) }
+    private var plantsSection: some View {
+        Section {
+            if app.plantsSupported == false {
+                Text("This grow brain version doesn't support separate plants yet.").foregroundStyle(.secondary)
+            } else {
+                if app.plants.isEmpty {
+                    Text("No plants yet.").foregroundStyle(.secondary)
+                }
+                ForEach(app.plants) { p in
+                    NavigationLink {
+                        PlantEditView(plant: p)
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "leaf.fill").foregroundStyle(p.id == app.myPlantId ? Color.brand : Color.secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(p.displayName)
+                                HStack(spacing: 6) {
+                                    if let o = p.owner, !o.isEmpty { Text(o) }
+                                    if let st = p.strain, !st.isEmpty { Text("· \(st)") }
+                                    if let d = p.dayTotal { Text("· day \(d)") }
+                                }
+                                .font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if p.id == app.myPlantId { LevelChip(text: "Mine", color: .brand) }
+                        }
+                    }
+                }
+                if !app.plants.isEmpty {
+                    Picker("Which plant is mine", selection: Binding(
+                        get: { app.myPlantId ?? -1 },
+                        set: { app.setMyPlant($0 == -1 ? nil : $0) })) {
+                        Text("Not set").tag(-1)
+                        ForEach(app.plants) { p in Text(p.displayName).tag(p.id) }
+                    }
+                }
+                Button("Add plant") { showAddPlant = true }
             }
-            HStack {
-                Text("Pot size")
-                Spacer()
-                TextField("11", value: $potSize, format: .number)
-                    .keyboardType(.decimalPad).multilineTextAlignment(.trailing).frame(width: 80)
-                Text("L").foregroundStyle(.secondary)
-            }
-            Stepper("Plants: \(plantCount)", value: $plantCount, in: 1...50)
-            Toggle("Start date known", isOn: $hasStartDate)
-            if hasStartDate {
-                DatePicker("Start date", selection: $startDate, displayedComponents: .date)
-            }
+        } header: {
+            Text("Plants")
+        } footer: {
+            Text("One person per plant. The tent itself (devices, targets, light) is shared.")
+        }
+        .sheet(isPresented: $showAddPlant) { AddPlantSheet() }
+    }
+
+    // MARK: - Tent
+
+    private var tentSection: some View {
+        Section("Tent") {
             HStack {
                 Text("Expected flower days")
                 Spacer()
@@ -334,27 +344,20 @@ struct SettingsView: View {
                     .keyboardType(.numberPad).multilineTextAlignment(.trailing).frame(width: 80)
             }
             Toggle("Exhaust is vented outside the tent", isOn: $exhaustDucted)
-            TextField("Notes", text: $notes, axis: .vertical).lineLimit(2...5)
+            TextField("Tent notes", text: $notes, axis: .vertical).lineLimit(2...5)
             Button {
-                Task { await saveGrow() }
+                Task { await saveTent() }
             } label: {
-                HStack { if savingGrow { ProgressView() }; Text("Save grow details") }
+                HStack { if savingGrow { ProgressView() }; Text("Save tent details") }
             }
             .disabled(savingGrow)
         }
     }
 
-    private func saveGrow() async {
+    private func saveTent() async {
         savingGrow = true
         defer { savingGrow = false }
         var p = GrowProfile()
-        p.strain = strain
-        p.breeder = breeder
-        p.seedType = seedType
-        p.medium = medium
-        p.potSizeL = potSize
-        p.plantCount = plantCount
-        p.startDate = hasStartDate ? Formatting.dayString(startDate) : nil
         p.expectedFlowerDays = expectedFlowerDays
         p.exhaustDucted = exhaustDucted
         p.notes = notes
@@ -406,98 +409,6 @@ struct SettingsView: View {
         } catch {
             stageSelection = grow?.stage ?? ""
             alert = AlertMessage(title: "Couldn't change stage", message: error.localizedDescription)
-        }
-    }
-
-    // MARK: - Devices
-
-    private var devicesSection: some View {
-        Section {
-            if roles.isEmpty {
-                Text("No device roles reported by the server.").foregroundStyle(.secondary)
-            }
-            ForEach(roles) { role in
-                HStack {
-                    Picker(selection: mappingBinding(for: role)) {
-                        Text("Not mapped").tag("")
-                        ForEach(candidates(for: role)) { e in
-                            Text(e.displayName).tag(e.entityId)
-                        }
-                    } label: {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(role.displayLabel + (role.required == true ? " *" : ""))
-                            if let d = role.description, !d.isEmpty {
-                                Text(d).font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                    .disabled(busyRole == role.role)
-                    if busyRole == role.role { ProgressView().controlSize(.small) }
-                }
-            }
-            Button {
-                Task { await automap() }
-            } label: {
-                HStack { if automapping { ProgressView() }; Text("Auto-map from names") }
-            }
-            .disabled(automapping)
-            Button("Reload entity list") { Task { entities = (try? await app.client.haEntities())?.entities ?? [] } }
-        } header: {
-            Text("Devices")
-        } footer: {
-            Text("Match each job in the tent to the Home Assistant device that does it. * = required.")
-        }
-    }
-
-    private func candidates(for role: DeviceRole) -> [HAEntity] {
-        let domains: Set<String> = role.isSwitch ? ["switch", "light", "fan", "input_boolean"] : ["sensor"]
-        var list = entities.filter { domains.contains($0.domain ?? "") }
-        let current = mapping[role.role] ?? ""
-        if !current.isEmpty, !list.contains(where: { $0.entityId == current }) {
-            if let e = entities.first(where: { $0.entityId == current }) {
-                list.append(e)
-            } else {
-                list.append(HAEntity(entityId: current, name: current, domain: nil, state: nil, unit: nil, deviceClass: nil, suggestedRole: nil))
-            }
-        }
-        return list.sorted { a, b in
-            let sa = a.suggestedRole == role.role, sb = b.suggestedRole == role.role
-            if sa != sb { return sa }
-            return a.displayName.localizedCaseInsensitiveCompare(b.displayName) == .orderedAscending
-        }
-    }
-
-    private func mappingBinding(for role: DeviceRole) -> Binding<String> {
-        Binding(
-            get: { mapping[role.role] ?? "" },
-            set: { newValue in
-                let old = mapping[role.role] ?? ""
-                guard newValue != old else { return }
-                mapping[role.role] = newValue
-                Task {
-                    busyRole = role.role
-                    defer { busyRole = nil }
-                    do {
-                        let dev = try await app.client.mapDevice(role: role.role, entityId: newValue.isEmpty ? nil : newValue)
-                        mapping[role.role] = dev.entityId ?? ""
-                        await app.refreshStatus()
-                    } catch {
-                        mapping[role.role] = old
-                        alert = AlertMessage(title: "Couldn't map device", message: error.localizedDescription)
-                    }
-                }
-            })
-    }
-
-    private func automap() async {
-        automapping = true
-        defer { automapping = false }
-        do {
-            let d = try await app.client.automap()
-            applyDevices(d)
-            await app.refreshStatus()
-        } catch {
-            alert = AlertMessage(title: "Auto-map failed", message: error.localizedDescription)
         }
     }
 

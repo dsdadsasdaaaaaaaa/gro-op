@@ -10,7 +10,7 @@ struct HomeView: View {
     @State private var selectedDevice: DeviceSelection?
     @State private var path = NavigationPath()
     // Launch-argument hooks for screenshots/testing, like `-growop.initialTab`:
-    //   -growop.initialScroll plan|devices|needs   -growop.initialScreen plan   -growop.initialDevice <role>
+    //   -growop.initialScroll plan|devices|needs   -growop.initialScreen plan|settings   -growop.initialDevice <role>
     private let initialScroll = UserDefaults.standard.string(forKey: "growop.initialScroll")
     private let initialScreen = UserDefaults.standard.string(forKey: "growop.initialScreen")
     private let initialDevice = UserDefaults.standard.string(forKey: "growop.initialDevice")
@@ -75,9 +75,13 @@ struct HomeView: View {
             .errorAlert($alert)
             .task {
                 if initialScreen == "plan" { path.append("plan") }
+                if initialScreen == "settings" { showSettings = true }
                 if let role = initialDevice { selectedDevice = DeviceSelection(role: role) }
+                if app.plantsSupported == nil { await app.loadPlants() }
                 if app.plan == nil { await app.loadPlan() }
                 if app.history.isEmpty { await app.loadHistory() }
+                await app.loadTasks()
+                await app.loadPhotoRequests()
             }
         }
     }
@@ -88,7 +92,9 @@ struct HomeView: View {
     private func content(_ st: StatusResponse) -> some View {
         let standby = st.standby == true
 
-        HomeHeader(day: st.grow?.dayTotal, subtitle: headerSubtitle(st, standby: standby), standby: standby)
+        HomeHeader(day: app.selectedPlant?.dayTotal ?? st.grow?.dayTotal, subtitle: headerSubtitle(st, standby: standby), standby: standby)
+
+        PlantSwitcher()
 
         notices(st)
 
@@ -115,7 +121,7 @@ struct HomeView: View {
         NavigationLink {
             PlanView()
         } label: {
-            GrowPlanCard(plan: app.plan, growStartDate: st.grow?.startDate)
+            GrowPlanCard(plan: app.plan, growStartDate: app.selectedPlant?.startDate ?? st.grow?.startDate)
         }
         .buttonStyle(.plain)
         .id("plan")
@@ -125,7 +131,7 @@ struct HomeView: View {
         }
         .id("devices")
 
-        NeedsYouRow(tasks: st.openTasks ?? 0, photos: st.openPhotoRequests ?? 0,
+        NeedsYouRow(tasks: app.needsYouTaskCount, photos: app.needsYouPhotoCount,
                     unreadBrief: st.unreadBrief ?? false) { tab in selectedTab = tab }
         .id("needs")
 
@@ -134,13 +140,17 @@ struct HomeView: View {
 
     private func headerSubtitle(_ st: StatusResponse, standby: Bool) -> String {
         var parts: [String] = []
-        if standby, let d = st.grow?.dayTotal { parts.append("Day \(d)") }
+        if standby, let d = app.selectedPlant?.dayTotal ?? st.grow?.dayTotal { parts.append("Day \(d)") }
         if let phase = app.plan?.current?.displayTitle {
             parts.append(phase)
         } else if let stage = st.grow?.stage, !stage.isEmpty {
             parts.append(stage.capitalized)
         }
-        if let strain = st.grow?.strain, !strain.isEmpty { parts.append(strain) }
+        if let plant = app.selectedPlant {
+            parts.append(plant.displayName)
+        } else if let strain = st.grow?.strain, !strain.isEmpty {
+            parts.append(strain)
+        }
         return parts.joined(separator: " · ")
     }
 

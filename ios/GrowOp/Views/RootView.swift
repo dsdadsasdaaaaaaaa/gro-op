@@ -42,16 +42,21 @@ struct MainTabView: View {
             PhotosView()
                 .tabItem { Label("Photos", systemImage: "camera.fill") }
                 .tag(AppTab.photos)
-                .badge(app.status?.openPhotoRequests ?? 0)
+                .badge(app.needsYouPhotoCount)
 
             TasksView()
                 .tabItem { Label("Tasks", systemImage: "checklist") }
                 .tag(AppTab.tasks)
-                .badge(app.status?.openTasks ?? 0)
+                .badge(app.needsYouTaskCount)
         }
         .task {
             app.startPolling()
             await app.refreshSettings()
+            await app.loadPlants()
+        }
+        // One-time "Which plant is yours?" once the backend reports plants and none is chosen yet.
+        .sheet(isPresented: Binding(get: { app.showPlantChoice }, set: { if !$0 { app.dismissPlantChoice() } })) {
+            PlantChoiceSheet()
         }
         // growop://advisor, growop://photos, growop://log, growop://tasks (used by push notifications)
         .onOpenURL { url in

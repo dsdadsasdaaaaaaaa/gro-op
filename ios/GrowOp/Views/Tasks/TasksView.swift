@@ -10,18 +10,19 @@ struct TasksView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.spacing) {
-                    if app.openTasks.isEmpty {
+                    PlantSwitcher()
+                    let plantTasks = app.plantTasks
+                    let tentTasks = app.tentTasks
+                    if plantTasks.isEmpty && tentTasks.isEmpty {
                         EmptyStateView(symbol: "checkmark.seal.fill", title: "Nothing to do",
                                        message: "The advisor adds tasks here when something needs doing. You can add your own with +.")
                             .card()
                     } else {
-                        VStack(spacing: 10) {
-                            ForEach(app.openTasks) { t in
-                                TaskRow(task: t) {
-                                    do { try await app.completeTask(t) }
-                                    catch { alert = AlertMessage(message: error.localizedDescription) }
-                                }
-                            }
+                        if !plantTasks.isEmpty {
+                            taskGroup(title: app.selectedPlant?.displayName ?? "To do", symbol: "leaf.fill", tasks: plantTasks)
+                        }
+                        if !tentTasks.isEmpty {
+                            taskGroup(title: "Tent", symbol: "house.fill", tasks: tentTasks)
                         }
                     }
 
@@ -39,11 +40,11 @@ struct TasksView: View {
                     .padding(.top, 4)
 
                     if showDone {
-                        if app.doneTasks.isEmpty {
+                        if app.doneTasksForSelected.isEmpty {
                             Text("No completed tasks yet.").font(.subheadline).foregroundStyle(.secondary)
                         }
                         VStack(spacing: 10) {
-                            ForEach(app.doneTasks) { t in
+                            ForEach(app.doneTasksForSelected) { t in
                                 TaskRow(task: t) {
                                     do { try await app.reopenTask(t) }
                                     catch { alert = AlertMessage(message: error.localizedDescription) }
@@ -68,6 +69,19 @@ struct TasksView: View {
             .task { await app.loadTasks(includeDone: showDone) }
             .sheet(isPresented: $showAdd) { AddTaskSheet() }
             .errorAlert($alert)
+        }
+    }
+
+    @ViewBuilder
+    private func taskGroup(title: String, symbol: String, tasks: [TaskItem]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(title, systemImage: symbol).font(.headline)
+            ForEach(tasks) { t in
+                TaskRow(task: t) {
+                    do { try await app.completeTask(t) }
+                    catch { alert = AlertMessage(message: error.localizedDescription) }
+                }
+            }
         }
     }
 }
@@ -169,6 +183,7 @@ struct AddTaskSheet: View {
     @State private var detail = ""
     @State private var hasDue = false
     @State private var due = Date()
+    @State private var forTent = false
     @State private var saving = false
     @State private var alert: AlertMessage?
 
@@ -178,6 +193,15 @@ struct AddTaskSheet: View {
                 Section("Task") {
                     TextField("What needs doing?", text: $title)
                     TextField("Details (optional)", text: $detail, axis: .vertical).lineLimit(2...5)
+                }
+                if !app.plants.isEmpty {
+                    Section("For") {
+                        Picker("For", selection: $forTent) {
+                            Text(app.selectedPlant?.displayName ?? "My plant").tag(false)
+                            Text("The tent").tag(true)
+                        }
+                        .pickerStyle(.segmented)
+                    }
                 }
                 Section {
                     Toggle("Has a due date", isOn: $hasDue)
@@ -208,7 +232,8 @@ struct AddTaskSheet: View {
             let d = detail.trimmingCharacters(in: .whitespacesAndNewlines)
             try await app.addTask(title: title.trimmingCharacters(in: .whitespaces),
                                   detail: d.isEmpty ? nil : d,
-                                  due: hasDue ? Formatting.dayString(due) : nil)
+                                  due: hasDue ? Formatting.dayString(due) : nil,
+                                  plantId: forTent ? nil : app.selectedPlantId)
             dismiss()
         } catch {
             alert = AlertMessage(message: error.localizedDescription)
