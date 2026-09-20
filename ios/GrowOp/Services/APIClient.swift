@@ -13,6 +13,7 @@ enum APIError: LocalizedError {
     // Home Assistant (ingress) mode
     case haTokenRejected
     case haTokenMalformed(Int)
+    case haNotAdmin
     case haAddonNotFound
     case haIngressSessionFailed(String)
     case haError(status: Int, message: String?)
@@ -34,9 +35,13 @@ enum APIError: LocalizedError {
             switch e.code {
             case .timedOut:
                 return "The server took too long to respond. Try again in a moment."
-            case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed:
-                return "Can't reach that address. Check the URL, and if you're using \"Same Wi‑Fi\" make sure you're at home."
-            case .notConnectedToInternet, .networkConnectionLost:
+            case .cannotFindHost, .dnsLookupFailed:
+                return "Can't find that address. If it ends in .local, try the server's IP address instead (for example http://192.168.1.50:8099)."
+            case .cannotConnectToHost:
+                return "Nothing answered at that address. Check the address and port, and that the Grow Brain add-on is running."
+            case .networkConnectionLost:
+                return "The connection was blocked. Go to iPhone Settings → Privacy & Security → Local Network and turn GrowOp ON, then try again."
+            case .notConnectedToInternet:
                 return "No network connection. Check Wi‑Fi or mobile data and try again."
             case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate:
                 return "Secure connection failed. Check the address (it may need https://)."
@@ -53,6 +58,8 @@ enum APIError: LocalizedError {
             return "Home Assistant rejected the access token. Create a new one in Home Assistant (your profile → Security → Create token), copy ALL of it (about 180 characters), and paste it in. The Grow Brain API key goes in the separate field below."
         case .haTokenMalformed(let n):
             return "That doesn't look like a Home Assistant long-lived access token (\(n) characters; a real one is about 180 characters with two dots). Create one under your profile → Security → Create token and copy the whole thing."
+        case .haNotAdmin:
+            return "That Home Assistant account isn't an administrator, so it can't reach add-ons. Make a token from an admin account."
         case .haAddonNotFound:
             return "Grow Brain add-on not found in Home Assistant. Make sure it's installed and running."
         case .haIngressSessionFailed(let why):
@@ -228,7 +235,8 @@ actor HAIngress {
             throw APIError.other(error)
         }
         let status = (response as? HTTPURLResponse)?.statusCode ?? 200
-        if status == 401 || status == 403 { throw APIError.haTokenRejected }
+        if status == 401 { throw APIError.haTokenRejected }
+        if status == 403 { throw APIError.haNotAdmin }
         let decoder = JSONDecoder()
         guard (200..<300).contains(status) else {
             let env = try? decoder.decode(HAEnvelope<T>.self, from: data)

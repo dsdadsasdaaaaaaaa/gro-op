@@ -2,17 +2,6 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>NSCameraUsageDescription</key>
-	<string>GrowOp uses the camera so you can photograph your plants for the advisor to check.</string>
-	<key>NSPhotoLibraryUsageDescription</key>
-	<string>GrowOp needs your photo library so you can send existing plant photos to the advisor.</string>
-	<key>NSAppTransportSecurity</key>
-	<dict>
-		<key>NSAllowsArbitraryLoads</key>
-		<true/>
-		<key>NSAllowsLocalNetworking</key>
-		<true/>
-	</dict>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -26,5 +15,23 @@
 			</array>
 		</dict>
 	</array>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_home-assistant._tcp</string>
+		<string>_http._tcp</string>
+	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>GrowOp uses the camera so you can photograph your plants for the advisor to check.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>GrowOp needs local network access to reach the Grow Brain add-on on your Home Assistant server over Wi‑Fi.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>GrowOp needs your photo library so you can send existing plant photos to the advisor.</string>
 </dict>
 </plist>
