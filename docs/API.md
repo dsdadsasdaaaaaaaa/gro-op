@@ -219,3 +219,12 @@ Brief:
 ## POST /api/control/start → `{"standby": false}` — fully automatic again: clears standby, pause and all manual overrides.
 Status includes `"control_paused_until": null | "..."` and `"standby": true|false`.
 ## GET /api/plan → the grow roadmap (phases with status done/current/upcoming, dates, what/watch_for/environment).
+
+## Plants (v0.2.0): two plants, two people, one shared tent
+Plant: `{"id":1,"name":"Levi's plant","owner":"Levi","strain":"Liberty Haze","breeder":"Barney's Farm","seed_type":"feminized photoperiod","medium":"soil","pot_size_l":11.0,"start_date":"2026-09-19"|null,"notes":"","notify_service":"notify.mobile_app_iphone"|null,"day_total":1,"created_at":"..."}`
+- `GET /api/plants` → `{"plants":[Plant...]}`; `POST /api/plants` (name, owner, optional strain/breeder/seed_type/medium/pot_size_l/start_date/notes/notify_service) → Plant; `PUT /api/plants/{id}` partial → Plant; `DELETE /api/plants/{id}` → `{"ok":true}` (archives).
+- Status gains `"plants":[Plant...]`; `grow` is tent-level (stage, dates, exhaust_ducted).
+- `GET /api/plan?plant_id=N` computes from that plant's start date and returns `plant_id`.
+- LogEntry, PhotoRequest, Photo, Task carry `plant_id` (null = whole tent). `POST /api/log`, `POST /api/tasks`, `POST /api/photos` (form field) and `POST /api/chat` accept `plant_id`.
+- Brief gains `per_plant: [{plant_id, name, headline, summary}]`.
+- Photo requests notify the plant owner's `notify_service` (falls back to everyone); briefs and safety alerts go to everyone.

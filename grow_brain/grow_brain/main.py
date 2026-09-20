@@ -67,6 +67,18 @@ async def lifespan(app: FastAPI):
     photo_dir.mkdir(parents=True, exist_ok=True)
     advisor = Advisor(store, controller, boot.anthropic_api_key, boot.model, notifier, photo_dir)
 
+    # Upgrading from a single-plant install: turn the old grow profile into plant #1.
+    if not await store.plants(include_archived=True):
+        prof = await store.get_kv("grow_profile", None) or {}
+        settings = await store.get_kv("settings", {}) or {}
+        first = await store.add_plant(
+            name="My plant", owner="", strain=prof.get("strain", "Liberty Haze"), breeder=prof.get("breeder", "Barney's Farm"),
+            seed_type=prof.get("seed_type", "feminized photoperiod"), medium=prof.get("medium", "soil"),
+            pot_size_l=prof.get("pot_size_l", 11.0), start_date=prof.get("start_date"), notes=prof.get("notes", ""),
+            notify_service=settings.get("notify_service"))
+        await store.assign_orphans_to_plant(first["id"])
+        log.info("Created plant #%s from the existing grow profile", first["id"])
+
     app.state.boot = boot
     app.state.store = store
     app.state.controller = controller

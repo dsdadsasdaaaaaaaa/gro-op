@@ -47,6 +47,32 @@ class StageChange(BaseModel):
     stage: Stage
 
 
+class PlantCreate(BaseModel):
+    name: str
+    owner: str = ""
+    strain: str = "Liberty Haze"
+    breeder: str = "Barney's Farm"
+    seed_type: str = "feminized photoperiod"
+    medium: Medium = "soil"
+    pot_size_l: float = 11.0
+    start_date: Optional[str] = None
+    notes: str = ""
+    notify_service: Optional[str] = None
+
+
+class PlantUpdate(BaseModel):
+    name: Optional[str] = None
+    owner: Optional[str] = None
+    strain: Optional[str] = None
+    breeder: Optional[str] = None
+    seed_type: Optional[str] = None
+    medium: Optional[Medium] = None
+    pot_size_l: Optional[float] = None
+    start_date: Optional[str] = None
+    notes: Optional[str] = None
+    notify_service: Optional[str] = None
+
+
 # ---------- Targets / settings ----------
 
 class TargetsUpdate(BaseModel):
@@ -110,6 +136,7 @@ LogKind = Literal["ph", "ec", "ppm", "water", "feed", "height", "note", "observa
 
 
 class LogCreate(BaseModel):
+    plant_id: Optional[int] = None
     kind: LogKind
     value: Optional[float] = None
     unit: Optional[str] = None
@@ -118,6 +145,7 @@ class LogCreate(BaseModel):
 
 
 class TaskCreate(BaseModel):
+    plant_id: Optional[int] = None
     title: str
     detail: Optional[str] = None
     due: Optional[str] = None
@@ -126,12 +154,14 @@ class TaskCreate(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+    plant_id: Optional[int] = None
 
 
 # ---------- Claude structured outputs ----------
 # Keep these small and strict; the advisor fills them in.
 
 class TaskDraft(BaseModel):
+    plant_id: Optional[int] = Field(default=None, description="Id of the plant this is for, or null if it's about the whole tent")
     title: str = Field(description="Short imperative to-do for the grower, e.g. 'Water 1 L at pH 6.3'")
     detail: str = Field(default="", description="One or two sentences of how/why")
     due: Optional[str] = Field(default=None, description="YYYY-MM-DD or null")
@@ -139,6 +169,7 @@ class TaskDraft(BaseModel):
 
 
 class PhotoRequestDraft(BaseModel):
+    plant_id: Optional[int] = Field(default=None, description="Id of the plant to photograph (required unless it's the whole tent)")
     title: str = Field(description="What to photograph, e.g. 'Underside of a lower fan leaf'")
     instructions: str = Field(description="Exactly where to stand, what to include, lighting (grow light off + phone flash for true colours), distance, focus")
     reason: str = Field(description="Why this photo helps right now")
@@ -150,7 +181,14 @@ class TargetChange(BaseModel):
     reason: str
 
 
+class PlantBrief(BaseModel):
+    plant_id: int
+    headline: str = Field(description="One line for this plant")
+    summary: str = Field(description="2–4 sentences for this plant's owner")
+
+
 class BriefOut(BaseModel):
+    per_plant: list[PlantBrief] = Field(default_factory=list, description="One entry per active plant")
     tasks_done: list[int] = Field(default_factory=list, description="Ids of OPEN tasks that are now finished or obsolete (the grower did them, or the plan changed). Close them here instead of asking the grower to.")
     headline: str = Field(description="One line, e.g. 'Day 26 – healthy, humidity creeping up'")
     summary: str = Field(description="3–6 plain-language sentences for a beginner")

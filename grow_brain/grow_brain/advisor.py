@@ -67,9 +67,21 @@ class Advisor:
         sensor = self.controller.sensor
         lines = [f"Local time: {now_local.strftime('%Y-%m-%d %H:%M')} ({settings.get('timezone')})",
                  f"Home Assistant connected: {self.controller.ha_ok}", ""]
-        lines.append("## Grow")
-        lines.append(f"- Strain: {profile['strain']} ({profile['breeder']}), {profile['seed_type']}; {profile['plant_count']} plant(s) in {profile['medium']}, {profile['pot_size_l']:g} L pots")
-        lines.append(f"- Started {profile.get('start_date') or 'unknown'} → day {day_total} overall; stage: {profile['stage']} (day {day_in_stage} of stage, since {profile.get('stage_started') or 'unknown'})")
+        plants = await self.store.plants()
+        pname = {p["id"]: p["name"] for p in plants}
+        today = now_local.date()
+        lines.append("## Tent")
+        lines.append(f"- Stage: {profile['stage']} (day {day_in_stage} of stage, since {profile.get('stage_started') or 'unknown'})")
+        lines += ["", "## Plants (use these ids in plant_id)"]
+        for p in plants:
+            from datetime import date as _date
+            try:
+                dt = (today - _date.fromisoformat(p["start_date"])).days if p.get("start_date") else None
+            except ValueError:
+                dt = None
+            lines.append(f"- plant_id={p['id']}: \"{p['name']}\" owned by {p['owner'] or 'unknown'}; {p['strain']} ({p['breeder']}), {p['seed_type']}, {p['medium']}, {p['pot_size_l']:g} L; started {p.get('start_date') or 'unknown'}" + (f" → day {dt}" if dt is not None else "") + (f"; notes: {p['notes']}" if p.get("notes") else ""))
+        if not plants:
+            lines.append("- none registered yet")
         if profile.get("flower_start_date"):
             lines.append(f"- Flower started {profile['flower_start_date']}; expected ~{profile['expected_flower_days']} days of flower")
         lines.append(f"- Exhaust ducted outside the tent: {'yes' if profile.get('exhaust_ducted') else 'NO (not connected yet)'}")
@@ -114,20 +126,21 @@ class Advisor:
             v = f" {e['value']:g}{(' ' + e['unit']) if e['unit'] else ''}" if e["value"] is not None else ""
             ctxs = f" [{e['context']}]" if e.get("context") else ""
             note = f" – {e['note']}" if e.get("note") else ""
-            lines.append(f"- {e['created_at'][:16]} {e['kind']}{v}{ctxs}{note}")
+            who = f"[{pname.get(e.get('plant_id'), 'tent')}] "
+            lines.append(f"- {e['created_at'][:16]} {who}{e['kind']}{v}{ctxs}{note}")
 
         lines += ["", "## Open tasks"]
         tasks = await self.store.tasks("open")
-        lines += [f"- #{t['id']} {t['title']}" + (f" (due {t['due']})" if t["due"] else "") for t in tasks] or ["- none"]
+        lines += [f"- #{t['id']} [{pname.get(t.get('plant_id'), 'tent')}] {t['title']}" + (f" (due {t['due']})" if t["due"] else "") for t in tasks] or ["- none"]
         lines += ["", "## Open photo requests"]
         prs = await self.store.photo_requests("open")
-        lines += [f"- #{p['id']} {p['title']} (asked {p['created_at'][:10]})" for p in prs] or ["- none"]
+        lines += [f"- #{p['id']} [{pname.get(p.get('plant_id'), 'tent')}] {p['title']} (asked {p['created_at'][:10]})" for p in prs] or ["- none"]
 
         lines += ["", "## Recent photo analyses"]
         photos = [p for p in await self.store.photos(5) if p.get("analysis")]
         for p in photos:
             a = p["analysis"]
-            lines.append(f"- {p['created_at'][:10]} health {a.get('health_score')}/10: {a.get('summary')}")
+            lines.append(f"- {p['created_at'][:10]} [{pname.get(p.get('plant_id'), 'tent')}] health {a.get('health_score')}/10: {a.get('summary')}")
         if not photos:
             lines.append("- none yet")
 
@@ -190,9 +203,16 @@ class Advisor:
 
     # ------------------------------------------------------------------ applying what Claude asked for
 
-    async def _apply(self, out: BaseModel, settings: dict, source: str) -> dict:
+    async def _apply(self, out: BaseModel, settings: dict, source: str, default_plant_id: int | None = None) -> dict:
         """Persist tasks / photo requests / target changes from a structured reply. Returns API-shaped dicts."""
         created_tasks, created_prs, applied_changes = [], [], []
+        plants = {p["id"]: p for p in await self.store.plants()}
+
+        def pid_of(draft):
+            pid = getattr(draft, "plant_id", None)
+            if pid in plants:
+                return pid
+            return default_plant_id if default_plant_id in plants else None
         open_tasks = await self.store.tasks("open")
         open_ids = {t["id"] for t in open_tasks}
         closed = []
@@ -202,23 +222,32 @@ class Advisor:
                 closed.append(tid)
         if closed:
             await self.store.add_event("info", "advisor", f"Advisor closed task(s) {', '.join('#' + str(t) for t in closed)}")
-        open_titles = {t["title"].strip().lower() for t in open_tasks if t["id"] not in closed}
+        open_titles = {(t.get("plant_id"), t["title"].strip().lower()) for t in open_tasks if t["id"] not in closed}
         for td in getattr(out, "tasks", []) or []:
-            if td.title.strip().lower() in open_titles:
+            key = (pid_of(td), td.title.strip().lower())
+            if key in open_titles:
                 continue
-            created_tasks.append(await self.store.add_task(td.title, td.detail, td.due, td.priority, "advisor"))
-            open_titles.add(td.title.strip().lower())
-        open_pr_titles = {p["title"].strip().lower() for p in await self.store.photo_requests("open")}
+            created_tasks.append(await self.store.add_task(td.title, td.detail, td.due, td.priority, "advisor", key[0]))
+            open_titles.add(key)
+        open_pr_titles = {(p.get("plant_id"), p["title"].strip().lower()) for p in await self.store.photo_requests("open")}
         for pd in getattr(out, "photo_requests", []) or []:
-            if pd.title.strip().lower() in open_pr_titles:
+            key = (pid_of(pd), pd.title.strip().lower())
+            if key in open_pr_titles:
                 continue
-            created_prs.append(await self.store.add_photo_request(pd.title, pd.instructions, pd.reason))
+            created_prs.append(await self.store.add_photo_request(pd.title, pd.instructions, pd.reason, key[0]))
         changes: list[TargetChange] = getattr(out, "target_changes", []) or []
         if changes:
             applied_changes = await self._apply_target_changes(changes, settings, source)
         if created_prs:
-            await self.notifier.send("photo_request", f"The advisor would like {len(created_prs)} photo(s): " +
-                                     "; ".join(p["title"] for p in created_prs), title="Photo request", url="growop://photos")
+            by_plant: dict = {}
+            for pr in created_prs:
+                by_plant.setdefault(pr.get("plant_id"), []).append(pr["title"])
+            for pid, titles in by_plant.items():
+                plant = plants.get(pid)
+                svc = plant.get("notify_service") if plant else None
+                who = f" for {plant['name']}" if plant else ""
+                await self.notifier.send(f"photo_request:{pid}", f"The advisor would like {len(titles)} photo(s){who}: " + "; ".join(titles),
+                                         title="Photo request", url="growop://photos", service=svc, everyone=svc is None)
         return {"tasks": created_tasks, "photo_requests": created_prs, "target_changes": applied_changes, "tasks_done": closed}
 
     async def _apply_target_changes(self, changes: list[TargetChange], settings: dict, source: str) -> list[dict]:
@@ -252,39 +281,49 @@ class Advisor:
 
     async def daily_brief(self) -> dict:
         ctx, settings = await self._context()
-        prompt = (f"{ctx}\n\n---\nWrite today's brief for the grower. Cover: how the last 24 h went against targets, "
-                  f"anything to fix, what the human should do today, and whether a photo would help right now. "
+        plants = await self.store.plants()
+        prompt = (f"{ctx}\n\n---\nWrite today's brief. The shared headline/summary/concerns/actions cover the tent. "
+                  f"Then fill per_plant with exactly one entry for each plant_id listed above ({', '.join(str(p['id']) for p in plants) or 'none'}): "
+                  f"what its owner should do for THAT plant today, addressed to them by name. Ask for a photo only when it would change your advice. "
                   f"Only include target_changes if the data clearly justifies them.")
         out = await self._parse(BriefOut, prompt, settings, effort="high")
         applied = await self._apply(out, settings, "brief")
         data = out.model_dump()
+        pname = {p["id"]: p["name"] for p in plants}
+        data["per_plant"] = [{**pb, "name": pname.get(pb["plant_id"], "")} for pb in data.get("per_plant", []) if pb["plant_id"] in pname]
         data.update(applied)
         brief = await self.store.add_brief(data)
         await self.store.add_event("info", "advisor", f"Daily brief: {out.headline}")
-        await self.notifier.send("brief", out.headline, title="Today's grow brief", url="growop://advisor")
+        await self.notifier.send("brief", out.headline, title="Today's grow brief", url="growop://advisor", everyone=True)
         return brief
 
     async def advise_on_log(self, entry: dict) -> dict:
         ctx, settings = await self._context()
         v = f"{entry['value']:g}{(' ' + entry['unit']) if entry.get('unit') else ''}" if entry.get("value") is not None else ""
-        prompt = (f"{ctx}\n\n---\nThe grower just logged: kind={entry['kind']} {v} "
+        plant = await self.store.get_plant(entry["plant_id"]) if entry.get("plant_id") else None
+        who = f"{plant['owner'] or 'The grower'} just logged for plant_id={plant['id']} (\"{plant['name']}\")" if plant else "The grower just logged (tent-wide)"
+        prompt = (f"{ctx}\n\n---\n{who}: kind={entry['kind']} {v} "
                   f"context={entry.get('context') or '-'} note={entry.get('note') or '-'}.\n"
-                  f"Tell them what this means and exactly what to do next.")
+                  f"Tell them what this means and exactly what to do next. Tasks/photo requests are for this plant unless clearly tent-wide.")
         out = await self._parse(LogAdviceOut, prompt, settings, effort="medium")
-        applied = await self._apply(out, settings, "log")
+        applied = await self._apply(out, settings, "log", default_plant_id=entry.get("plant_id"))
         advice = out.model_dump()
         advice.update(applied)
         await self.store.set_log_advice(entry["id"], advice)
         if out.urgency == "urgent":
-            await self.notifier.send("urgent_log", out.summary, title="Grow: act now", url="growop://log")
+            await self.notifier.send("urgent_log", out.summary, title="Grow: act now", url="growop://log",
+                                     service=(plant or {}).get("notify_service"), everyone=not (plant or {}).get("notify_service"))
         return advice
 
-    async def analyse_photo(self, photo_id: int, image_path: Path, media_type: str, request: dict | None, note: str | None) -> dict:
+    async def analyse_photo(self, photo_id: int, image_path: Path, media_type: str, request: dict | None, note: str | None,
+                            plant_id: int | None = None) -> dict:
         ctx, settings = await self._context()
         data = base64.standard_b64encode(image_path.read_bytes()).decode()
+        plant = await self.store.get_plant(plant_id) if plant_id else None
+        pl = f" It shows plant_id={plant['id']} (\"{plant['name']}\", {plant['owner'] or 'unknown owner'})." if plant else ""
         ask = ("This photo answers your request: "
-               f"'{request['title']}' — {request['instructions']} (reason: {request['reason']}).") if request else \
-              "The grower sent this photo on their own."
+               f"'{request['title']}' — {request['instructions']} (reason: {request['reason']}).{pl}") if request else \
+              f"The grower sent this photo on their own.{pl}"
         if note:
             ask += f" Grower's note: {note}"
         content = [
@@ -292,7 +331,7 @@ class Advisor:
             {"type": "text", "text": f"{ctx}\n\n---\n{ask}\nAnalyse the plant in the photo and say what to do."},
         ]
         out = await self._parse(PhotoAnalysisOut, content, settings, effort="high")
-        applied = await self._apply(out, settings, "photo")
+        applied = await self._apply(out, settings, "photo", default_plant_id=plant_id)
         analysis = out.model_dump()
         analysis.update(applied)
         await self.store.set_photo_analysis(photo_id, analysis)
@@ -301,15 +340,17 @@ class Advisor:
         await self.store.add_event("info", "advisor", f"Photo analysed: health {out.health_score}/10 – {out.summary[:120]}")
         return analysis
 
-    async def chat(self, message: str) -> dict:
+    async def chat(self, message: str, plant_id: int | None = None) -> dict:
         ctx, settings = await self._context()
         history_rows = await self.store.chat_history(20)
         history = [{"role": r["role"], "content": r["content"]} for r in history_rows]
+        plant = await self.store.get_plant(plant_id) if plant_id else None
+        who = f"{plant['owner'] or 'Grower'} (about plant_id={plant['id']}, \"{plant['name']}\") says" if plant else "Grower says"
         # Fresh context goes into the latest user turn so the cached system prompt stays stable.
-        user = f"<current_state>\n{ctx}\n</current_state>\n\nGrower says: {message}"
-        await self.store.add_chat("user", message)
+        user = f"<current_state>\n{ctx}\n</current_state>\n\n{who}: {message}"
+        await self.store.add_chat("user", (f"[{plant['owner'] or plant['name']}] " if plant else "") + message)
         out = await self._parse(ChatOut, user, settings, history=history, effort="medium")
-        applied = await self._apply(out, settings, "chat")
+        applied = await self._apply(out, settings, "chat", default_plant_id=plant_id)
         reply = out.reply
         extras = []
         if applied["tasks"]:

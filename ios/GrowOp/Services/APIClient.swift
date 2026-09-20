@@ -541,7 +541,7 @@ final class APIClient: @unchecked Sendable {
         try await sendIgnoringBody("POST", "/api/photo-requests/\(id)/skip")
     }
 
-    func uploadPhoto(jpeg: Data, requestId: Int?, note: String?) async throws -> Photo {
+    func uploadPhoto(jpeg: Data, requestId: Int?, note: String?, plantId: Int? = nil) async throws -> Photo {
         let boundary = "GrowOpBoundary-\(UUID().uuidString)"
         var body = Data()
         func field(_ name: String, _ value: String) {
@@ -551,6 +551,7 @@ final class APIClient: @unchecked Sendable {
             body.append("\r\n".data(using: .utf8)!)
         }
         if let requestId { field("request_id", String(requestId)) }
+        if let plantId { field("plant_id", String(plantId)) }
         if let note, !note.isEmpty { field("note", note) }
         body.append("--\(boundary)\r\n".data(using: .utf8)!)
         body.append("Content-Disposition: form-data; name=\"image\"; filename=\"photo.jpg\"\r\n".data(using: .utf8)!)
@@ -606,8 +607,8 @@ final class APIClient: @unchecked Sendable {
 
     // MARK: Chat
 
-    func sendChat(_ message: String) async throws -> ChatReply {
-        try await send("POST", "/api/chat", body: ChatSendRequest(message: message), timeout: APIClient.longTimeout)
+    func sendChat(_ message: String, plantId: Int? = nil) async throws -> ChatReply {
+        try await send("POST", "/api/chat", body: ChatSendRequest(message: message, plantId: plantId), timeout: APIClient.longTimeout)
     }
 
     func chatMessages(limit: Int = 50) async throws -> ChatListResponse {
@@ -630,9 +631,29 @@ final class APIClient: @unchecked Sendable {
         try await send("PUT", "/api/settings", body: fields)
     }
 
+    // MARK: Plants
+
+    func plants() async throws -> PlantsResponse { try await get("/api/plants") }
+
+    func createPlant(_ fields: [String: JSONValue]) async throws -> Plant {
+        try await send("POST", "/api/plants", body: fields)
+    }
+
+    func updatePlant(id: Int, _ fields: [String: JSONValue]) async throws -> Plant {
+        try await send("PUT", "/api/plants/\(id)", body: fields)
+    }
+
+    func deletePlant(id: Int) async throws {
+        try await sendIgnoringBody("DELETE", "/api/plants/\(id)")
+    }
+
     // MARK: Plan
 
-    func getPlan() async throws -> GrowPlan { try await get("/api/plan") }
+    func getPlan(plantId: Int? = nil) async throws -> GrowPlan {
+        var q: [URLQueryItem] = []
+        if let plantId { q.append(URLQueryItem(name: "plant_id", value: String(plantId))) }
+        return try await get("/api/plan", query: q)
+    }
 
     // MARK: Control
 

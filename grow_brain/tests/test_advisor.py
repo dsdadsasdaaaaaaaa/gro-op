@@ -31,9 +31,10 @@ class FakeParse:
 
 DEFAULTS = {
     BriefOut: {"headline": "Day 5 – fine", "summary": "All good.", "concerns": [], "actions": ["Water tomorrow"],
+               "per_plant": [{"plant_id": 1, "headline": "Levi: fine", "summary": "Keep going."}, {"plant_id": 2, "headline": "Dad: fine", "summary": "Same."}],
                "target_changes": [{"field": "humidity_max", "to": 40, "reason": "test clamp"}],
-               "photo_requests": [{"title": "Top of canopy", "instructions": "From above, light off, flash on", "reason": "check"}],
-               "tasks": [{"title": "Water 1 L", "detail": "pH 6.3", "due": None, "priority": "normal"}]},
+               "photo_requests": [{"plant_id": 2, "title": "Top of canopy", "instructions": "From above, light off, flash on", "reason": "check"}],
+               "tasks": [{"plant_id": 1, "title": "Water 1 L", "detail": "pH 6.3", "due": None, "priority": "normal"}]},
     LogAdviceOut: {"summary": "pH a bit high", "steps": ["Use pH 6.2 water next"], "urgency": "attention", "tasks_done": [1],
                    "target_changes": [], "photo_requests": [], "tasks": [{"title": "Water 1 L", "detail": "dupe", "due": None, "priority": "normal"}]},
     PhotoAnalysisOut: {"summary": "Healthy", "health_score": 9, "findings": [{"title": "ok", "severity": "info", "detail": "fine"}],
@@ -52,6 +53,8 @@ async def env(tmp_path: Path):
     await store.set_kv("grow_profile", {"stage": "veg", "start_date": "2026-09-01", "stage_started": "2026-09-10"})
     await store.set_device("temperature_sensor", "sensor.t")
     await store.set_device("light", "switch.l")
+    await store.add_plant(name="Levi's plant", owner="Levi", start_date="2026-09-19", notify_service="notify.levi")
+    await store.add_plant(name="Dad's plant", owner="Dad", start_date="2026-09-19", notify_service="notify.dad")
     adv = Advisor(store, controller, "sk-test", "claude-opus-5", notifier, tmp_path)
     fake = FakeParse()
     adv.client = SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(parse=fake)))
@@ -71,9 +74,12 @@ async def test_brief_applies_and_clamps(env):
     t, _, _ = await adv.controller.effective_targets()
     assert t.humidity_max == 60.0 and t.source == "advisor"
     assert (await store.latest_brief())["headline"] == "Day 5 – fine"
-    assert len(await store.photo_requests("open")) == 1
+    assert [pb["name"] for pb in brief["per_plant"]] == ["Levi's plant", "Dad's plant"]
+    prs = await store.photo_requests("open")
+    assert len(prs) == 1 and prs[0]["plant_id"] == 2 and brief["tasks"][0]["plant_id"] == 1
     call = fake.calls[0]
     assert call["model"] == "claude-opus-5" and call["fallbacks"] == "default"
+    assert "plant_id=2" in call["messages"][-1]["content"] and "Dad" in call["messages"][-1]["content"]
     assert call["system"][0]["cache_control"] == {"type": "ephemeral"}
     assert "Liberty Haze" in call["messages"][-1]["content"]
     assert "NO (not connected yet)" in call["messages"][-1]["content"]  # exhaust not ducted is surfaced
@@ -82,12 +88,14 @@ async def test_brief_applies_and_clamps(env):
 async def test_log_advice_dedupes_tasks(env):
     store, adv, fake = env
     await adv.daily_brief()
-    entry = await store.add_log_entry("ph", 6.8, "pH", "runoff", None)
+    entry = await store.add_log_entry("ph", 6.8, "pH", "runoff", None, plant_id=2)
     advice = await adv.advise_on_log(entry)
+    assert "Dad just logged for plant_id=2" in fake.calls[-1]["messages"][-1]["content"]
     assert advice["urgency"] == "attention"
     assert advice["tasks_done"] == [1]  # advisor closed the brief's task #1 itself
     assert (await store.get_task(1))["status"] == "done"
-    assert advice["tasks"] == [] or advice["tasks"][0]["title"] == "Water 1 L"  # re-created only because #1 was closed
+    # "Water 1 L" is open for plant 1; the same title for plant 2 is a different task and is created for plant 2
+    assert advice["tasks"] and advice["tasks"][0]["plant_id"] == 2
     assert (await store.get_log_entry(entry["id"]))["advice_summary"] == "pH a bit high"
 
 

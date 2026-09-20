@@ -134,3 +134,28 @@ async def test_devices_and_history(client):
     assert r.json()["entity_id"] is None
     h = (await c.get("/api/history", params={"hours": 1})).json()
     assert len(h["points"]) >= 1 and h["points"][0]["temp_c"] == 24.0
+
+
+async def test_plants_crud_and_per_plant_data(client):
+    c, ha, store, controller = client
+    p1 = (await c.post("/api/plants", json={"name": "Levi's plant", "owner": "Levi", "start_date": "2026-09-19"})).json()
+    p2 = (await c.post("/api/plants", json={"name": "Dad's plant", "owner": "Dad", "start_date": "2026-09-21", "medium": "coco"})).json()
+    assert p1["id"] != p2["id"] and p2["medium"] == "coco" and p1["day_total"] >= 0
+    ps = (await c.get("/api/plants")).json()["plants"]
+    assert [p["name"] for p in ps] == ["Levi's plant", "Dad's plant"]
+    assert len((await c.get("/api/status")).json()["plants"]) == 2
+    # per-plant plan uses that plant's start date
+    plan2 = (await c.get("/api/plan", params={"plant_id": p2["id"]})).json()
+    assert plan2["plant_id"] == p2["id"] and plan2["start_date"] == "2026-09-21"
+    # per-plant log / tasks
+    e = (await c.post("/api/log", json={"plant_id": p2["id"], "kind": "ph", "value": 6.5, "unit": "pH"})).json()["entry"]
+    assert e["plant_id"] == p2["id"]
+    t = (await c.post("/api/tasks", json={"plant_id": p1["id"], "title": "Water"})).json()
+    tt = (await c.post("/api/tasks", json={"title": "Duct the exhaust"})).json()
+    assert t["plant_id"] == p1["id"] and tt["plant_id"] is None
+    assert {x["plant_id"] for x in (await c.get("/api/tasks")).json()["tasks"]} == {p1["id"], None}
+    r = await c.put(f"/api/plants/{p2['id']}", json={"owner": "Dad S.", "notify_service": "notify.mobile_app_x"})
+    assert r.json()["owner"] == "Dad S." and r.json()["notify_service"] == "notify.mobile_app_x"
+    assert (await c.delete(f"/api/plants/{p2['id']}")).json() == {"ok": True}
+    assert [p["id"] for p in (await c.get("/api/plants")).json()["plants"]] == [p1["id"]]
+    assert (await c.get(f"/api/plants/999")).status_code in (404, 405)

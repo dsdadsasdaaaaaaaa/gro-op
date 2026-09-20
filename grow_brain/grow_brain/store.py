@@ -48,7 +48,22 @@ CREATE TABLE IF NOT EXISTS briefs (
 CREATE TABLE IF NOT EXISTS chat (
     id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS plants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, owner TEXT NOT NULL DEFAULT '',
+    strain TEXT NOT NULL DEFAULT 'Liberty Haze', breeder TEXT NOT NULL DEFAULT "Barney's Farm",
+    seed_type TEXT NOT NULL DEFAULT 'feminized photoperiod', medium TEXT NOT NULL DEFAULT 'soil',
+    pot_size_l REAL NOT NULL DEFAULT 11.0, start_date TEXT, notes TEXT NOT NULL DEFAULT '',
+    notify_service TEXT, created_at TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0
+);
 """
+
+# Columns added after the first release; applied idempotently at open().
+MIGRATIONS = [
+    ("log_entries", "plant_id", "INTEGER"),
+    ("photo_requests", "plant_id", "INTEGER"),
+    ("photos", "plant_id", "INTEGER"),
+    ("tasks", "plant_id", "INTEGER"),
+]
 
 
 def utcnow() -> datetime:
@@ -79,7 +94,51 @@ class Store:
         self.db = await aiosqlite.connect(self.path)
         self.db.row_factory = aiosqlite.Row
         await self.db.executescript(SCHEMA)
+        for table, col, typ in MIGRATIONS:
+            async with self.db.execute(f"PRAGMA table_info({table})") as cur:
+                cols = {r[1] for r in await cur.fetchall()}
+            if col not in cols:
+                await self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
         await self.db.execute("PRAGMA journal_mode=WAL")
+        await self.db.commit()
+
+    # ---- plants ----
+    async def plants(self, include_archived: bool = False) -> list[dict]:
+        q = "SELECT * FROM plants" + ("" if include_archived else " WHERE archived=0") + " ORDER BY id"
+        async with self.db.execute(q) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def get_plant(self, pid: int) -> dict | None:
+        async with self.db.execute("SELECT * FROM plants WHERE id=?", (pid,)) as cur:
+            r = await cur.fetchone()
+        return dict(r) if r else None
+
+    async def add_plant(self, **f) -> dict:
+        cols = ["name", "owner", "strain", "breeder", "seed_type", "medium", "pot_size_l", "start_date", "notes", "notify_service"]
+        vals = {c: f[c] for c in cols if c in f and f[c] is not None}
+        vals["created_at"] = iso(utcnow())
+        keys = ", ".join(vals); marks = ", ".join("?" for _ in vals)
+        cur = await self.db.execute(f"INSERT INTO plants({keys}) VALUES({marks})", tuple(vals.values()))
+        await self.db.commit()
+        return await self.get_plant(cur.lastrowid)
+
+    async def update_plant(self, pid: int, **f) -> dict | None:
+        cols = ["name", "owner", "strain", "breeder", "seed_type", "medium", "pot_size_l", "start_date", "notes", "notify_service"]
+        sets = {c: f[c] for c in cols if c in f}
+        if sets:
+            assign = ", ".join(f"{k}=?" for k in sets)
+            await self.db.execute(f"UPDATE plants SET {assign} WHERE id=?", (*sets.values(), pid))
+            await self.db.commit()
+        return await self.get_plant(pid)
+
+    async def archive_plant(self, pid: int) -> None:
+        await self.db.execute("UPDATE plants SET archived=1 WHERE id=?", (pid,))
+        await self.db.commit()
+
+    async def assign_orphans_to_plant(self, pid: int) -> None:
+        """One-time migration: rows created before plants existed belong to the first plant."""
+        for t in ("log_entries", "photo_requests", "photos"):
+            await self.db.execute(f"UPDATE {t} SET plant_id=? WHERE plant_id IS NULL", (pid,))
         await self.db.commit()
 
     async def close(self) -> None:
@@ -189,11 +248,11 @@ class Store:
             return [dict(r) for r in await cur.fetchall()]
 
     # ---- log entries ----
-    async def add_log_entry(self, kind, value, unit, context, note) -> dict:
+    async def add_log_entry(self, kind, value, unit, context, note, plant_id: int | None = None) -> dict:
         now = iso(utcnow())
         cur = await self.db.execute(
-            "INSERT INTO log_entries(created_at, kind, value, unit, context, note) VALUES(?,?,?,?,?,?)",
-            (now, kind, value, unit, context, note))
+            "INSERT INTO log_entries(created_at, kind, value, unit, context, note, plant_id) VALUES(?,?,?,?,?,?,?)",
+            (now, kind, value, unit, context, note, plant_id))
         await self.db.commit()
         return await self.get_log_entry(cur.lastrowid)
 
@@ -216,15 +275,15 @@ class Store:
         advice = json.loads(r["advice_json"]) if r["advice_json"] else None
         return {
             "id": r["id"], "created_at": r["created_at"], "kind": r["kind"], "value": r["value"],
-            "unit": r["unit"], "context": r["context"], "note": r["note"],
+            "unit": r["unit"], "context": r["context"], "note": r["note"], "plant_id": r["plant_id"],
             "advice_summary": advice.get("summary") if advice else None,
         }
 
     # ---- photo requests ----
-    async def add_photo_request(self, title: str, instructions: str, reason: str) -> dict:
+    async def add_photo_request(self, title: str, instructions: str, reason: str, plant_id: int | None = None) -> dict:
         cur = await self.db.execute(
-            "INSERT INTO photo_requests(created_at, title, instructions, reason) VALUES(?,?,?,?)",
-            (iso(utcnow()), title, instructions, reason))
+            "INSERT INTO photo_requests(created_at, title, instructions, reason, plant_id) VALUES(?,?,?,?,?)",
+            (iso(utcnow()), title, instructions, reason, plant_id))
         await self.db.commit()
         return await self.get_photo_request(cur.lastrowid)
 
@@ -247,9 +306,9 @@ class Store:
         await self.db.commit()
 
     # ---- photos ----
-    async def add_photo(self, request_id: int | None, note: str | None, path: str) -> int:
-        cur = await self.db.execute("INSERT INTO photos(created_at, request_id, note, path) VALUES(?,?,?,?)",
-                                    (iso(utcnow()), request_id, note, path))
+    async def add_photo(self, request_id: int | None, note: str | None, path: str, plant_id: int | None = None) -> int:
+        cur = await self.db.execute("INSERT INTO photos(created_at, request_id, note, path, plant_id) VALUES(?,?,?,?,?)",
+                                    (iso(utcnow()), request_id, note, path, plant_id))
         await self.db.commit()
         return cur.lastrowid
 
@@ -270,15 +329,16 @@ class Store:
     def _photo_row(r) -> dict:
         return {
             "id": r["id"], "created_at": r["created_at"], "request_id": r["request_id"], "note": r["note"],
+            "plant_id": r["plant_id"],
             "path": r["path"], "analysis": json.loads(r["analysis_json"]) if r["analysis_json"] else None,
             "image_url": f"/api/photos/{r['id']}/image",
         }
 
     # ---- tasks ----
-    async def add_task(self, title, detail, due, priority, created_by) -> dict:
+    async def add_task(self, title, detail, due, priority, created_by, plant_id: int | None = None) -> dict:
         cur = await self.db.execute(
-            "INSERT INTO tasks(title, detail, due, priority, created_by, created_at) VALUES(?,?,?,?,?,?)",
-            (title, detail, due, priority, created_by, iso(utcnow())))
+            "INSERT INTO tasks(title, detail, due, priority, created_by, created_at, plant_id) VALUES(?,?,?,?,?,?,?)",
+            (title, detail, due, priority, created_by, iso(utcnow()), plant_id))
         await self.db.commit()
         return await self.get_task(cur.lastrowid)
 

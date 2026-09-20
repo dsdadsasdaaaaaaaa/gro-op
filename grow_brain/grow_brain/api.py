@@ -17,7 +17,7 @@ from .advisor import Advisor, AdvisorError
 from .controller import Controller, light_window
 from .devices import ROLE_BY_NAME, ROLES, SWITCH_ROLES, automap
 from .models import (ChatRequest, DeviceMapUpdate, GrowProfile, GrowProfileUpdate, LogCreate, OverrideRequest,
-                     PauseRequest, SettingsModel, SettingsUpdate, StageChange, TargetsUpdate, TaskCreate)
+                     PauseRequest, PlantCreate, PlantUpdate, SettingsModel, SettingsUpdate, StageChange, TargetsUpdate, TaskCreate)
 from .store import Store, iso, utcnow
 from .plan import build_plan
 from .targets import STAGES, stage_defaults
@@ -46,6 +46,57 @@ auth = [Depends(require_key)]
 async def health(request: Request):
     st = request.app.state
     return {"ok": True, "version": __version__, "ha_connected": st.controller.ha_ok, "advisor_enabled": st.advisor.enabled}
+
+
+# ------------------------------------------------------------------ plants
+
+def _plant_api(p: dict, today: date) -> dict:
+    out = {k: p[k] for k in ("id", "name", "owner", "strain", "breeder", "seed_type", "medium", "pot_size_l", "start_date",
+                             "notes", "notify_service", "created_at")}
+    try:
+        out["day_total"] = max((today - date.fromisoformat(p["start_date"])).days, 0) if p.get("start_date") else 0
+    except ValueError:
+        out["day_total"] = 0
+    return out
+
+
+async def _plants_api(request: Request) -> list[dict]:
+    st = request.app.state
+    today = datetime.now(st.controller.tz(await st.controller.settings())).date()
+    return [_plant_api(p, today) for p in await st.store.plants()]
+
+
+@router.get("/plants", dependencies=auth)
+async def list_plants(request: Request):
+    return {"plants": await _plants_api(request)}
+
+
+@router.post("/plants", dependencies=auth)
+async def create_plant(body: PlantCreate, request: Request):
+    st = request.app.state
+    p = await st.store.add_plant(**body.model_dump())
+    await st.store.add_event("info", "system", f"Plant added: {p['name']} ({p['owner'] or 'no owner'})")
+    return _plant_api(p, datetime.now(st.controller.tz(await st.controller.settings())).date())
+
+
+@router.put("/plants/{pid}", dependencies=auth)
+async def update_plant(pid: int, body: PlantUpdate, request: Request):
+    st = request.app.state
+    if not await st.store.get_plant(pid):
+        raise HTTPException(404, "No such plant")
+    p = await st.store.update_plant(pid, **body.model_dump(exclude_unset=True))
+    return _plant_api(p, datetime.now(st.controller.tz(await st.controller.settings())).date())
+
+
+@router.delete("/plants/{pid}", dependencies=auth)
+async def delete_plant(pid: int, request: Request):
+    st = request.app.state
+    p = await st.store.get_plant(pid)
+    if not p:
+        raise HTTPException(404, "No such plant")
+    await st.store.archive_plant(pid)
+    await st.store.add_event("info", "system", f"Plant removed: {p['name']}")
+    return {"ok": True}
 
 
 # ------------------------------------------------------------------ status / history
@@ -114,7 +165,11 @@ async def status(request: Request):
             harvest = None
     alerts = [{"id": e["id"], "level": e["level"], "message": e["message"], "at": e["at"]}
               for e in await st.store.events(5, min_level="warn", hours=6)]
+    plants = await _plants_api(request)
+    if plants:
+        day_total = plants[0]["day_total"]
     return {
+        "plants": plants,
         "time": iso(utcnow()),
         "ha_connected": c.ha_ok,
         "sensor": c.sensor.to_api(),
@@ -133,17 +188,28 @@ async def status(request: Request):
 
 
 @router.get("/plan", dependencies=auth)
-async def plan(request: Request):
+async def plan(request: Request, plant_id: Optional[int] = None):
     st = request.app.state
     c: Controller = st.controller
     settings = await c.settings()
     profile = await c.profile()
     _, day_in_stage, day_total = await c.effective_targets(profile, settings)
     today = datetime.now(c.tz(settings)).date()
-    entries = await st.store.log_entries(200)
-    planted = any(e["kind"] == "transplant" or (e.get("context") or "").lower() in ("planted", "planting")
+    plants = await st.store.plants()
+    plant = next((p for p in plants if p["id"] == plant_id), None) or (plants[0] if plants else None)
+    if plant and plant.get("start_date"):
+        profile = {**profile, "start_date": plant["start_date"]}
+        try:
+            day_total = max((today - date.fromisoformat(plant["start_date"])).days, 0)
+        except ValueError:
+            pass
+    entries = await st.store.log_entries(300)
+    planted = any((e["kind"] == "transplant" or (e.get("context") or "").lower() in ("planted", "planting"))
+                  and (plant is None or e.get("plant_id") in (None, plant["id"]))
                   for e in entries if e["created_at"][:10] >= (profile.get("stage_started") or "0000"))
-    return build_plan(profile, today, day_in_stage, day_total, planted)
+    out = build_plan(profile, today, day_in_stage, day_total, planted)
+    out["plant_id"] = plant["id"] if plant else None
+    return out
 
 
 def _sched(hours: float) -> str:
@@ -385,7 +451,11 @@ async def start(request: Request):
 @router.post("/log", dependencies=auth)
 async def create_log(body: LogCreate, request: Request):
     st = request.app.state
-    entry = await st.store.add_log_entry(body.kind, body.value, body.unit, body.context, body.note)
+    plant_id = body.plant_id
+    if plant_id is None:
+        plants = await st.store.plants()
+        plant_id = plants[0]["id"] if len(plants) == 1 else None
+    entry = await st.store.add_log_entry(body.kind, body.value, body.unit, body.context, body.note, plant_id)
     advice = None
     if st.advisor.enabled:
         try:
@@ -413,7 +483,7 @@ async def list_tasks(request: Request, status: Optional[str] = "open"):
 
 @router.post("/tasks", dependencies=auth)
 async def create_task(body: TaskCreate, request: Request):
-    return await request.app.state.store.add_task(body.title, body.detail, body.due, body.priority, "user")
+    return await request.app.state.store.add_task(body.title, body.detail, body.due, body.priority, "user", body.plant_id)
 
 
 @router.post("/tasks/{tid}/complete", dependencies=auth)
@@ -451,7 +521,7 @@ async def skip_photo_request(rid: int, request: Request):
 
 @router.post("/photos", dependencies=auth)
 async def upload_photo(request: Request, image: UploadFile = File(...), request_id: Optional[int] = Form(None),
-                       note: Optional[str] = Form(None)):
+                       note: Optional[str] = Form(None), plant_id: Optional[int] = Form(None)):
     st = request.app.state
     raw = await image.read()
     if not raw:
@@ -463,7 +533,13 @@ async def upload_photo(request: Request, image: UploadFile = File(...), request_
     except Exception:
         raise HTTPException(400, "Could not read image")
     im.thumbnail((2000, 2000))
-    pid = await st.store.add_photo(request_id, note, "")
+    req = await st.store.get_photo_request(request_id) if request_id else None
+    if plant_id is None and req:
+        plant_id = req.get("plant_id")
+    if plant_id is None:
+        plants = await st.store.plants()
+        plant_id = plants[0]["id"] if len(plants) == 1 else None
+    pid = await st.store.add_photo(request_id, note, "", plant_id)
     photo_dir: Path = st.photo_dir
     path = photo_dir / f"{pid}.jpg"
     im.save(path, "JPEG", quality=88)
@@ -473,10 +549,9 @@ async def upload_photo(request: Request, image: UploadFile = File(...), request_
     await st.store.db.execute("UPDATE photos SET path=? WHERE id=?", (str(path), pid))
     await st.store.db.commit()
 
-    req = await st.store.get_photo_request(request_id) if request_id else None
     if st.advisor.enabled:
         try:
-            await st.advisor.analyse_photo(pid, path, "image/jpeg", req, note)
+            await st.advisor.analyse_photo(pid, path, "image/jpeg", req, note, plant_id)
         except AdvisorError as e:
             await st.store.set_photo_analysis(pid, {"summary": str(e), "health_score": 0, "findings": [], "actions": [],
                                                     "photo_requests": [], "tasks": []})
@@ -550,7 +625,7 @@ async def chat(body: ChatRequest, request: Request):
     if not body.message.strip():
         raise HTTPException(400, "Say something first")
     try:
-        return await st.advisor.chat(body.message.strip())
+        return await st.advisor.chat(body.message.strip(), body.plant_id)
     except AdvisorError as e:
         raise HTTPException(502, str(e))
 

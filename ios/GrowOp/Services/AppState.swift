@@ -21,9 +21,19 @@ final class AppState {
     // MARK: Other cached data
     var settings: Settings?
     var brief: Brief?
-    var plan: GrowPlan?
     var history: [HistoryPoint] = []
-    @ObservationIgnored private var lastPlanAt: Date?
+    @ObservationIgnored private var lastPlanAt: [Int: Date] = [:]
+
+    // MARK: Plants (one person per plant; the tent itself is shared)
+    var plants: [Plant] = []
+    /// nil = not known yet; false = the backend has no /api/plants (older add-on).
+    var plantsSupported: Bool?
+    private(set) var myPlantId: Int? = UserDefaults.standard.object(forKey: AppState.myPlantKey) as? Int
+    var selectedPlantId: Int?
+    private var plantChoiceDismissed = false
+    private static let myPlantKey = "growop.myPlantId"
+    /// Plans cached per plant id (0 = no plant / older backend).
+    var plans: [Int: GrowPlan] = [:]
     @ObservationIgnored private var lastHistoryAt: Date?
     var chatMessages: [ChatMessage] = []
     var logEntries: [LogEntry] = []
@@ -90,8 +100,14 @@ final class AppState {
         status = nil
         settings = nil
         brief = nil
-        plan = nil
-        lastPlanAt = nil
+        plans = [:]
+        lastPlanAt = [:]
+        plants = []
+        plantsSupported = nil
+        selectedPlantId = nil
+        plantChoiceDismissed = false
+        tasksLoaded = false
+        requestsLoaded = false
         history = []
         lastHistoryAt = nil
         chatMessages = []
@@ -131,10 +147,16 @@ final class AppState {
             status = st
             statusError = nil
             lastStatusAt = Date()
-            // The plan only changes with the grow (stage / start date), so reload it when
+            if let list = st.plants {
+                plantsSupported = true
+                applyPlants(list)
+            }
+            // The plan only changes with the grow (stage / the plant's start date), so reload it when
             // those change, when we don't have one yet, or every 10 minutes as a safety net.
-            let growChanged = previous?.grow?.stage != st.grow?.stage || previous?.grow?.startDate != st.grow?.startDate
-            let stale = lastPlanAt.map { Date().timeIntervalSince($0) > 600 } ?? true
+            let prevStart = previous?.plants?.first { $0.id == selectedPlantId }?.startDate ?? previous?.grow?.startDate
+            let newStart = selectedPlant?.startDate ?? st.grow?.startDate
+            let growChanged = previous?.grow?.stage != st.grow?.stage || prevStart != newStart
+            let stale = lastPlanAt[planKey].map { Date().timeIntervalSince($0) > 600 } ?? true
             if plan == nil || growChanged || stale {
                 await loadPlan()
             }
@@ -156,13 +178,100 @@ final class AppState {
         }
     }
 
-    // MARK: Plan
+    // MARK: Plants
+
+    var selectedPlant: Plant? { plants.first { $0.id == selectedPlantId } }
+    var myPlant: Plant? { plants.first { $0.id == myPlantId } }
+
+    /// True when the backend knows about plants but this phone hasn't said which one is "mine".
+    var needsPlantChoice: Bool {
+        plantsSupported == true && (myPlantId == nil || !plants.contains { $0.id == myPlantId })
+    }
+    var showPlantChoice: Bool { needsPlantChoice && !plantChoiceDismissed }
+    func dismissPlantChoice() { plantChoiceDismissed = true }
+
+    func loadPlants() async {
+        guard isConfigured else { return }
+        do {
+            let r = try await client.plants()
+            plantsSupported = true
+            applyPlants(r.plants ?? [])
+        } catch let e as APIError {
+            if case .http(let status, _) = e, status == 404 { plantsSupported = false }
+        } catch {}
+    }
+
+    private func applyPlants(_ list: [Plant]) {
+        plants = list.sorted { $0.id < $1.id }
+        // Keep a valid selection: my plant first, else the first plant.
+        if selectedPlantId == nil || !plants.contains(where: { $0.id == selectedPlantId }) {
+            selectedPlantId = (myPlantId.flatMap { id in plants.first { $0.id == id } } ?? plants.first)?.id
+        }
+    }
+
+    func selectPlant(_ id: Int?) {
+        guard id != selectedPlantId else { return }
+        selectedPlantId = id
+        if plan == nil { Task { await loadPlan() } }
+    }
+
+    func setMyPlant(_ id: Int?) {
+        myPlantId = id
+        if let id { UserDefaults.standard.set(id, forKey: Self.myPlantKey) } else { UserDefaults.standard.removeObject(forKey: Self.myPlantKey) }
+        if let id { selectPlant(id) }
+    }
+
+    @discardableResult
+    func createPlant(_ fields: [String: JSONValue]) async throws -> Plant {
+        let p = try await client.createPlant(fields)
+        plantsSupported = true
+        applyPlants(plants.filter { $0.id != p.id } + [p])
+        return p
+    }
+
+    @discardableResult
+    func updatePlant(id: Int, _ fields: [String: JSONValue]) async throws -> Plant {
+        let p = try await client.updatePlant(id: id, fields)
+        applyPlants(plants.map { $0.id == p.id ? p : $0 })
+        plans[p.id] = nil
+        if selectedPlantId == p.id { await loadPlan() }
+        return p
+    }
+
+    func deletePlant(id: Int) async throws {
+        try await client.deletePlant(id: id)
+        plans[id] = nil
+        if myPlantId == id { setMyPlant(nil) }
+        applyPlants(plants.filter { $0.id != id })
+        if selectedPlantId == id { selectedPlantId = plants.first?.id }
+    }
+
+    /// Items with no plant_id belong to the whole tent and show under every plant.
+    func belongsToSelected(_ plantId: Int?) -> Bool {
+        plantId == nil || plantId == selectedPlantId || plants.isEmpty
+    }
+    var logEntriesForSelected: [LogEntry] { logEntries.filter { belongsToSelected($0.plantId) } }
+    var openRequestsForSelected: [PhotoRequest] { openPhotoRequests.filter { belongsToSelected($0.plantId) } }
+    var photosForSelected: [Photo] { photos.filter { belongsToSelected($0.plantId) } }
+    var plantTasks: [TaskItem] { openTasks.filter { plants.isEmpty ? true : $0.plantId == selectedPlantId } }
+    var tentTasks: [TaskItem] { plants.isEmpty ? [] : openTasks.filter { $0.plantId == nil } }
+    var doneTasksForSelected: [TaskItem] { doneTasks.filter { belongsToSelected($0.plantId) } }
+    var needsYouTaskCount: Int { tasksLoaded ? plantTasks.count + tentTasks.count : (status?.openTasks ?? 0) }
+    var needsYouPhotoCount: Int { requestsLoaded ? openRequestsForSelected.count : (status?.openPhotoRequests ?? 0) }
+    private var tasksLoaded = false
+    private var requestsLoaded = false
+
+    // MARK: Plan (per selected plant)
+
+    private var planKey: Int { selectedPlantId ?? 0 }
+    var plan: GrowPlan? { plans[planKey] }
 
     func loadPlan() async {
         guard isConfigured else { return }
-        if let p = try? await client.getPlan() {
-            plan = p
-            lastPlanAt = Date()
+        let key = planKey
+        if let p = try? await client.getPlan(plantId: selectedPlantId) {
+            plans[key] = p
+            lastPlanAt[key] = Date()
         }
     }
 
@@ -216,7 +325,7 @@ final class AppState {
         let tempId = -(Int(Date().timeIntervalSince1970 * 1000))
         chatMessages.append(ChatMessage(id: tempId, role: "user", content: text, createdAt: Formatting.iso.string(from: Date())))
         do {
-            let reply = try await client.sendChat(text)
+            let reply = try await client.sendChat(text, plantId: selectedPlantId)
             chatMessages.append(ChatMessage(id: reply.id ?? tempId - 1, role: "assistant", content: reply.reply ?? "", createdAt: Formatting.iso.string(from: Date())))
             await loadChat()
         } catch {
@@ -240,6 +349,8 @@ final class AppState {
     }
 
     func submitLog(_ req: LogRequest) async throws -> LogResponse {
+        var req = req
+        if req.plantId == nil { req.plantId = selectedPlantId }
         let r = try await client.submitLog(req)
         await loadLog()
         await refreshStatus()
@@ -252,6 +363,7 @@ final class AppState {
         guard isConfigured else { return }
         if let r = try? await client.photoRequests(status: "open") {
             openPhotoRequests = (r.requests ?? []).sorted { $0.id > $1.id }
+            requestsLoaded = true
         }
     }
 
@@ -268,11 +380,11 @@ final class AppState {
         await refreshStatus()
     }
 
-    func uploadPhoto(image: UIImage, requestId: Int?, note: String?) async throws -> Photo {
+    func uploadPhoto(image: UIImage, requestId: Int?, note: String?, plantId: Int? = nil) async throws -> Photo {
         guard let data = ImageUtils.uploadData(for: image) else {
             throw APIError.other(NSError(domain: "GrowOp", code: 1, userInfo: [NSLocalizedDescriptionKey: "Couldn't prepare that photo."]))
         }
-        let photo = try await client.uploadPhoto(jpeg: data, requestId: requestId, note: note)
+        let photo = try await client.uploadPhoto(jpeg: data, requestId: requestId, note: note, plantId: plantId ?? selectedPlantId)
         if let requestId { openPhotoRequests.removeAll { $0.id == requestId } }
         // Cache the (downscaled) image we just sent as the thumbnail for instant display.
         thumbCache[photo.id] = ImageUtils.downscaled(image, maxLongEdge: 300)
@@ -310,6 +422,7 @@ final class AppState {
         guard isConfigured else { return }
         if let r = try? await client.tasks(status: "open") {
             openTasks = sortTasks(r.tasks ?? [])
+            tasksLoaded = true
         }
         if includeDone, let r = try? await client.tasks(status: "done") {
             doneTasks = (r.tasks ?? []).sorted { $0.id > $1.id }
@@ -339,8 +452,9 @@ final class AppState {
         status?.openTasks = openTasks.count
     }
 
-    func addTask(title: String, detail: String?, due: String?) async throws {
-        let t = try await client.createTask(NewTaskRequest(title: title, detail: detail, due: due))
+    /// `plantId` nil = a task for the whole tent.
+    func addTask(title: String, detail: String?, due: String?, plantId: Int?) async throws {
+        let t = try await client.createTask(NewTaskRequest(title: title, detail: detail, due: due, plantId: plantId))
         openTasks = sortTasks(openTasks + [t])
         status?.openTasks = openTasks.count
     }

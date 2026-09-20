@@ -225,9 +225,10 @@ struct StatusResponse: Codable {
     var alerts: [AlertItem]?
     var controlPausedUntil: String?
     var standby: Bool?
+    var plants: [Plant]?
 
     enum CodingKeys: String, CodingKey {
-        case time, sensor, grow, targets, light, devices, assessment, alerts, standby
+        case time, sensor, grow, targets, light, devices, assessment, alerts, standby, plants
         case haConnected = "ha_connected"
         case openTasks = "open_tasks"
         case openPhotoRequests = "open_photo_requests"
@@ -300,6 +301,59 @@ struct HAEntitiesResponse: Codable {
     var entities: [HAEntity]?
 }
 
+// MARK: Plants
+
+struct Plant: Codable, Identifiable, Equatable {
+    var id: Int
+    var name: String?
+    var owner: String?
+    var strain: String?
+    var breeder: String?
+    var seedType: String?
+    var medium: String?
+    var potSizeL: Double?
+    var startDate: String?
+    var notes: String?
+    var notifyService: String?
+    var dayTotal: Int?
+    var createdAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, owner, strain, breeder, medium, notes
+        case seedType = "seed_type"
+        case potSizeL = "pot_size_l"
+        case startDate = "start_date"
+        case notifyService = "notify_service"
+        case dayTotal = "day_total"
+        case createdAt = "created_at"
+    }
+
+    var displayName: String {
+        if let n = name, !n.isEmpty { return n }
+        if let o = owner, !o.isEmpty { return "\(o)'s plant" }
+        return "Plant \(id)"
+    }
+
+    /// Short label for the segmented switcher: "Levi's plant" → "Levi's".
+    var shortName: String {
+        let n = displayName
+        for suffix in [" plant", " Plant"] where n.hasSuffix(suffix) {
+            let t = String(n.dropLast(suffix.count)).trimmingCharacters(in: .whitespaces)
+            if !t.isEmpty { return t }
+        }
+        if let o = owner, !o.isEmpty, n.count > 12 { return "\(o)'s" }
+        return n
+    }
+}
+
+struct PlantsResponse: Codable {
+    var plants: [Plant]?
+}
+
+struct OKResponse: Codable {
+    var ok: Bool?
+}
+
 // MARK: Grow stage
 
 struct StageChangeRequest: Codable {
@@ -337,6 +391,12 @@ struct LogRequest: Codable {
     var unit: String?
     var context: String?
     var note: String?
+    var plantId: Int? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case kind, value, unit, context, note
+        case plantId = "plant_id"
+    }
 }
 
 struct LogEntry: Codable, Identifiable {
@@ -348,11 +408,13 @@ struct LogEntry: Codable, Identifiable {
     var context: String?
     var note: String?
     var adviceSummary: String?
+    var plantId: Int?
 
     enum CodingKeys: String, CodingKey {
         case id, kind, value, unit, context, note
         case createdAt = "created_at"
         case adviceSummary = "advice_summary"
+        case plantId = "plant_id"
     }
 }
 
@@ -388,11 +450,13 @@ struct PhotoRequest: Codable, Identifiable {
     var reason: String?
     var status: String?
     var photoId: Int?
+    var plantId: Int?
 
     enum CodingKeys: String, CodingKey {
         case id, title, instructions, reason, status
         case createdAt = "created_at"
         case photoId = "photo_id"
+        case plantId = "plant_id"
     }
 }
 
@@ -429,12 +493,14 @@ struct Photo: Codable, Identifiable {
     var note: String?
     var analysis: PhotoAnalysis?
     var imageUrl: String?
+    var plantId: Int?
 
     enum CodingKeys: String, CodingKey {
         case id, note, analysis
         case createdAt = "created_at"
         case requestId = "request_id"
         case imageUrl = "image_url"
+        case plantId = "plant_id"
     }
 }
 
@@ -453,11 +519,13 @@ struct TaskItem: Codable, Identifiable {
     var status: String?
     var createdBy: String?
     var createdAt: String?
+    var plantId: Int?
 
     enum CodingKeys: String, CodingKey {
         case id, title, detail, due, priority, status
         case createdBy = "created_by"
         case createdAt = "created_at"
+        case plantId = "plant_id"
     }
 
     var isDone: Bool { status == "done" }
@@ -472,6 +540,21 @@ struct NewTaskRequest: Codable {
     var title: String
     var detail: String?
     var due: String?
+    /// nil = a task for the whole tent (sent as an explicit JSON null).
+    var plantId: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case title, detail, due
+        case plantId = "plant_id"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(title, forKey: .title)
+        try c.encodeIfPresent(detail, forKey: .detail)
+        try c.encodeIfPresent(due, forKey: .due)
+        try c.encode(plantId, forKey: .plantId)
+    }
 }
 
 // MARK: Brief
@@ -495,12 +578,28 @@ struct Brief: Codable, Identifiable {
     var photoRequests: [PhotoRequest]?
     var tasks: [TaskItem]?
     var read: Bool?
+    var perPlant: [BriefPerPlant]?
 
     enum CodingKeys: String, CodingKey {
         case id, headline, summary, concerns, actions, tasks, read
         case createdAt = "created_at"
         case targetChanges = "target_changes"
         case photoRequests = "photo_requests"
+        case perPlant = "per_plant"
+    }
+}
+
+struct BriefPerPlant: Codable, Identifiable {
+    var plantId: Int?
+    var name: String?
+    var headline: String?
+    var summary: String?
+
+    var id: String { "\(plantId ?? -1)-\(name ?? "")" }
+
+    enum CodingKeys: String, CodingKey {
+        case name, headline, summary
+        case plantId = "plant_id"
     }
 }
 
@@ -525,6 +624,18 @@ struct ChatListResponse: Codable {
 
 struct ChatSendRequest: Codable {
     var message: String
+    var plantId: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case message
+        case plantId = "plant_id"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(message, forKey: .message)
+        try c.encode(plantId, forKey: .plantId)
+    }
 }
 
 struct ChatReply: Codable {
