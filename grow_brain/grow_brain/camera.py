@@ -54,7 +54,7 @@ class CameraService:
             return None  # explicitly off
         if eid and eid in self.controller.states:
             return eid
-        cands = self.candidates()
+        cands = [c for c in self.candidates() if c["state"] not in ("unavailable", "unknown", None)]
         auto = next((c["entity_id"] for c in cands if any(w in (c["name"] + c["entity_id"]).lower() for w in _PREFERRED)), None)
         return auto
 

@@ -58,6 +58,10 @@ struct SettingsView: View {
     @State private var alert: AlertMessage?
     @State private var loading = true
     @State private var showAddPlant = false
+    @State private var cameraCandidates: [CameraCandidate] = []
+    @State private var cameraEntity = ""
+    @State private var cameraSupported = true
+    @State private var cameraBusy = false
 
     private static let hhmm: DateFormatter = {
         let f = DateFormatter()
@@ -133,6 +137,7 @@ struct SettingsView: View {
             applySettings(st)
         }
         await app.loadPlants()
+        await loadCamera()
         loading = false
     }
 
@@ -335,8 +340,51 @@ struct SettingsView: View {
 
     // MARK: - Tent
 
+    private func loadCamera() async {
+        do {
+            let r = try await app.client.camera()
+            cameraSupported = true
+            cameraCandidates = r.candidates ?? []
+            cameraEntity = r.camera?.entityId ?? ""
+            if !cameraEntity.isEmpty, !cameraCandidates.contains(where: { $0.entityId == cameraEntity }) {
+                cameraCandidates.append(CameraCandidate(entityId: cameraEntity, name: r.camera?.name, state: nil, brand: nil, model: nil))
+            }
+        } catch let e as APIError {
+            if case .http(let status, _) = e, status == 404 { cameraSupported = false }
+        } catch {}
+    }
+
+    private func selectCamera(_ entityId: String) async {
+        cameraBusy = true
+        defer { cameraBusy = false }
+        do {
+            let r = try await app.setCamera(entityId: entityId.isEmpty ? nil : entityId)
+            cameraCandidates = r.candidates ?? cameraCandidates
+            cameraEntity = r.camera?.entityId ?? ""
+        } catch {
+            alert = AlertMessage(title: "Couldn't change the camera", message: error.localizedDescription)
+            await loadCamera()
+        }
+    }
+
     private var tentSection: some View {
         Section("Tent") {
+            if cameraSupported {
+                HStack {
+                    Picker("Tent camera", selection: Binding(
+                        get: { cameraEntity },
+                        set: { newValue in
+                            guard newValue != cameraEntity else { return }
+                            cameraEntity = newValue
+                            Task { await selectCamera(newValue) }
+                        })) {
+                        Text("Off").tag("")
+                        ForEach(cameraCandidates) { c in Text(c.displayName).tag(c.entityId) }
+                    }
+                    .disabled(cameraBusy)
+                    if cameraBusy { ProgressView().controlSize(.small) }
+                }
+            }
             HStack {
                 Text("Expected flower days")
                 Spacer()

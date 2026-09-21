@@ -655,6 +655,32 @@ final class APIClient: @unchecked Sendable {
         return try await get("/api/plan", query: q)
     }
 
+    // MARK: Tent camera
+
+    func camera() async throws -> CameraResponse { try await get("/api/camera") }
+
+    func setCamera(entityId: String?) async throws -> CameraResponse {
+        try await send("PUT", "/api/camera", body: CameraSelectRequest(entityId: entityId))
+    }
+
+    /// Fresh JPEG. Cache-busting query so no proxy/URLSession layer can serve an old frame.
+    func cameraSnapshot() async throws -> Data {
+        let stamp = URLQueryItem(name: "t", value: String(Int(Date().timeIntervalSince1970 * 1000)))
+        return try await perform(RequestSpec(method: "GET", path: "/api/camera/snapshot", query: [stamp], timeout: 10))
+    }
+
+    func cameraFrames(days: Int) async throws -> CameraFramesResponse {
+        try await get("/api/camera/frames", query: [URLQueryItem(name: "days", value: String(days))])
+    }
+
+    func cameraFrameData(id: Int) async throws -> Data {
+        try await perform(RequestSpec(method: "GET", path: "/api/camera/frames/\(id)", timeout: 20))
+    }
+
+    func cameraAnalyse(plantId: Int?, note: String?) async throws -> Photo {
+        try await send("POST", "/api/camera/analyse", body: CameraAnalyseRequest(plantId: plantId, note: note), timeout: APIClient.longTimeout)
+    }
+
     // MARK: Control
 
     func pauseControl(minutes: Int) async throws {

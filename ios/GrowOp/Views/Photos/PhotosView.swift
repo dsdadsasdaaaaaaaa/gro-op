@@ -202,7 +202,16 @@ struct PhotoGridCell: View {
         ZStack(alignment: .bottomLeading) {
             PhotoThumbnail(photoID: photo.id)
                 .aspectRatio(1, contentMode: .fill)
-            if let score = photo.analysis?.healthScore {
+            if photo.isFromCamera {
+                Image(systemName: "video.fill")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Color.white)
+                    .padding(5)
+                    .background(Color.night.opacity(0.85), in: Circle())
+                    .padding(6)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            if let score = photo.analysis?.healthScore, score > 0 {
                 Text("\(Formatting.number(score))/10")
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(Color.white)
@@ -327,7 +336,7 @@ struct PhotoAnalysisView: View {
         if let a = analysis {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .center, spacing: 14) {
-                    if let s = a.healthScore {
+                    if let s = a.healthScore, s > 0 {
                         VStack(spacing: 0) {
                             Text(Formatting.number(s)).font(.system(size: 34, weight: .bold, design: .rounded))
                             Text("out of 10").font(.caption2)
@@ -405,7 +414,9 @@ struct PhotoDetailView: View {
                 HStack {
                     Text(Formatting.shortDateTime(photo.createdAt)).font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    if photo.requestId != nil {
+                    if photo.isFromCamera {
+                        LevelChip(text: "Tent camera", color: .night)
+                    } else if photo.requestId != nil {
                         LevelChip(text: "Requested by advisor", color: .night)
                     }
                 }

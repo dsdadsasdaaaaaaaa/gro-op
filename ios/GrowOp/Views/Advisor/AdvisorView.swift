@@ -198,6 +198,10 @@ struct BriefCard: View {
             if let h = brief.headline, !h.isEmpty {
                 Text(h).font(.title2.bold()).fixedSize(horizontal: false, vertical: true)
             }
+            if let t = brief.cameraFrameAt, let d = Formatting.parseISO(t) {
+                Label("Included the tent camera frame from \(d.formatted(date: .abbreviated, time: .shortened))", systemImage: "video.fill")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if let s = brief.summary, !s.isEmpty {
                 Text(s).font(.body).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }

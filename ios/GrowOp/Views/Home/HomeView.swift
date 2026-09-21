@@ -10,7 +10,7 @@ struct HomeView: View {
     @State private var selectedDevice: DeviceSelection?
     @State private var path = NavigationPath()
     // Launch-argument hooks for screenshots/testing, like `-growop.initialTab`:
-    //   -growop.initialScroll plan|devices|needs   -growop.initialScreen plan|settings   -growop.initialDevice <role>
+    //   -growop.initialScroll plan|devices|needs   -growop.initialScreen plan|settings|camera|camera-timelapse|camera-look   -growop.initialDevice <role>
     private let initialScroll = UserDefaults.standard.string(forKey: "growop.initialScroll")
     private let initialScreen = UserDefaults.standard.string(forKey: "growop.initialScreen")
     private let initialDevice = UserDefaults.standard.string(forKey: "growop.initialDevice")
@@ -41,7 +41,13 @@ struct HomeView: View {
             }
             }
             .navigationDestination(for: String.self) { screen in
-                if screen == "plan" { PlanView() }
+                switch screen {
+                case "plan": PlanView()
+                case "camera": CameraView()
+                case "camera-timelapse": CameraView(initialMode: .timelapse)
+                case "camera-look": CameraView(autoLook: true)
+                default: EmptyView()
+                }
             }
             .background(Color.bg.ignoresSafeArea())
             .refreshable {
@@ -74,7 +80,7 @@ struct HomeView: View {
             }
             .errorAlert($alert)
             .task {
-                if initialScreen == "plan" { path.append("plan") }
+                if let sc = initialScreen, ["plan", "camera", "camera-timelapse", "camera-look"].contains(sc) { path.append(sc) }
                 if initialScreen == "settings" { showSettings = true }
                 if let role = initialDevice { selectedDevice = DeviceSelection(role: role) }
                 if app.plantsSupported == nil { await app.loadPlants() }
@@ -117,6 +123,16 @@ struct HomeView: View {
                  nextChange: Formatting.parseISO(st.light?.nextChangeAt),
                  schedule: st.light?.schedule,
                  muted: standby)
+
+        if let cam = st.camera {
+            NavigationLink {
+                CameraView()
+            } label: {
+                CameraCard(camera: cam, muted: standby)
+            }
+            .buttonStyle(.plain)
+            .id("camera")
+        }
 
         NavigationLink {
             PlanView()

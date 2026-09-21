@@ -34,6 +34,14 @@ final class AppState {
     private static let myPlantKey = "growop.myPlantId"
     /// Plans cached per plant id (0 = no plant / older backend).
     var plans: [Int: GrowPlan] = [:]
+
+    // MARK: Tent camera
+    var cameraImage: UIImage?
+    var cameraImageAt: Date?
+    var cameraError: String?
+    @ObservationIgnored private var snapshotInFlight = false
+    @ObservationIgnored private let frameCache = NSCache<NSNumber, UIImage>()
+    @ObservationIgnored private var frameInFlight: [Int: Task<UIImage?, Never>] = [:]
     @ObservationIgnored private var lastHistoryAt: Date?
     var chatMessages: [ChatMessage] = []
     var logEntries: [LogEntry] = []
@@ -56,6 +64,7 @@ final class AppState {
         client = APIClient(config: cfg)
         isConfigured = cfg.isConfigured
         fullImageCache.countLimit = 10
+        frameCache.countLimit = 120
     }
 
     // MARK: Units
@@ -80,6 +89,7 @@ final class AppState {
         status = result.status
         statusError = nil
         lastStatusAt = Date()
+        stopPolling()
         startPolling()
         Task { await refreshSettings() }
         return result.health
@@ -110,6 +120,9 @@ final class AppState {
         requestsLoaded = false
         history = []
         lastHistoryAt = nil
+        cameraImage = nil
+        cameraImageAt = nil
+        cameraError = nil
         chatMessages = []
         logEntries = []
         openPhotoRequests = []
@@ -122,8 +135,7 @@ final class AppState {
     // MARK: Polling
 
     func startPolling() {
-        guard isConfigured else { return }
-        pollTask?.cancel()
+        guard isConfigured, pollTask == nil else { return }
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refreshStatus()
@@ -163,6 +175,7 @@ final class AppState {
             let historyStale = lastHistoryAt.map { Date().timeIntervalSince($0) > 300 } ?? true
             if historyStale { await loadHistory() }
         } catch {
+            if case APIError.network(let e) = error, e.code == .cancelled { return }
             statusError = error.localizedDescription
         }
     }
@@ -260,6 +273,73 @@ final class AppState {
     var needsYouPhotoCount: Int { requestsLoaded ? openRequestsForSelected.count : (status?.openPhotoRequests ?? 0) }
     private var tasksLoaded = false
     private var requestsLoaded = false
+
+    // MARK: Tent camera
+
+    var hasCamera: Bool { status?.camera != nil }
+
+    /// One fresh snapshot; overlapping calls are coalesced.
+    func refreshCameraSnapshot() async {
+        guard isConfigured, !snapshotInFlight else { return }
+        snapshotInFlight = true
+        defer { snapshotInFlight = false }
+        do {
+            let data = try await client.cameraSnapshot()
+            if let img = UIImage(data: data) {
+                cameraImage = img
+                cameraImageAt = Date()
+                cameraError = nil
+            } else {
+                cameraError = "The camera sent something that isn't an image."
+            }
+        } catch let e as APIError {
+            if case .http(_, let detail) = e, let detail, !detail.isEmpty { cameraError = detail } else { cameraError = e.localizedDescription }
+        } catch {
+            cameraError = error.localizedDescription
+        }
+    }
+
+    func cameraFrames(days: Int) async -> [CameraFrame] {
+        guard isConfigured else { return [] }
+        let r = try? await client.cameraFrames(days: days)
+        return (r?.frames ?? []).sorted { ($0.t ?? "") < ($1.t ?? "") }
+    }
+
+    func cachedFrame(for id: Int) -> UIImage? { frameCache.object(forKey: NSNumber(value: id)) }
+
+    func frame(for id: Int) async -> UIImage? {
+        if let img = cachedFrame(for: id) { return img }
+        if let t = frameInFlight[id] { return await t.value }
+        let client = self.client
+        let task = Task<UIImage?, Never> {
+            guard let data = try? await client.cameraFrameData(id: id) else { return nil }
+            return UIImage(data: data)
+        }
+        frameInFlight[id] = task
+        let img = await task.value
+        frameInFlight[id] = nil
+        if let img { frameCache.setObject(img, forKey: NSNumber(value: id)) }
+        return img
+    }
+
+    /// "Look now": the backend takes a snapshot and runs the advisor on it for the selected plant.
+    func analyseCamera(note: String? = nil) async throws -> Photo {
+        let photo = try await client.cameraAnalyse(plantId: selectedPlantId, note: note)
+        await loadPhotos()
+        await loadPhotoRequests()
+        await refreshStatus()
+        return photo
+    }
+
+    @discardableResult
+    func setCamera(entityId: String?) async throws -> CameraResponse {
+        let r = try await client.setCamera(entityId: entityId)
+        status?.camera = r.camera
+        cameraImage = nil
+        cameraImageAt = nil
+        cameraError = nil
+        return r
+    }
 
     // MARK: Plan (per selected plant)
 

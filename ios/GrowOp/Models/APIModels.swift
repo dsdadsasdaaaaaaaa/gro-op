@@ -226,9 +226,10 @@ struct StatusResponse: Codable {
     var controlPausedUntil: String?
     var standby: Bool?
     var plants: [Plant]?
+    var camera: CameraInfo?
 
     enum CodingKeys: String, CodingKey {
-        case time, sensor, grow, targets, light, devices, assessment, alerts, standby, plants
+        case time, sensor, grow, targets, light, devices, assessment, alerts, standby, plants, camera
         case haConnected = "ha_connected"
         case openTasks = "open_tasks"
         case openPhotoRequests = "open_photo_requests"
@@ -352,6 +353,97 @@ struct PlantsResponse: Codable {
 
 struct OKResponse: Codable {
     var ok: Bool?
+}
+
+// MARK: Tent camera
+
+struct CameraInfo: Codable {
+    var entityId: String?
+    var name: String?
+    var available: Bool?
+    var snapshotUrl: String?
+    var streamUrl: String?
+    var lastFrameAt: String?
+    var frameCount: Int?
+    var error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name, available, error
+        case entityId = "entity_id"
+        case snapshotUrl = "snapshot_url"
+        case streamUrl = "stream_url"
+        case lastFrameAt = "last_frame_at"
+        case frameCount = "frame_count"
+    }
+
+    var displayName: String {
+        if let n = name, !n.isEmpty { return n }
+        return entityId ?? "Tent camera"
+    }
+}
+
+struct CameraCandidate: Codable, Identifiable {
+    var entityId: String
+    var name: String?
+    var state: String?
+    var brand: String?
+    var model: String?
+
+    var id: String { entityId }
+
+    enum CodingKeys: String, CodingKey {
+        case name, state, brand, model
+        case entityId = "entity_id"
+    }
+
+    var displayName: String { (name?.isEmpty == false) ? name! : entityId }
+}
+
+struct CameraResponse: Codable {
+    var camera: CameraInfo?
+    var candidates: [CameraCandidate]?
+}
+
+struct CameraSelectRequest: Codable {
+    var entityId: String?
+    enum CodingKeys: String, CodingKey { case entityId = "entity_id" }
+    // Always emit the key (null = off).
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(entityId, forKey: .entityId)
+    }
+}
+
+struct CameraFrame: Codable, Identifiable {
+    var id: Int
+    var t: String?
+    var lightsOn: Bool?
+    var url: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, t, url
+        case lightsOn = "lights_on"
+    }
+}
+
+struct CameraFramesResponse: Codable {
+    var frames: [CameraFrame]?
+}
+
+struct CameraAnalyseRequest: Codable {
+    var plantId: Int?
+    var note: String?
+
+    enum CodingKeys: String, CodingKey {
+        case note
+        case plantId = "plant_id"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(plantId, forKey: .plantId)
+        try c.encodeIfPresent(note, forKey: .note)
+    }
 }
 
 // MARK: Grow stage
@@ -502,6 +594,9 @@ struct Photo: Codable, Identifiable {
         case imageUrl = "image_url"
         case plantId = "plant_id"
     }
+
+    /// Photos the backend took from the tent camera ("look now" or brief frames).
+    var isFromCamera: Bool { (note ?? "").hasPrefix("Tent camera snapshot") }
 }
 
 struct PhotosResponse: Codable {
@@ -579,6 +674,7 @@ struct Brief: Codable, Identifiable {
     var tasks: [TaskItem]?
     var read: Bool?
     var perPlant: [BriefPerPlant]?
+    var cameraFrameAt: String?
 
     enum CodingKeys: String, CodingKey {
         case id, headline, summary, concerns, actions, tasks, read
@@ -586,6 +682,7 @@ struct Brief: Codable, Identifiable {
         case targetChanges = "target_changes"
         case photoRequests = "photo_requests"
         case perPlant = "per_plant"
+        case cameraFrameAt = "camera_frame_at"
     }
 }
 
@@ -672,9 +769,13 @@ struct Settings: Codable {
     var safetyTempMinC: Double?
     var controlIntervalS: Double?
     var minSwitchIntervalS: Double?
+    var cameraEntity: String?
+    var cameraCaptureMinutes: Double?
 
     enum CodingKeys: String, CodingKey {
         case units, timezone, model
+        case cameraEntity = "camera_entity"
+        case cameraCaptureMinutes = "camera_capture_minutes"
         case briefTime = "brief_time"
         case autoApplyAdvisorTargets = "auto_apply_advisor_targets"
         case notifyService = "notify_service"
