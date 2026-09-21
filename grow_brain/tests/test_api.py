@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
+from grow_brain.camera import CameraService
 from grow_brain.controller import Controller
 from grow_brain.main import create_app
 from grow_brain.notify import Notifier
@@ -31,10 +32,19 @@ class FakeHA:
     async def get_states(self):
         out = [{"entity_id": e, "state": s, "attributes": {"friendly_name": e}, "last_updated": self._now, "last_reported": self._now}
                for e, s in self.state.items()]
+        out.append({"entity_id": "camera.wyze_cam_man_cave", "state": "idle", "attributes": {"friendly_name": "Wyze Cam Man cave"},
+                    "last_updated": self._now, "last_reported": self._now})
         for e, (v, u, dc) in self.sensors.items():
             out.append({"entity_id": e, "state": v, "attributes": {"unit_of_measurement": u, "device_class": dc, "friendly_name": e},
                         "last_updated": self._now, "last_reported": self._now})
         return out
+
+    async def camera_image(self, entity_id):
+        import io
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (640, 480), (30, 120, 40)).save(buf, "JPEG")
+        return buf.getvalue()
 
     async def turn(self, entity_id, on):
         self.calls.append((entity_id, on))
@@ -70,6 +80,8 @@ async def client(tmp_path: Path):
     app.state.controller = controller
     app.state.advisor = SimpleNamespace(enabled=False)
     app.state.photo_dir = tmp_path
+    app.state.ha = ha
+    app.state.camera = CameraService(store, ha, controller, tmp_path / "cam")
     for role, eid in {"light": "switch.grow_light", "exhaust_fan": "switch.grow_exhaust", "humidifier": "switch.grow_humidifier",
                       "temperature_sensor": "sensor.tent_temperature", "humidity_sensor": "sensor.tent_humidity"}.items():
         await store.set_device(role, eid)
@@ -159,3 +171,21 @@ async def test_plants_crud_and_per_plant_data(client):
     assert (await c.delete(f"/api/plants/{p2['id']}")).json() == {"ok": True}
     assert [p["id"] for p in (await c.get("/api/plants")).json()["plants"]] == [p1["id"]]
     assert (await c.get(f"/api/plants/999")).status_code in (404, 405)
+
+
+async def test_camera_auto_select_snapshot_frames_and_analyse(client):
+    c, ha, store, controller = client
+    info = (await c.get("/api/camera")).json()
+    assert info["camera"]["entity_id"] == "camera.wyze_cam_man_cave" and info["camera"]["name"] == "Wyze Cam Man cave"
+    assert (await c.get("/api/status")).json()["camera"]["entity_id"] == "camera.wyze_cam_man_cave"
+    r = await c.get("/api/camera/snapshot")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg" and r.content[:2] == b"\xff\xd8"
+    cam = c._transport.app.state.camera
+    fr = await cam.capture_frame()
+    assert fr and (await c.get("/api/camera/frames")).json()["frames"][0]["id"] == fr["id"]
+    assert (await c.get(f"/api/camera/frames/{fr['id']}")).status_code == 200
+    p = (await c.post("/api/camera/analyse", json={"plant_id": None})).json()
+    assert p["id"] and "camera" in p["note"].lower() and p["analysis"]["summary"].startswith("Saved")
+    # turning it off
+    assert (await c.put("/api/camera", json={"entity_id": None})).json()["camera"] is None
+    assert (await c.get("/api/camera/snapshot")).status_code == 503

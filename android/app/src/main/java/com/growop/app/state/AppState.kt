@@ -114,6 +114,13 @@ class AppState(context: Context) {
     /** Deep-link / notification tab requests (growop://advisor etc.). */
     val pendingTab = MutableStateFlow<AppTab?>(null)
 
+    /**
+     * Debug-only onboarding prefill (`adb shell am start ... --es growop.prefill.url http://10.0.2.2:8099
+     * --es growop.prefill.apiKey test`), mirroring the iOS `-growop.prefill.*` launch arguments.
+     * Keys: url, apiKey, haURL, haToken. Empty unless MainActivity sets it from a debuggable build.
+     */
+    val prefill = MutableStateFlow<Map<String, String>>(emptyMap())
+
     val client: ApiClient = ApiClient(ServerConfig()) { slug, path ->
         scope.launch {
             val cfg = value.config.copy(haAddonSlug = slug, haIngressPath = path)

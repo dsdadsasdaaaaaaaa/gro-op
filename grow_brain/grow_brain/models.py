@@ -99,6 +99,8 @@ class SettingsModel(BaseModel):
     safety_temp_min_c: float = 12.0
     control_interval_s: int = 30
     min_switch_interval_s: int = 180
+    camera_entity: Optional[str] = None
+    camera_capture_minutes: int = 30
 
 
 class SettingsUpdate(BaseModel):
@@ -112,6 +114,17 @@ class SettingsUpdate(BaseModel):
     safety_temp_min_c: Optional[float] = None
     control_interval_s: Optional[int] = None
     min_switch_interval_s: Optional[int] = None
+    camera_entity: Optional[str] = None
+    camera_capture_minutes: Optional[int] = None
+
+
+class CameraSelect(BaseModel):
+    entity_id: Optional[str] = None  # null/"" = off
+
+
+class CameraAnalyse(BaseModel):
+    plant_id: Optional[int] = None
+    note: Optional[str] = None
 
 
 # ---------- Devices ----------

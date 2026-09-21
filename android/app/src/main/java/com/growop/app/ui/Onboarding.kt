@@ -28,6 +28,7 @@ import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,6 +41,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.growop.app.data.ApiError
 import com.growop.app.data.ConnectionMode
 import com.growop.app.data.ServerConfig
@@ -122,6 +124,15 @@ fun OnboardingScreen(app: AppState) {
     var apiKey by remember { mutableStateOf(saved.apiKey) }
     var connecting by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
+    val prefill by app.prefill.collectAsStateWithLifecycle()
+    LaunchedEffect(prefill) {
+        if (prefill.isEmpty()) return@LaunchedEffect
+        prefill["url"]?.let { url = it }
+        prefill["apiKey"]?.let { apiKey = it }
+        prefill["haURL"]?.let { haUrl = it; mode = ConnectionMode.HOME_ASSISTANT }
+        prefill["haToken"]?.let { haToken = it }
+        if (prefill["haURL"] == null) mode = ConnectionMode.DIRECT
+    }
 
     val candidate = ServerConfig(mode = mode, baseUrl = url, apiKey = apiKey, haUrl = haUrl, haToken = haToken)
 

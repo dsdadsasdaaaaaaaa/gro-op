@@ -36,8 +36,10 @@ class AdvisorError(Exception):
 
 
 class Advisor:
-    def __init__(self, store: Store, controller: Controller, api_key: Optional[str], default_model: str, notifier, photo_dir: Path):
+    def __init__(self, store: Store, controller: Controller, api_key: Optional[str], default_model: str, notifier, photo_dir: Path,
+                 camera=None):
         self.store = store
+        self.camera = camera
         self.controller = controller
         self.notifier = notifier
         self.photo_dir = photo_dir
@@ -88,6 +90,9 @@ class Advisor:
         if profile.get("notes"):
             lines.append(f"- Grower notes: {profile['notes']}")
 
+        cam = await self.camera.info() if self.camera else None
+        if cam:
+            lines.append(f"- Fixed tent camera: {cam['name']} ({'online' if cam['available'] else 'offline'}); you receive its latest frame with the daily brief and when the grower taps 'look now'.")
         lines += ["", "## Equipment mapped in Home Assistant"]
         dmap = await self.store.get_device_map()
         for role, rd in ROLE_BY_NAME.items():
@@ -286,9 +291,18 @@ class Advisor:
                   f"Then fill per_plant with exactly one entry for each plant_id listed above ({', '.join(str(p['id']) for p in plants) or 'none'}): "
                   f"what its owner should do for THAT plant today, addressed to them by name. Ask for a photo only when it would change your advice. "
                   f"Only include target_changes if the data clearly justifies them.")
-        out = await self._parse(BriefOut, prompt, settings, effort="high")
+        content: Any = prompt
+        frame = await self.camera.latest_frame_for_advisor() if self.camera else None
+        if frame:
+            img, when = frame
+            content = [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.standard_b64encode(img).decode()}},
+                {"type": "text", "text": prompt + f"\n\nThe image is the latest frame from the fixed tent camera (taken {when[:16]} UTC, wide view of the whole tent). Use it: comment on what you can actually see; if it's dark or empty say so."},
+            ]
+        out = await self._parse(BriefOut, content, settings, effort="high")
         applied = await self._apply(out, settings, "brief")
         data = out.model_dump()
+        data["camera_frame_at"] = frame[1] if frame else None
         pname = {p["id"]: p["name"] for p in plants}
         data["per_plant"] = [{**pb, "name": pname.get(pb["plant_id"], "")} for pb in data.get("per_plant", []) if pb["plant_id"] in pname]
         data.update(applied)

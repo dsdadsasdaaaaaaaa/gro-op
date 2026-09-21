@@ -1,6 +1,7 @@
 package com.growop.app
 
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -17,6 +18,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         handleDeepLink(intent)
+        handlePrefill(intent)
         setContent {
             GrowOpTheme {
                 RootScreen(appState)
@@ -27,6 +29,18 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleDeepLink(intent)
+        handlePrefill(intent)
+    }
+
+    /** Debug builds only: `--es growop.prefill.url ... --es growop.prefill.apiKey ...` prefill the onboarding form. */
+    private fun handlePrefill(intent: Intent?) {
+        val extras = intent?.extras ?: return
+        val debuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        if (!debuggable) return
+        val map = listOf("url", "apiKey", "haURL", "haToken")
+            .mapNotNull { k -> extras.getString("growop.prefill.$k")?.let { k to it } }
+            .toMap()
+        if (map.isNotEmpty()) appState.prefill.value = map
     }
 
     override fun onStart() {

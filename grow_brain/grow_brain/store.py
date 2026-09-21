@@ -48,6 +48,10 @@ CREATE TABLE IF NOT EXISTS briefs (
 CREATE TABLE IF NOT EXISTS chat (
     id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS camera_frames (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, t TEXT NOT NULL, path TEXT NOT NULL, lights_on INTEGER
+);
+CREATE INDEX IF NOT EXISTS camera_frames_t ON camera_frames(t);
 CREATE TABLE IF NOT EXISTS plants (
     id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, owner TEXT NOT NULL DEFAULT '',
     strain TEXT NOT NULL DEFAULT 'Liberty Haze', breeder TEXT NOT NULL DEFAULT "Barney's Farm",
@@ -101,6 +105,46 @@ class Store:
                 await self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
         await self.db.execute("PRAGMA journal_mode=WAL")
         await self.db.commit()
+
+    # ---- camera frames ----
+    async def add_frame(self, path: str, lights_on: bool | None) -> int:
+        cur = await self.db.execute("INSERT INTO camera_frames(t, path, lights_on) VALUES(?,?,?)",
+                                    (iso(utcnow()), path, None if lights_on is None else int(lights_on)))
+        await self.db.commit()
+        return cur.lastrowid
+
+    async def latest_frame(self, lights_on: bool | None = None) -> dict | None:
+        q = "SELECT * FROM camera_frames" + (" WHERE lights_on=1" if lights_on else "") + " ORDER BY id DESC LIMIT 1"
+        async with self.db.execute(q) as cur:
+            r = await cur.fetchone()
+        return dict(r) if r else None
+
+    async def get_frame(self, fid: int) -> dict | None:
+        async with self.db.execute("SELECT * FROM camera_frames WHERE id=?", (fid,)) as cur:
+            r = await cur.fetchone()
+        return dict(r) if r else None
+
+    async def frames(self, days: float = 7, limit: int = 2000) -> list[dict]:
+        since = iso(utcnow() - timedelta(days=days))
+        async with self.db.execute("SELECT id, t, lights_on FROM camera_frames WHERE t>=? ORDER BY id LIMIT ?", (since, limit)) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def frame_count(self) -> int:
+        async with self.db.execute("SELECT COUNT(*) AS n FROM camera_frames") as cur:
+            return (await cur.fetchone())["n"]
+
+    async def prune_frames(self, keep_days: int, frames_dir) -> None:
+        cutoff = iso(utcnow() - timedelta(days=keep_days))
+        async with self.db.execute("SELECT id, path FROM camera_frames WHERE t<?", (cutoff,)) as cur:
+            old = await cur.fetchall()
+        for r in old:
+            try:
+                Path(r["path"]).unlink(missing_ok=True)
+            except Exception:
+                pass
+        if old:
+            await self.db.execute("DELETE FROM camera_frames WHERE t<?", (cutoff,))
+            await self.db.commit()
 
     # ---- plants ----
     async def plants(self, include_archived: bool = False) -> list[dict]:

@@ -228,3 +228,13 @@ Plant: `{"id":1,"name":"Levi's plant","owner":"Levi","strain":"Liberty Haze","br
 - LogEntry, PhotoRequest, Photo, Task carry `plant_id` (null = whole tent). `POST /api/log`, `POST /api/tasks`, `POST /api/photos` (form field) and `POST /api/chat` accept `plant_id`.
 - Brief gains `per_plant: [{plant_id, name, headline, summary}]`.
 - Photo requests notify the plant owner's `notify_service` (falls back to everyone); briefs and safety alerts go to everyone.
+
+## Tent camera (v0.3.0): any Home Assistant camera entity (Wyze via Docker Wyze Bridge, Tapo, ...)
+Status gains `"camera": null | {"entity_id":"camera.wyze_cam_man_cave","name":"Wyze Cam Man cave","available":true,"snapshot_url":"/api/camera/snapshot","stream_url":"/api/camera/stream","last_frame_at":"..."|null,"frame_count":12,"error":null|"..."}`.
+- `GET /api/camera` → `{"camera": ..., "candidates":[{"entity_id","name","state","brand","model"}]}`; `PUT /api/camera {"entity_id": "camera.x" | null}` (null = off; auto-picks a camera named wyze/tent/grow when unset).
+- `GET /api/camera/snapshot` → fresh JPEG (auth header required; poll every 1–3 s for a live-ish view).
+- `GET /api/camera/stream` → MJPEG (`multipart/x-mixed-replace`) passthrough from Home Assistant.
+- `GET /api/camera/frames?days=7` → `{"frames":[{"id","t","lights_on","url":"/api/camera/frames/{id}"}]}` — the timelapse (one frame every `settings.camera_capture_minutes`, default 30, kept 14 days). `GET /api/camera/frames/{id}` → JPEG.
+- `POST /api/camera/analyse {"plant_id": int|null, "note": "..."|null}` → Photo (same shape as an upload): takes a live snapshot and runs the advisor on it ("look now"). 10–60 s.
+- The daily brief automatically includes the latest lights-on frame; Brief gains `camera_frame_at`.
+- Settings gain `camera_entity` and `camera_capture_minutes`.

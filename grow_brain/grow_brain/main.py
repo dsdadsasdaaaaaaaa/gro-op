@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from . import __version__
 from .advisor import Advisor
 from .api import router
+from .camera import CameraService
 from .config import load_boot_config
 from .controller import Controller
 from .ha import HAClient
@@ -65,7 +66,8 @@ async def lifespan(app: FastAPI):
     controller = Controller(store, ha, boot.timezone, notifier)
     photo_dir = boot.data_dir / "photos"
     photo_dir.mkdir(parents=True, exist_ok=True)
-    advisor = Advisor(store, controller, boot.anthropic_api_key, boot.model, notifier, photo_dir)
+    camera = CameraService(store, ha, controller, boot.data_dir / "camera")
+    advisor = Advisor(store, controller, boot.anthropic_api_key, boot.model, notifier, photo_dir, camera)
 
     # Upgrading from a single-plant install: turn the old grow profile into plant #1.
     if not await store.plants(include_archived=True):
@@ -84,6 +86,8 @@ async def lifespan(app: FastAPI):
     app.state.controller = controller
     app.state.advisor = advisor
     app.state.photo_dir = photo_dir
+    app.state.camera = camera
+    app.state.ha = ha
 
     if await ha.ping():
         log.info("Home Assistant reachable at %s", boot.ha_url)
@@ -91,11 +95,13 @@ async def lifespan(app: FastAPI):
         log.warning("Home Assistant NOT reachable at %s: %s (will keep retrying)", boot.ha_url, ha.last_error)
 
     controller.start()
+    camera.start()
     sched = asyncio.create_task(brief_scheduler(app))
     try:
         yield
     finally:
         sched.cancel()
+        await camera.stop()
         await controller.stop()
         await ha.close()
         await store.close()

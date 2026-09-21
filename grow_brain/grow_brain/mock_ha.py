@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.responses import Response, StreamingResponse
 
 ROOM_T, ROOM_RH = 21.0, 45.0
 
@@ -71,10 +72,48 @@ async def states():
     out.append({"entity_id": "sensor.grow_tent_humidity", "state": f"{tent['rh']:.1f}",
                 "attributes": {"friendly_name": "Grow Tent Humidity", "unit_of_measurement": "%", "device_class": "humidity"},
                 "last_updated": _iso(sensor_updated), "last_reported": _iso(sensor_updated)})
+    out.append({"entity_id": "camera.wyze_cam_tent", "state": "idle",
+                "attributes": {"friendly_name": "Wyze Cam Tent", "brand": "Wyze", "model_name": "Cam v3"},
+                "last_updated": _iso(now), "last_reported": _iso(now)})
     out.append({"entity_id": "sensor.grow_light_power", "state": "0",
                 "attributes": {"friendly_name": "Grow Light Power", "unit_of_measurement": "W", "device_class": "power"},
                 "last_updated": _iso(now), "last_reported": _iso(now)})
     return out
+
+
+def _fake_frame() -> bytes:
+    """A synthetic tent picture: green gradient, a 'plant', the time, and the light state."""
+    import io
+    from PIL import Image, ImageDraw
+    lit = state["switch.grow_light"] == "on"
+    base = (36, 60, 30) if lit else (10, 12, 14)
+    im = Image.new("RGB", (640, 360), base)
+    d = ImageDraw.Draw(im)
+    for y in range(360):
+        f = y / 360
+        d.line([(0, y), (640, y)], fill=tuple(int(c * (1.3 - 0.6 * f)) for c in base))
+    for cx, col in ((220, (60, 160, 60)), (420, (50, 140, 55))):
+        d.ellipse((cx - 70, 150, cx + 70, 290), fill=col if lit else (25, 40, 25))
+        d.rectangle((cx - 40, 280, cx + 40, 330), fill=(120, 80, 40))
+    d.text((12, 12), datetime.now().strftime("%Y-%m-%d %H:%M:%S") + ("  lights ON" if lit else "  lights OFF"), fill=(230, 230, 230))
+    d.text((12, 340), f"tent {tent['t']:.1f}C {tent['rh']:.0f}%", fill=(200, 200, 200))
+    buf = io.BytesIO(); im.save(buf, "JPEG", quality=80)
+    return buf.getvalue()
+
+
+@app.get("/api/camera_proxy/{entity_id}")
+async def camera_proxy(entity_id: str):
+    return Response(content=_fake_frame(), media_type="image/jpeg")
+
+
+@app.get("/api/camera_proxy_stream/{entity_id}")
+async def camera_proxy_stream(entity_id: str):
+    async def gen():
+        while True:
+            frame = _fake_frame()
+            yield b"--frameboundary\r\nContent-Type: image/jpeg\r\nContent-Length: " + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n"
+            await asyncio.sleep(0.5)
+    return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frameboundary")
 
 
 @app.get("/api/services")

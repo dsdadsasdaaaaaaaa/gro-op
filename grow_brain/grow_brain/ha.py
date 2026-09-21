@@ -74,6 +74,22 @@ class HAClient:
             payload["data"] = data
         return await self.call_service("notify", service, payload)
 
+    async def camera_image(self, entity_id: str) -> bytes | None:
+        """A fresh JPEG from any HA camera entity (Wyze via the bridge, Tapo, ...)."""
+        try:
+            r = await self._client.get(f"/camera_proxy/{entity_id}", timeout=httpx.Timeout(20.0, connect=5.0))
+            if r.status_code != 200 or not r.content:
+                self.last_error = f"camera_proxy {r.status_code}"
+                return None
+            return r.content
+        except httpx.HTTPError as e:
+            self.last_error = str(e)
+            return None
+
+    def camera_stream_request(self, entity_id: str):
+        """An open MJPEG stream request (use with `async with client.stream`)."""
+        return self._client.stream("GET", f"/camera_proxy_stream/{entity_id}", timeout=httpx.Timeout(None, connect=5.0))
+
     async def list_notify_services(self) -> list[str]:
         try:
             r = await self._client.get("/services")

@@ -10,14 +10,15 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from . import __version__
 from .advisor import Advisor, AdvisorError
 from .controller import Controller, light_window
 from .devices import ROLE_BY_NAME, ROLES, SWITCH_ROLES, automap
-from .models import (ChatRequest, DeviceMapUpdate, GrowProfile, GrowProfileUpdate, LogCreate, OverrideRequest,
-                     PauseRequest, PlantCreate, PlantUpdate, SettingsModel, SettingsUpdate, StageChange, TargetsUpdate, TaskCreate)
+from .models import (CameraAnalyse, CameraSelect, ChatRequest, DeviceMapUpdate, GrowProfile, GrowProfileUpdate, LogCreate,
+                     OverrideRequest, PauseRequest, PlantCreate, PlantUpdate, SettingsModel, SettingsUpdate, StageChange,
+                     TargetsUpdate, TaskCreate)
 from .store import Store, iso, utcnow
 from .plan import build_plan
 from .targets import STAGES, stage_defaults
@@ -170,6 +171,7 @@ async def status(request: Request):
         day_total = plants[0]["day_total"]
     return {
         "plants": plants,
+        "camera": await st.camera.info(),
         "time": iso(utcnow()),
         "ha_connected": c.ha_ok,
         "sensor": c.sensor.to_api(),
@@ -640,6 +642,107 @@ async def chat_history(request: Request, limit: int = 50):
 async def clear_chat(request: Request):
     await request.app.state.store.clear_chat()
     return {"ok": True}
+
+
+# ------------------------------------------------------------------ camera
+
+@router.get("/camera", dependencies=auth)
+async def camera_info(request: Request):
+    st = request.app.state
+    return {"camera": await st.camera.info(), "candidates": st.camera.candidates()}
+
+
+@router.put("/camera", dependencies=auth)
+async def camera_select(body: CameraSelect, request: Request):
+    st = request.app.state
+    cur = await st.store.get_kv("settings", {}) or {}
+    cur["camera_entity"] = body.entity_id or ""
+    await st.store.set_kv("settings", cur)
+    st.camera._cache = None
+    await st.store.add_event("info", "system", f"Tent camera set to {body.entity_id or 'off'}")
+    return {"camera": await st.camera.info(), "candidates": st.camera.candidates()}
+
+
+@router.get("/camera/snapshot", dependencies=auth)
+async def camera_snapshot(request: Request):
+    data = await request.app.state.camera.snapshot()
+    if not data:
+        raise HTTPException(503, f"No image from the camera ({request.app.state.camera.last_error or 'not configured'})")
+    return Response(content=data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@router.get("/camera/stream", dependencies=auth)
+async def camera_stream(request: Request):
+    st = request.app.state
+    eid = await st.camera.entity_id()
+    if not eid:
+        raise HTTPException(404, "No tent camera configured")
+
+    async def gen():
+        async with st.ha.camera_stream_request(eid) as r:
+            ctype = r.headers.get("content-type", "multipart/x-mixed-replace")
+            gen.ctype = ctype
+            async for chunk in r.aiter_bytes():
+                yield chunk
+
+    # Open the upstream first so we can mirror its multipart boundary header.
+    upstream = st.ha.camera_stream_request(eid)
+    r = await upstream.__aenter__()
+    if r.status_code != 200:
+        await upstream.__aexit__(None, None, None)
+        raise HTTPException(502, f"Home Assistant camera stream returned {r.status_code}")
+
+    async def passthrough():
+        try:
+            async for chunk in r.aiter_bytes():
+                yield chunk
+        finally:
+            await upstream.__aexit__(None, None, None)
+
+    return StreamingResponse(passthrough(), media_type=r.headers.get("content-type", "multipart/x-mixed-replace"))
+
+
+@router.get("/camera/frames", dependencies=auth)
+async def camera_frames(request: Request, days: float = 7):
+    rows = await request.app.state.store.frames(min(max(days, 0.1), 14))
+    return {"frames": [{"id": r["id"], "t": r["t"], "lights_on": bool(r["lights_on"]) if r["lights_on"] is not None else None,
+                        "url": f"/api/camera/frames/{r['id']}"} for r in rows]}
+
+
+@router.get("/camera/frames/{fid}", dependencies=auth)
+async def camera_frame(fid: int, request: Request):
+    fr = await request.app.state.store.get_frame(fid)
+    if not fr or not Path(fr["path"]).exists():
+        raise HTTPException(404, "No such frame")
+    return FileResponse(fr["path"], media_type="image/jpeg")
+
+
+@router.post("/camera/analyse", dependencies=auth)
+async def camera_analyse(body: CameraAnalyse, request: Request):
+    """Take a fresh snapshot and run it through the advisor like an uploaded photo."""
+    st = request.app.state
+    data = await st.camera.snapshot(max_age_s=0)
+    if not data:
+        raise HTTPException(503, f"No image from the camera ({st.camera.last_error or 'not configured'})")
+    from PIL import Image
+    im = Image.open(io.BytesIO(data)).convert("RGB")
+    im.thumbnail((2000, 2000))
+    note = (body.note or "").strip() or None
+    pid = await st.store.add_photo(None, f"Tent camera snapshot{(' – ' + note) if note else ''}", "", body.plant_id)
+    path = st.photo_dir / f"{pid}.jpg"
+    im.save(path, "JPEG", quality=88)
+    thumb = im.copy(); thumb.thumbnail((400, 400)); thumb.save(st.photo_dir / f"{pid}_thumb.jpg", "JPEG", quality=80)
+    await st.store.db.execute("UPDATE photos SET path=? WHERE id=?", (str(path), pid))
+    await st.store.db.commit()
+    if not st.advisor.enabled:
+        await st.store.set_photo_analysis(pid, {"summary": "Saved. (Advisor is off: add an Anthropic API key to get analysis.)",
+                                                "health_score": 0, "findings": [], "actions": [], "photo_requests": [], "tasks": []})
+    else:
+        try:
+            await st.advisor.analyse_photo(pid, path, "image/jpeg", None, "Live snapshot from the fixed tent camera (wide view of the whole tent)." + (f" Grower's note: {note}" if note else ""), body.plant_id)
+        except AdvisorError as e:
+            await st.store.set_photo_analysis(pid, {"summary": str(e), "health_score": 0, "findings": [], "actions": [], "photo_requests": [], "tasks": []})
+    return _photo_api(await st.store.get_photo(pid))
 
 
 # ------------------------------------------------------------------ events

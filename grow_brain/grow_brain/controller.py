@@ -411,6 +411,7 @@ class Controller:
             await self.store.add_reading(self.sensor.temp_c, self.sensor.humidity, self.sensor.vpd_kpa,
                                          self.sensor.co2, ctx.lights_on)
 
+        self._last_lights_on = ctx.lights_on
         decisions = decide(ctx)
         await self._report_safety(ctx, decisions)
         settings = await self.settings()
