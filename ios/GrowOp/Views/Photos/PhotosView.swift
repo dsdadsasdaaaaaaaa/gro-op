@@ -199,28 +199,30 @@ struct PhotoGridCell: View {
     }
 
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            PhotoThumbnail(photoID: photo.id)
-                .aspectRatio(1, contentMode: .fill)
-            if photo.isFromCamera {
-                Image(systemName: "video.fill")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(Color.white)
-                    .padding(5)
-                    .background(Color.night.opacity(0.85), in: Circle())
-                    .padding(6)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        Color.clear
+            .aspectRatio(1, contentMode: .fit)
+            .overlay(PhotoThumbnail(photoID: photo.id))
+            .overlay(alignment: .topLeading) {
+                if photo.isFromCamera {
+                    Image(systemName: "video.fill")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Color.white)
+                        .padding(5)
+                        .background(Color.night.opacity(0.85), in: Circle())
+                        .padding(6)
+                }
             }
-            if let score = photo.analysis?.healthScore, score > 0 {
-                Text("\(Formatting.number(score))/10")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(Color.white)
-                    .padding(.horizontal, 7).padding(.vertical, 3)
-                    .background(scoreColor(score), in: Capsule())
-                    .padding(6)
+            .overlay(alignment: .bottomLeading) {
+                if let score = photo.analysis?.healthScore, score > 0 {
+                    Text("\(Formatting.number(score))/10")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(Color.white)
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(scoreColor(score), in: Capsule())
+                        .padding(6)
+                }
             }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 

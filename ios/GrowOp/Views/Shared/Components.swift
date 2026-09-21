@@ -158,7 +158,9 @@ struct PhotoThumbnail: View {
         ZStack {
             Color.track
             if let image {
-                Image(uiImage: image).resizable().scaledToFill()
+                Color.clear
+                    .overlay(Image(uiImage: image).resizable().scaledToFill())
+                    .clipped()
             } else if failed {
                 Image(systemName: "photo").foregroundStyle(.secondary)
             } else {
