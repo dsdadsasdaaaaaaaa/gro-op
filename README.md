@@ -15,7 +15,8 @@ Two parts:
 | Part | Where it runs | What it does |
 |---|---|---|
 | `grow_brain/` | On your Home Assistant server as an **add-on** (or as a Docker container) | Reads the tent sensor, switches light / exhaust / fans / humidifier / dehumidifier / heater / AC toward stage-based targets with hysteresis and hard safety limits. Talks to Claude for the daily brief, photo requests + analysis, and advice whenever you log something (pH, EC, watering...). Sends push notifications through the HA companion app. |
-| `ios/` | Your iPhone (build once in Xcode) | Big simple dashboard, advisor chat + daily brief, one-tap logging, photo requests with "stand here, light off, flash on" instructions, to-do list, settings. |
+| `ios/` | Your iPhone (build once in Xcode) |
+| `android/` | An Android phone (install the APK from the GitHub release, or build with Gradle) | Big simple dashboard, advisor chat + daily brief, one-tap logging, photo requests with "stand here, light off, flash on" instructions, to-do list, settings. |
 
 ## What the automation does on its own
 
@@ -57,6 +58,15 @@ docker compose up -d --build
 6. **Settings → Preferences**: pick your phone under *Notifications* so briefs, photo requests and alerts arrive as HA push notifications.
 
 **Away from home (Nabu Casa or any remote HA URL):** in the app choose *Through Home Assistant* and enter your Home Assistant URL (e.g. `https://xxxx.ui.nabu.casa`), a Home Assistant long-lived access token (HA → your profile, bottom left → Security → *Create token*), and the Grow Brain `api_key`. The app then talks to the add-on through Home Assistant's add-on ingress, so nothing extra is exposed to the internet. On the same Wi-Fi, *Same Wi-Fi* mode with `http://homeassistant.local:8099` is faster.
+
+### Android phone
+
+The Android app is the same app on the same API. Easiest: on the phone, open the latest release on the GitHub repo and download `GrowOp.apk`, then open it (allow "install unknown apps" for your browser when asked). To build it yourself:
+
+```bash
+cd android && JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home ./gradlew assembleDebug
+```
+The APK lands in `android/app/build/outputs/apk/debug/`. First launch: same two connection modes as the iPhone app, then pick which plant is yours.
 
 ### TestFlight (optional)
 
