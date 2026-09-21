@@ -34,6 +34,7 @@ import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -269,7 +270,12 @@ fun PhotoGridCell(photo: Photo, modifier: Modifier = Modifier, onClick: () -> Un
     val c = GrowTheme.colors
     Box(modifier.aspectRatio(1f).clip(RoundedCornerShape(14.dp)).background(c.track).clickable(onClick = onClick)) {
         AsyncImage(model = PhotoImage(photo.id, thumb = true), contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
-        photo.analysis?.healthScore?.let { score ->
+        if (photo.isFromCamera) {
+            Box(Modifier.align(Alignment.TopEnd).padding(6.dp).size(22.dp).background(Color.Black.copy(alpha = 0.45f), CircleShape), contentAlignment = Alignment.Center) {
+                Icon(Icons.Filled.Videocam, contentDescription = "From the tent camera", tint = Color.White, modifier = Modifier.size(14.dp))
+            }
+        }
+        photo.analysis?.score?.let { score ->
             Text(
                 "${Formatting.number(score)}/10",
                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 11.sp), color = Color.White,
@@ -354,7 +360,7 @@ fun PhotoAnalysisView(analysis: PhotoAnalysis?) {
     }
     GrowCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            analysis.healthScore?.let { s ->
+            analysis.score?.let { s ->
                 val sc = scoreColor(s)
                 Column(Modifier.size(74.dp).background(sc.copy(alpha = 0.15f), CircleShape), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                     Text(Formatting.number(s), style = MaterialTheme.typography.displaySmall.copy(fontSize = 32.sp, lineHeight = 34.sp), color = sc)
@@ -425,6 +431,7 @@ fun PhotoDetailScreen(app: AppState, photoId: Int, onBack: () -> Unit) {
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(Formatting.shortDateTime(photo.createdAt), style = MaterialTheme.typography.bodySmall, color = c.textSecondary, modifier = Modifier.weight(1f))
+                    if (photo.isFromCamera) { LevelChip("Tent camera", c.night); Spacer(Modifier.width(6.dp)) }
                     if (photo.requestId != null) LevelChip("Requested by advisor", c.night)
                 }
                 if (!photo.note.isNullOrEmpty()) Text("Your note: ${photo.note}", style = MaterialTheme.typography.bodyMedium, color = c.textSecondary)

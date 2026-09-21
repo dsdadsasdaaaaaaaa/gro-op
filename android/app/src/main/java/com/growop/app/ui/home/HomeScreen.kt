@@ -64,12 +64,13 @@ fun HomeScreen(app: AppState, onSwitchTab: (AppTab) -> Unit) {
     when (screen) {
         "plan" -> PlanScreen(app) { screen = "home" }
         "settings" -> SettingsScreen(app) { screen = "home" }
-        else -> HomeMain(app, onSwitchTab, onOpenPlan = { screen = "plan" }, onOpenSettings = { screen = "settings" })
+        "camera" -> CameraScreen(app) { screen = "home" }
+        else -> HomeMain(app, onSwitchTab, onOpenPlan = { screen = "plan" }, onOpenSettings = { screen = "settings" }, onOpenCamera = { screen = "camera" })
     }
 }
 
 @Composable
-private fun HomeMain(app: AppState, onSwitchTab: (AppTab) -> Unit, onOpenPlan: () -> Unit, onOpenSettings: () -> Unit) {
+private fun HomeMain(app: AppState, onSwitchTab: (AppTab) -> Unit, onOpenPlan: () -> Unit, onOpenSettings: () -> Unit, onOpenCamera: () -> Unit) {
     val c = GrowTheme.colors
     val ui by app.ui.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -104,7 +105,7 @@ private fun HomeMain(app: AppState, onSwitchTab: (AppTab) -> Unit, onOpenPlan: (
         modifier = Modifier.fillMaxSize().background(c.bg),
     ) {
         Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).statusBarsPadding().padding(horizontal = GrowTheme.spacing).padding(bottom = 40.dp),
+            Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(horizontal = GrowTheme.spacing).padding(bottom = 40.dp),
             verticalArrangement = Arrangement.spacedBy(GrowTheme.sectionSpacing),
         ) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -112,7 +113,7 @@ private fun HomeMain(app: AppState, onSwitchTab: (AppTab) -> Unit, onOpenPlan: (
             }
             val st = ui.status
             when {
-                st != null -> HomeContent(ui, st, app, powerBusy, onSwitchTab, onOpenPlan,
+                st != null -> HomeContent(ui, st, app, powerBusy, onSwitchTab, onOpenPlan, onOpenCamera,
                     onPower = { if (st.standby == true) setStandby(false) else confirmStandby = true },
                     onStart = { setStandby(false) },
                     onDevice = { selectedDevice = it },
@@ -131,7 +132,7 @@ private fun HomeMain(app: AppState, onSwitchTab: (AppTab) -> Unit, onOpenPlan: (
 @Composable
 private fun HomeContent(
     ui: AppUi, st: StatusResponse, app: AppState, powerBusy: Boolean,
-    onSwitchTab: (AppTab) -> Unit, onOpenPlan: () -> Unit,
+    onSwitchTab: (AppTab) -> Unit, onOpenPlan: () -> Unit, onOpenCamera: () -> Unit,
     onPower: () -> Unit, onStart: () -> Unit, onDevice: (String) -> Unit, onResume: () -> Unit,
 ) {
     val c = GrowTheme.colors
@@ -168,6 +169,7 @@ private fun HomeContent(
         onTime = st.targets?.lightOnTime, hours = st.targets?.lightHours, isOn = st.light?.isOn ?: false,
         nextChange = Formatting.parseISO(st.light?.nextChangeAt), schedule = st.light?.schedule, muted = standby,
     )
+    st.camera?.let { cam -> CameraCard(app, cam, muted = standby, onClick = onOpenCamera) }
     GrowPlanCard(plan = ui.plan, growStartDate = plant?.startDate ?: st.grow?.startDate, onClick = onOpenPlan)
     DevicesGrid(devices = (st.devices ?: emptyList()).filter { it.isSwitch && it.entityId != null }, muted = standby) { onDevice(it.role) }
     NeedsYouRow(tasks = ui.needsYouTaskCount, photos = ui.needsYouPhotoCount, unreadBrief = st.unreadBrief ?: false, onTap = onSwitchTab)

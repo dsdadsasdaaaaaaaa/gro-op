@@ -35,7 +35,7 @@ import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.SensorsOff
 import androidx.compose.material.icons.filled.Thermostat
-import androidx.compose.material.icons.filled.Toys
+import androidx.compose.material.icons.filled.Cyclone
 import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material.icons.filled.Whatshot
@@ -478,9 +478,9 @@ fun LightBar(onTime: String?, hours: Double?, isOn: Boolean, nextChange: Instant
 object DeviceIcons {
     fun icon(role: String): ImageVector = when (role) {
         "light" -> Icons.Filled.Lightbulb
-        "exhaust_fan" -> Icons.Filled.Toys
+        "exhaust_fan" -> Icons.Filled.Cyclone
         "intake_fan" -> Icons.Filled.Air
-        "circulation_fan", "circulation_fan_2" -> Icons.Filled.Toys
+        "circulation_fan", "circulation_fan_2" -> Icons.Filled.Cyclone
         "humidifier" -> Icons.Filled.WaterDrop
         "dehumidifier" -> Icons.Filled.Opacity
         "heater" -> Icons.Filled.Whatshot

@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -230,6 +231,14 @@ fun BriefCard(brief: Brief) {
         if (!brief.headline.isNullOrEmpty()) {
             Spacer(Modifier.height(12.dp))
             Text(brief.headline, style = MaterialTheme.typography.headlineMedium, color = c.text)
+        }
+        Formatting.parseISO(brief.cameraFrameAt)?.let { t ->
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Filled.Videocam, contentDescription = null, tint = c.textSecondary, modifier = Modifier.size(14.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Included the tent camera frame from ${Formatting.shortDateTime(brief.cameraFrameAt)}", style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
+            }
         }
         if (!brief.summary.isNullOrEmpty()) {
             Spacer(Modifier.height(8.dp))

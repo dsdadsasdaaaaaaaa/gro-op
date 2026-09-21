@@ -62,6 +62,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.growop.app.data.ApiError
+import com.growop.app.data.CameraCandidate
 import com.growop.app.data.ConnectionMode
 import com.growop.app.data.Formatting
 import com.growop.app.data.GrowProfile
@@ -228,6 +229,24 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
     var alertMessage by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(true) }
 
+    // Tent camera
+    var cameraCandidates by remember { mutableStateOf<List<CameraCandidate>>(emptyList()) }
+    var cameraEntity by remember { mutableStateOf("") }
+    var cameraSupported by remember { mutableStateOf(true) }
+    var cameraBusy by remember { mutableStateOf(false) }
+    suspend fun loadCamera() {
+        try {
+            val r = app.client.camera()
+            cameraSupported = true
+            val cands = (r.candidates ?: emptyList()).toMutableList()
+            cameraEntity = r.camera?.entityId ?: ""
+            if (cameraEntity.isNotEmpty() && cands.none { it.entityId == cameraEntity }) cands.add(CameraCandidate(cameraEntity, r.camera?.name))
+            cameraCandidates = cands
+        } catch (e: ApiError.Http) {
+            if (e.status == 404) cameraSupported = false
+        } catch (_: Throwable) {}
+    }
+
     fun applyGrow(g: GrowProfile) {
         grow = g
         expectedFlowerDays = g.expectedFlowerDays?.toString() ?: ""
@@ -269,6 +288,7 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
             if (st != null) { app.applySettings(st); applySettings(st) } else app.value.settings?.let { applySettings(it) }
         }
         app.loadPlants()
+        loadCamera()
         loading = false
     }
     LaunchedEffect(Unit) { loadAll() }
@@ -373,6 +393,27 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
                 // MARK: Tent
                 SectionHeader("Tent")
                 GrowCard {
+                    if (cameraSupported) {
+                        val camLabel = if (cameraEntity.isEmpty()) "Off" else (cameraCandidates.firstOrNull { it.entityId == cameraEntity }?.displayName ?: cameraEntity)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.weight(1f)) {
+                                PickerRow("Tent camera", camLabel, listOf("" to "Off") + cameraCandidates.map { it.entityId to it.displayName }, enabled = !cameraBusy) { key ->
+                                    if (key == cameraEntity) return@PickerRow
+                                    cameraEntity = key
+                                    scope.launch {
+                                        cameraBusy = true
+                                        try {
+                                            val r = app.setCamera(key.ifEmpty { null })
+                                            r.candidates?.let { cameraCandidates = it }
+                                            cameraEntity = r.camera?.entityId ?: ""
+                                        } catch (e: Throwable) { alertTitle = "Couldn't change the camera"; alertMessage = ApiError.wrap(e).message; loadCamera() } finally { cameraBusy = false }
+                                    }
+                                }
+                            }
+                            if (cameraBusy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = c.brand)
+                        }
+                        HorizontalDivider(color = c.track)
+                    }
                     LabeledField("Expected flower days", expectedFlowerDays, { expectedFlowerDays = it }, placeholder = "65", numeric = true, suffix = "days")
                     SwitchRow("Exhaust is vented outside the tent", exhaustDucted) { exhaustDucted = it }
                     LabeledField("Tent notes", notes, { notes = it }, placeholder = "Anything about the tent", minLines = 2, maxLines = 5)

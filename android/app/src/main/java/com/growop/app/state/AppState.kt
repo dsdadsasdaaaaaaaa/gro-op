@@ -33,6 +33,13 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import android.graphics.BitmapFactory
+import android.util.LruCache
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import com.growop.app.data.CameraFrame
+import com.growop.app.data.CameraResponse
+import kotlinx.coroutines.withContext
 import java.time.Instant
 
 enum class AppTab { HOME, ADVISOR, LOG, PHOTOS, TASKS }
@@ -71,7 +78,13 @@ data class AppUi(
     val requestsLoaded: Boolean = false,
 
     val unitsPref: String? = null,
+
+    // Tent camera live view (shared by the Home card and the camera screen)
+    val cameraImage: ImageBitmap? = null,
+    val cameraImageAt: Instant? = null,
+    val cameraError: String? = null,
 ) {
+    val hasCamera: Boolean get() = status?.camera != null
     val units: String get() = settings?.units ?: unitsPref ?: "c"
     val usesFahrenheit: Boolean get() = units == "f"
     val tempUnitLabel: String get() = if (usesFahrenheit) "°F" else "°C"
@@ -203,7 +216,8 @@ class AppState(context: Context) {
         try {
             val st = client.status()
             val previous = value.status
-            _ui.update { it.copy(status = st, statusError = null, lastStatusAt = Instant.now()) }
+            _ui.update { it.copy(status = st, statusError = null, lastStatusAt = Instant.now(),
+                cameraImage = if (st.camera == null) null else it.cameraImage, cameraError = if (st.camera == null) null else it.cameraError) }
             st.plants?.let { list -> _ui.update { it.copy(plantsSupported = true) }; applyPlants(list) }
             // The plan only changes with the grow (stage / start date); reload when those change,
             // when we don't have one yet, or every 10 minutes as a safety net.
@@ -464,6 +478,65 @@ class AppState(context: Context) {
             val open = sortTasks(it.openTasks + t)
             it.copy(openTasks = open, status = it.status?.copy(openTasks = open.size))
         }
+    }
+
+    // MARK: Tent camera
+
+    private val frameCache = LruCache<Int, ImageBitmap>(48)
+    private val frameInFlight = mutableMapOf<Int, kotlinx.coroutines.Deferred<ImageBitmap?>>()
+
+    private suspend fun decodeImage(bytes: ByteArray): ImageBitmap? = withContext(Dispatchers.Default) {
+        runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap() }.getOrNull()
+    }
+
+    /** One live snapshot (GET /api/camera/snapshot?t=...). Errors become `cameraError` (503 detail passes through). */
+    suspend fun refreshCameraSnapshot() {
+        if (!value.isConfigured || !value.hasCamera) return
+        try {
+            val img = decodeImage(client.cameraSnapshot())
+            if (img != null) _ui.update { it.copy(cameraImage = img, cameraImageAt = Instant.now(), cameraError = null) }
+            else _ui.update { it.copy(cameraError = "The camera sent something that isn't an image.") }
+        } catch (e: Throwable) {
+            val msg = (e as? ApiError.Http)?.detail?.takeIf { it.isNotBlank() } ?: ApiError.wrap(e).message
+            _ui.update { it.copy(cameraError = msg) }
+        }
+    }
+
+    suspend fun cameraFrames(days: Int): List<CameraFrame> {
+        if (!value.isConfigured) return emptyList()
+        val r = runCatching { client.cameraFrames(days) }.getOrNull() ?: return emptyList()
+        return (r.frames ?: emptyList()).sortedBy { it.id }
+    }
+
+    fun cachedFrame(id: Int): ImageBitmap? = frameCache.get(id)
+
+    /** Decoded timelapse frame, cached; concurrent callers share one download. */
+    suspend fun frame(id: Int): ImageBitmap? {
+        frameCache.get(id)?.let { return it }
+        val d = frameInFlight[id] ?: kotlinx.coroutines.CompletableDeferred<ImageBitmap?>().also { def ->
+            frameInFlight[id] = def
+            scope.launch {
+                val img = runCatching { client.cameraFrameData(id) }.getOrNull()?.let { decodeImage(it) }
+                if (img != null) frameCache.put(id, img)
+                frameInFlight.remove(id)
+                def.complete(img)
+            }
+        }
+        return d.await()
+    }
+
+    /** "Look now": fresh snapshot analysed by the advisor for the selected plant. */
+    suspend fun analyseCamera(note: String? = null): Photo {
+        val photo = client.cameraAnalyse(value.selectedPlantId, note)
+        loadPhotos()
+        refreshStatus()
+        return photo
+    }
+
+    suspend fun setCamera(entityId: String?): CameraResponse {
+        val r = client.setCamera(entityId)
+        _ui.update { it.copy(status = it.status?.copy(camera = r.camera), cameraImage = null, cameraImageAt = null, cameraError = null) }
+        return r
     }
 
     // MARK: Devices / control
