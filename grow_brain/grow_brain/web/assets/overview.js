@@ -311,7 +311,7 @@ export function createOverview(ctx) {
       refs.camTime.textContent = fmtTime(new Date());
     } catch (e) { if (e.name !== 'AbortError') refs.camTime.textContent = 'no signal'; }
   }
-  function startSnaps() { stopSnaps(); snap(); snapTimer = setInterval(snap, 2000); }
+  function startSnaps() { stopSnaps(); snap(); snapTimer = setInterval(snap, 5000); }
   function stopSnaps() { if (snapTimer) clearInterval(snapTimer); snapTimer = null; if (snapAbort) snapAbort.abort(); }
 
   function renderCamera(s) {
