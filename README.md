@@ -76,6 +76,10 @@ If you have a paid Apple Developer membership, `ios/scripts/testflight.sh` archi
 
 The add-on serves its own dashboard (nothing to install): at home open `http://homeassistant.local:8099/` (or the HA box's IP) in any browser and enter the `api_key` once. Away from home, open the **Grow Brain** entry in the Home Assistant sidebar; it's the same page, reached through Home Assistant's remote link. Pages: Overview (tent, rings, 24 h charts, light bar, devices with watts, live camera and timelapse), History (24 h / 7 d / 30 d charts, device on/off timeline, energy and cost), Journal (per-plant timeline of logs, photos, requests, tasks, briefs), Advisor (brief and chat) and Settings (plants, tent, targets, camera, preferences, backup download).
 
+## Hosted dashboard (Vercel)
+
+`dashboard/` is the same web dashboard packaged for Vercel: static files plus one function (`api/index.js`) that proxies `/api/*` to the add-on through Home Assistant's remote link (add-on ingress via the WebSocket API). The site is protected by a dashboard password; the add-on's key and the HA token stay in Vercel environment variables (`HA_URL`, `HA_TOKEN`, `GROW_API_KEY`, `DASHBOARD_PASSWORD`). Deploy with `cd dashboard && ./sync-web.sh && vercel deploy --prod`. Live at https://growop.vercel.app.
+
 ## Day to day
 
 * **Tent off / Start**: the big switch on Home. Standby switches every device off and keeps it off (an empty tent while seeds germinate); Start puts everything back on automatic and clears manual overrides.
