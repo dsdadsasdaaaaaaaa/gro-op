@@ -8,8 +8,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 import uvicorn
+from pathlib import Path
+
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .advisor import Advisor
@@ -111,9 +114,19 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Grow Brain", version=__version__, lifespan=lifespan)
     app.include_router(router)
 
-    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-    async def root():
-        # Shown in the Home Assistant sidebar panel (ingress). The real UI is the GrowOp iPhone app.
+    web = Path(__file__).parent / "web"
+    if (web / "index.html").exists():
+        if (web / "assets").exists():
+            app.mount("/assets", StaticFiles(directory=str(web / "assets")), name="assets")
+
+        @app.get("/", include_in_schema=False)
+        async def dashboard():
+            return FileResponse(web / "index.html", headers={"Cache-Control": "no-cache"})
+
+    else:
+      @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+      async def root():
+        # Fallback when the dashboard files are missing. The real UI is the GrowOp apps.
         st = app.state
         ok = st.controller.ha_ok
         return f"""<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'>

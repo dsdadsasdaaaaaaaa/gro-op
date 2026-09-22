@@ -101,6 +101,10 @@ class SettingsModel(BaseModel):
     min_switch_interval_s: int = 180
     camera_entity: Optional[str] = None
     camera_capture_minutes: int = 30
+    temp_offset_c: float = 0.0
+    humidity_offset: float = 0.0
+    price_per_kwh: Optional[float] = None
+    currency: str = "CAD"
 
 
 class SettingsUpdate(BaseModel):
@@ -116,6 +120,10 @@ class SettingsUpdate(BaseModel):
     min_switch_interval_s: Optional[int] = None
     camera_entity: Optional[str] = None
     camera_capture_minutes: Optional[int] = None
+    temp_offset_c: Optional[float] = None
+    humidity_offset: Optional[float] = None
+    price_per_kwh: Optional[float] = None
+    currency: Optional[str] = None
 
 
 class CameraSelect(BaseModel):

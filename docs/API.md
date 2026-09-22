@@ -238,3 +238,13 @@ Status gains `"camera": null | {"entity_id":"camera.wyze_cam_man_cave","name":"W
 - `POST /api/camera/analyse {"plant_id": int|null, "note": "..."|null}` → Photo (same shape as an upload): takes a live snapshot and runs the advisor on it ("look now"). 10–60 s.
 - The daily brief automatically includes the latest lights-on frame; Brief gains `camera_frame_at`.
 - Settings gain `camera_entity` and `camera_capture_minutes`.
+
+## Dashboard additions (v0.4.0)
+- `GET /api/history?hours=168&points=1500` → same shape; `points` (max 3000) controls downsampling; hours up to 720.
+- `GET /api/devices/history?hours=168` → `{"events":[{"t":"...","role":"exhaust_fan","state":"on"|"off","reason":"..."}]}` (every switch made by the controller).
+- DeviceStatus gains `"power_w": 118.2 | null` (live watts from the plug's power sensor when the plug has one).
+- `GET /api/energy` → `{"devices":[{"role","label","power_w","today_kwh","month_kwh"}],"today_kwh":1.23,"month_kwh":12.5,"price_per_kwh":0.15|null,"currency":"CAD","today_cost":0.18|null,"month_cost":1.9|null}`.
+- Settings gain `temp_offset_c` (added to the raw sensor reading), `humidity_offset`, `price_per_kwh`, `currency`.
+- Power watchdog: a device that is ON for 3+ minutes but draws (almost) no power raises a warn event + notification ("Humidifier is on but not drawing power — tank empty or unplugged?"). Same for a light that should be on.
+- `GET /api/backup` → `application/zip` of the database + photos (auth header).
+- `GET /` serves the web dashboard (static files under `/assets/`). The dashboard sends `X-API-Key` on every call and loads images with fetch()+blob URLs (no key in URLs).

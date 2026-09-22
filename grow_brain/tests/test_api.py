@@ -25,6 +25,9 @@ class FakeHA:
         self.sensors = {"sensor.tent_temperature": ("24.0", "°C", "temperature"), "sensor.tent_humidity": ("55.0", "%", "humidity")}
         self.calls = []
         self._now = now
+        self.light_w = 118.0
+        self.humid_w = 0.0
+        self.notifications = []
 
     async def ping(self):
         return True
@@ -34,6 +37,11 @@ class FakeHA:
                for e, s in self.state.items()]
         out.append({"entity_id": "camera.wyze_cam_man_cave", "state": "idle", "attributes": {"friendly_name": "Wyze Cam Man cave"},
                     "last_updated": self._now, "last_reported": self._now})
+        for base, w in (("grow_light", self.light_w), ("grow_humidifier", self.humid_w)):
+            out.append({"entity_id": f"sensor.{base}_current_consumption", "state": str(w), "attributes": {"unit_of_measurement": "W"},
+                        "last_updated": self._now, "last_reported": self._now})
+            out.append({"entity_id": f"sensor.{base}_today_s_consumption", "state": "1.5", "attributes": {"unit_of_measurement": "kWh"},
+                        "last_updated": self._now, "last_reported": self._now})
         for e, (v, u, dc) in self.sensors.items():
             out.append({"entity_id": e, "state": v, "attributes": {"unit_of_measurement": u, "device_class": dc, "friendly_name": e},
                         "last_updated": self._now, "last_reported": self._now})
@@ -51,7 +59,8 @@ class FakeHA:
         self.state[entity_id] = "on" if on else "off"
         return True
 
-    async def notify(self, *a, **k):
+    async def notify(self, service, message, **k):
+        self.notifications.append(message)
         return True
 
     async def list_notify_services(self):
@@ -189,3 +198,35 @@ async def test_camera_auto_select_snapshot_frames_and_analyse(client):
     # turning it off
     assert (await c.put("/api/camera", json={"entity_id": None})).json()["camera"] is None
     assert (await c.get("/api/camera/snapshot")).status_code == 503
+
+
+async def test_power_energy_offsets_history_backup(client):
+    c, ha, store, controller = client
+    s = (await c.get("/api/status")).json()
+    byrole = {d["role"]: d for d in s["devices"]}
+    assert byrole["light"]["power_w"] == 118.0 and byrole["humidifier"]["power_w"] == 0.0 and byrole["exhaust_fan"]["power_w"] is None
+    e = (await c.get("/api/energy")).json()
+    assert e["today_kwh"] == 3.0 and e["today_cost"] is None
+    await c.put("/api/settings", json={"price_per_kwh": 0.2, "currency": "CAD", "temp_offset_c": -1.0, "humidity_offset": 2.5})
+    e = (await c.get("/api/energy")).json()
+    assert e["today_cost"] == 0.6 and e["currency"] == "CAD"
+    await controller.cycle()
+    s = (await c.get("/api/status")).json()
+    assert s["sensor"]["temp_c"] == 23.0 and s["sensor"]["humidity"] == 57.5  # offsets applied to 24.0 / 55.0
+    # power watchdog: humidifier on for > 3 min drawing 0 W → warn + notification
+    await store.set_kv("settings", {**(await store.get_kv("settings")), "notify_service": "notify.test"})
+    from datetime import timedelta
+    controller._on_since["humidifier"] = controller._on_since.get("humidifier", datetime.now(timezone.utc)) - timedelta(minutes=5)
+    await controller.cycle()
+    evs = (await c.get("/api/events", params={"limit": 10})).json()["events"]
+    assert any("Humidifier is switched on but drawing only 0 W" in e["message"] for e in evs)
+    assert any("Humidifier" in n for n in ha.notifications)
+    # devices history + history points
+    dh = (await c.get("/api/devices/history", params={"hours": 24})).json()
+    assert isinstance(dh["events"], list)
+    h = (await c.get("/api/history", params={"hours": 24, "points": 1000})).json()
+    assert len(h["points"]) >= 1
+    # backup is a zip containing the database
+    r = await c.get("/api/backup")
+    import io, zipfile
+    assert r.status_code == 200 and "grow_brain.sqlite" in zipfile.ZipFile(io.BytesIO(r.content)).namelist()

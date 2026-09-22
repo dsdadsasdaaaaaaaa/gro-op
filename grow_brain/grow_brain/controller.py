@@ -25,6 +25,13 @@ from .targets import Targets, apply_overrides, days_between, f_to_c, stage_defau
 
 log = logging.getLogger(__name__)
 
+POWER_SUFFIXES = ("_current_consumption", "_power", "_current_power", "_active_power", "_watts")
+ENERGY_TODAY_SUFFIXES = ("_today_s_consumption", "_today_consumption", "_energy_today", "_today_energy")
+ENERGY_MONTH_SUFFIXES = ("_this_month_s_consumption", "_month_consumption", "_energy_month")
+LOW_POWER_W = {"light": 15.0, "exhaust_fan": 3.0, "intake_fan": 2.0, "circulation_fan": 2.0, "circulation_fan_2": 2.0,
+               "humidifier": 3.0, "dehumidifier": 20.0, "heater": 20.0, "cooler": 30.0}
+POWER_GRACE_S = 180
+
 TEMP_HYST = 1.0      # °C
 RH_HYST = 4.0        # % RH
 RH_CRITICAL = 85.0   # bud-rot territory; always dehumidify/exhaust above this
@@ -258,6 +265,8 @@ class Controller:
         self._safety_reported: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
         self.last_cycle_at: Optional[datetime] = None
+        self._on_since: dict[str, datetime] = {}
+        self._power_warned: dict[str, datetime] = {}
 
     # ---- config helpers (read from store each cycle so app changes apply immediately) ----
     async def settings(self) -> dict:
@@ -366,6 +375,11 @@ class Controller:
         if t is not None and unit and "F" in unit:
             t = f_to_c(t)
         h, _ = num("humidity_sensor")
+        off = getattr(self, "_offsets", (0.0, 0.0))
+        if t is not None:
+            t += off[0]
+        if h is not None:
+            h = min(100.0, max(0.0, h + off[1]))
         v, _ = num("vpd_sensor")
         c, _ = num("co2_sensor")
         snap.temp_c = round(t, 1) if t is not None else None
@@ -396,8 +410,11 @@ class Controller:
         self.states = {s["entity_id"]: s for s in states}
 
         dmap = await self.store.get_device_map()
+        _s = await self.settings()
+        self._offsets = (float(_s.get("temp_offset_c") or 0.0), float(_s.get("humidity_offset") or 0.0))
         self.sensor = self._read_sensors(dmap)
         ctx = await self.build_context()
+        await self._power_watchdog(dmap)
 
         if self.sensor.stale and not self._stale_reported and dmap.get("temperature_sensor"):
             await self.store.add_event("warn", "safety", "Tent sensor is stale or unavailable. Running in safe mode (exhaust on, climate devices off).")
@@ -438,6 +455,72 @@ class Controller:
                 # optimistic local state so the next cycle's hysteresis sees it
                 self.states.setdefault(dev.entity_id, {})["state"] = "on" if dec.desired else "off"
         self.last_cycle_at = now
+
+    # ---- power monitoring (smart plugs with energy metering, e.g. Tapo P110 / Kasa) ----
+    def _numeric_sensor(self, entity_id: str) -> Optional[float]:
+        st = self.states.get(entity_id)
+        if not st or st["state"] in ("unavailable", "unknown", "", None):
+            return None
+        try:
+            return float(st["state"])
+        except (TypeError, ValueError):
+            return None
+
+    def _sibling_sensor(self, switch_entity: str, suffixes: tuple[str, ...]) -> Optional[str]:
+        base = switch_entity.split(".", 1)[1]
+        for suf in suffixes:
+            eid = f"sensor.{base}{suf}"
+            if eid in self.states:
+                return eid
+        return None
+
+    def power_w(self, role: str, dmap: dict[str, str]) -> Optional[float]:
+        eid = dmap.get(role)
+        sensor = self._sibling_sensor(eid, POWER_SUFFIXES) if eid else None
+        if not sensor:
+            return None
+        v = self._numeric_sensor(sensor)
+        if v is None:
+            return None
+        unit = (self.states[sensor].get("attributes", {}).get("unit_of_measurement") or "W")
+        return round(v * 1000, 1) if unit.lower() == "kw" else round(v, 1)
+
+    def energy_kwh(self, role: str, dmap: dict[str, str], which: str) -> Optional[float]:
+        eid = dmap.get(role)
+        sensor = self._sibling_sensor(eid, ENERGY_TODAY_SUFFIXES if which == "today" else ENERGY_MONTH_SUFFIXES) if eid else None
+        if not sensor:
+            return None
+        v = self._numeric_sensor(sensor)
+        if v is None:
+            return None
+        unit = (self.states[sensor].get("attributes", {}).get("unit_of_measurement") or "kWh")
+        return round(v / 1000, 3) if unit.lower() == "wh" else round(v, 3)
+
+    async def _power_watchdog(self, dmap: dict[str, str]) -> None:
+        """A device that is switched ON but draws no power is broken, unplugged, or (humidifier) out of water."""
+        now = utcnow()
+        for role in SWITCH_ROLES:
+            eid = dmap.get(role)
+            st = self.states.get(eid) if eid else None
+            if not st or st.get("state") != "on":
+                self._on_since.pop(role, None)
+                continue
+            self._on_since.setdefault(role, now)
+            w = self.power_w(role, dmap)
+            if w is None or (now - self._on_since[role]).total_seconds() < POWER_GRACE_S:
+                continue
+            if w < LOW_POWER_W.get(role, 3.0):
+                last = self._power_warned.get(role)
+                if last and (now - last).total_seconds() < 3600:
+                    continue
+                label = ROLE_BY_NAME[role].label
+                hint = {"humidifier": "tank empty or unplugged?", "light": "driver/bulb dead or unplugged?"}.get(role, "unplugged or broken?")
+                msg = f"{label} is switched on but drawing only {w:g} W — {hint}"
+                await self.store.add_event("warn", "device", msg)
+                await self.notifier.send(f"power:{role}", msg, hours=1, title="Grow tent", everyone=True)
+                self._power_warned[role] = now
+            else:
+                self._power_warned.pop(role, None)
 
     async def _report_safety(self, ctx: ControlContext, decisions: dict[str, Decision]) -> None:
         active = None
@@ -503,6 +586,7 @@ class Controller:
             ov = overrides.get(rd.role)
             out.append({
                 "role": rd.role, "label": rd.label, "kind": rd.kind, "entity_id": eid,
+                "power_w": self.power_w(rd.role, dmap) if (eid and rd.kind == "switch") else None,
                 "state": state, "mode": ov["mode"] if ov else "auto",
                 "override_until": ov["until"] if ov else None,
                 "reason": reason,

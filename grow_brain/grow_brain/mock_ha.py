@@ -72,6 +72,20 @@ async def states():
     out.append({"entity_id": "sensor.grow_tent_humidity", "state": f"{tent['rh']:.1f}",
                 "attributes": {"friendly_name": "Grow Tent Humidity", "unit_of_measurement": "%", "device_class": "humidity"},
                 "last_updated": _iso(sensor_updated), "last_reported": _iso(sensor_updated)})
+    watts = {"switch.grow_light": 118.0, "switch.grow_exhaust_fan": 24.0, "switch.grow_circulation_fan": 9.0,
+             "switch.grow_humidifier": 22.0, "switch.grow_heater": 240.0, "switch.grow_dehumidifier": 190.0}
+    for eid, w in watts.items():
+        base = eid.split(".", 1)[1]
+        on = state[eid] == "on"
+        out.append({"entity_id": f"sensor.{base}_current_consumption", "state": f"{w if on else 0.0:.1f}",
+                    "attributes": {"friendly_name": f"{names[eid]} Current consumption", "unit_of_measurement": "W", "device_class": "power"},
+                    "last_updated": _iso(now), "last_reported": _iso(now)})
+        out.append({"entity_id": f"sensor.{base}_today_s_consumption", "state": f"{w * 0.006:.3f}",
+                    "attributes": {"friendly_name": f"{names[eid]} Today's consumption", "unit_of_measurement": "kWh", "device_class": "energy"},
+                    "last_updated": _iso(now), "last_reported": _iso(now)})
+        out.append({"entity_id": f"sensor.{base}_this_month_s_consumption", "state": f"{w * 0.09:.2f}",
+                    "attributes": {"friendly_name": f"{names[eid]} This month's consumption", "unit_of_measurement": "kWh", "device_class": "energy"},
+                    "last_updated": _iso(now), "last_reported": _iso(now)})
     out.append({"entity_id": "camera.wyze_cam_tent", "state": "idle",
                 "attributes": {"friendly_name": "Wyze Cam Tent", "brand": "Wyze", "model_name": "Cam v3"},
                 "last_updated": _iso(now), "last_reported": _iso(now)})

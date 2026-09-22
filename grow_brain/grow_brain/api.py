@@ -223,14 +223,76 @@ def _sched(hours: float) -> str:
 
 
 @router.get("/history", dependencies=auth)
-async def history(request: Request, hours: float = 24):
+async def history(request: Request, hours: float = 24, points: int = 300):
     from .targets import c_to_f
     rows = await request.app.state.store.readings_since(min(max(hours, 1), 24 * 30))
-    step = max(1, len(rows) // 300)
+    step = max(1, len(rows) // max(50, min(points, 3000)))
     pts = [{"t": r["t"], "temp_c": r["temp_c"], "temp_f": c_to_f(r["temp_c"]) if r["temp_c"] is not None else None,
             "humidity": r["humidity"], "vpd_kpa": r["vpd_kpa"], "light_on": bool(r["light_on"]) if r["light_on"] is not None else None}
            for r in rows[::step]]
     return {"points": pts}
+
+
+@router.get("/devices/history", dependencies=auth)
+async def devices_history(request: Request, hours: float = 168):
+    rows = await request.app.state.store.device_log_since(min(max(hours, 1), 24 * 30))
+    return {"events": rows}
+
+
+@router.get("/energy", dependencies=auth)
+async def energy(request: Request):
+    st = request.app.state
+    c: Controller = st.controller
+    settings = await c.settings()
+    dmap = await st.store.get_device_map()
+    devices, today, month = [], 0.0, 0.0
+    any_today = any_month = False
+    for role in SWITCH_ROLES:
+        if not dmap.get(role):
+            continue
+        t, mo = c.energy_kwh(role, dmap, "today"), c.energy_kwh(role, dmap, "month")
+        if t is not None:
+            today += t; any_today = True
+        if mo is not None:
+            month += mo; any_month = True
+        devices.append({"role": role, "label": ROLE_BY_NAME[role].label, "power_w": c.power_w(role, dmap), "today_kwh": t, "month_kwh": mo})
+    price = settings.get("price_per_kwh")
+    price = float(price) if price not in (None, "") else None
+    return {
+        "devices": devices,
+        "today_kwh": round(today, 3) if any_today else None,
+        "month_kwh": round(month, 3) if any_month else None,
+        "power_w": round(sum(d["power_w"] for d in devices if d["power_w"] is not None), 1) if any(d["power_w"] is not None for d in devices) else None,
+        "price_per_kwh": price,
+        "currency": settings.get("currency") or "CAD",
+        "today_cost": round(today * price, 2) if (price is not None and any_today) else None,
+        "month_cost": round(month * price, 2) if (price is not None and any_month) else None,
+    }
+
+
+@router.get("/backup", dependencies=auth)
+async def backup(request: Request):
+    """Zip of the database plus photos (camera timelapse frames are excluded; they regenerate)."""
+    import zipfile
+    st = request.app.state
+    buf = io.BytesIO()
+    db_path = Path(st.store.path)
+    # a consistent copy of the live SQLite file
+    import sqlite3
+    tmp = db_path.with_suffix(".backup.sqlite")
+    src = sqlite3.connect(db_path)
+    dst = sqlite3.connect(tmp)
+    with dst:
+        src.backup(dst)
+    src.close(); dst.close()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.write(tmp, "grow_brain.sqlite")
+        for p in sorted(Path(st.photo_dir).glob("*.jpg")):
+            z.write(p, f"photos/{p.name}")
+    tmp.unlink(missing_ok=True)
+    buf.seek(0)
+    name = f"growop-backup-{datetime.now().strftime('%Y-%m-%d')}.zip"
+    return StreamingResponse(buf, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 # ------------------------------------------------------------------ devices
