@@ -78,6 +78,8 @@ data class AppUi(
     val requestsLoaded: Boolean = false,
 
     val unitsPref: String? = null,
+    /** From GET /api/health (shown read-only in Settings). */
+    val serverVersion: String? = null,
 
     // Tent camera live view (shared by the Home card and the camera screen)
     val cameraImage: ImageBitmap? = null,
@@ -171,7 +173,8 @@ class AppState(context: Context) {
         store.saveConfig(result.config)
         client.update(result.config)
         _ui.update {
-            it.copy(config = result.config, isConfigured = true, status = result.status, statusError = null, lastStatusAt = Instant.now())
+            it.copy(config = result.config, isConfigured = true, status = result.status, statusError = null, lastStatusAt = Instant.now(),
+                serverVersion = result.health.version)
         }
         result.status.plants?.let { list -> _ui.update { it.copy(plantsSupported = true) }; applyPlants(list) }
         startPolling()
@@ -320,6 +323,12 @@ class AppState(context: Context) {
     }
 
     // MARK: Settings
+
+    /** GET /api/health, just to show the server version. */
+    suspend fun loadHealth() {
+        if (!value.isConfigured) return
+        runCatching { client.health() }.getOrNull()?.let { h -> _ui.update { it.copy(serverVersion = h.version ?: it.serverVersion) } }
+    }
 
     suspend fun refreshSettings() {
         if (!value.isConfigured) return

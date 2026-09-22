@@ -57,6 +57,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -66,12 +67,9 @@ import com.growop.app.data.CameraCandidate
 import com.growop.app.data.ConnectionMode
 import com.growop.app.data.Formatting
 import com.growop.app.data.GrowProfile
-import com.growop.app.data.ServerConfig
 import com.growop.app.data.Settings
 import com.growop.app.data.Targets
 import com.growop.app.state.AppState
-import com.growop.app.ui.ConnectionModeToggle
-import com.growop.app.ui.ServerFields
 import com.growop.app.ui.shared.BigButton
 import com.growop.app.ui.shared.ConfirmDialog
 import com.growop.app.ui.shared.ErrorDialog
@@ -182,16 +180,10 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
     val ui by app.ui.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
 
-    // Server
-    var mode by remember { mutableStateOf(ui.config.mode) }
-    var serverUrl by remember { mutableStateOf(ui.config.baseUrl.ifEmpty { ServerConfig.DEFAULT_URL }) }
-    var haUrl by remember { mutableStateOf(ui.config.haUrl) }
-    var haToken by remember { mutableStateOf(ui.config.haToken) }
-    var apiKey by remember { mutableStateOf(ui.config.apiKey) }
+    // Server (read-only; set up once on first launch)
     var testing by remember { mutableStateOf(false) }
     var testResult by remember { mutableStateOf<String?>(null) }
     var testOK by remember { mutableStateOf<Boolean?>(null) }
-    var confirmDisconnect by remember { mutableStateOf(false) }
 
     // Grow / tent
     var grow by remember { mutableStateOf<GrowProfile?>(null) }
@@ -291,10 +283,8 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
         loadCamera()
         loading = false
     }
-    LaunchedEffect(Unit) { loadAll() }
+    LaunchedEffect(Unit) { app.loadHealth(); loadAll() }
 
-    val candidate = ServerConfig(mode, serverUrl, apiKey, haUrl, haToken, ui.config.haAddonSlug, ui.config.haIngressPath)
-    val serverChanged = candidate.differsInUserFields(ui.config)
 
     Scaffold(
         containerColor = c.bg,
@@ -309,49 +299,54 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
         },
     ) { inner ->
         Column(Modifier.fillMaxSize().padding(inner).verticalScroll(rememberScrollState()).imePadding().padding(GrowTheme.spacing), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            // MARK: Server
+            // MARK: Server (read-only)
             SectionHeader("Server")
             GrowCard {
-                ConnectionModeToggle(mode, onChange = { mode = it; testResult = null; testOK = null })
-                Spacer(Modifier.height(14.dp))
-                ServerFields(mode, serverUrl, { serverUrl = it }, haUrl, { haUrl = it }, haToken, { haToken = it }, apiKey, { apiKey = it })
-                if (mode == ConnectionMode.HOME_ASSISTANT && ui.config.haAddonSlug != null && mode == ui.config.mode) {
-                    Spacer(Modifier.height(6.dp)); Footnote("Add-on: ${ui.config.haAddonSlug}")
-                }
-                Spacer(Modifier.height(8.dp))
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.weight(1f)) {
-                        ActionRow(if (testing) "Testing…" else "Test connection", loading = testing, enabled = candidate.isConfigured) {
+                val healthy = ui.status != null && ui.statusError == null
+                val viaHa = ui.config.mode == ConnectionMode.HOME_ASSISTANT
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        if (healthy) Icons.Filled.CheckCircle else Icons.Filled.Error,
+                        contentDescription = null,
+                        tint = if (healthy) c.good else c.warn,
+                        modifier = Modifier.size(28.dp),
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(if (viaHa) "Connected through Home Assistant" else "Connected on home Wi‑Fi",
+                            style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold), color = c.text)
+                        val secondary = buildList {
+                            ui.serverVersion?.let { add("Grow Brain v$it") }
+                            if (!healthy) add(ui.statusError?.let { "Last update failed" } ?: "Waiting for the first update")
+                        }.joinToString(" · ")
+                        if (secondary.isNotEmpty()) Text(secondary, style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
+                    }
+                    TextButton(
+                        enabled = !testing,
+                        onClick = {
                             scope.launch {
                                 testing = true; testResult = null; testOK = null
                                 try {
-                                    val r = app.client.verify(candidate)
-                                    val parts = mutableListOf(if (mode == ConnectionMode.HOME_ASSISTANT) "Connected through Home Assistant" else "Connected")
+                                    val r = app.client.verify(ui.config)
+                                    val parts = mutableListOf(if (viaHa) "Connected through Home Assistant" else "Connected")
                                     r.health.version?.let { parts.add("v$it") }
-                                    if (mode == ConnectionMode.HOME_ASSISTANT) r.config.haAddonSlug?.let { parts.add("add-on $it") }
                                     parts.add(if (r.health.haConnected == true) "Home Assistant OK" else "Home Assistant NOT connected")
                                     parts.add(if (r.health.advisorEnabled == true) "advisor on" else "advisor off")
-                                    r.status.sensor?.tempC?.let { parts.add("temp ${Formatting.number(it)}°C") }
                                     testResult = parts.joinToString(" · "); testOK = true
                                 } catch (e: Throwable) { testResult = ApiError.wrap(e).message; testOK = false } finally { testing = false }
                             }
-                        }
-                    }
-                    testOK?.let { ok -> Icon(if (ok) Icons.Filled.CheckCircle else Icons.Filled.Error, contentDescription = null, tint = if (ok) c.good else c.alert) }
-                }
-                testResult?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = if (testOK == true) c.textSecondary else c.alert, modifier = Modifier.padding(horizontal = 4.dp)) }
-                if (serverChanged) {
-                    ActionRow("Save and connect", enabled = !testing && candidate.isConfigured) {
-                        scope.launch {
-                            testing = true
-                            try { app.connect(candidate); testResult = "Saved and connected."; testOK = true; loadAll() } catch (e: Throwable) { testResult = ApiError.wrap(e).message; testOK = false } finally { testing = false }
-                        }
+                        },
+                    ) {
+                        if (testing) { CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = c.brand); Spacer(Modifier.width(6.dp)) }
+                        Text(if (testing) "Testing…" else "Test connection", style = MaterialTheme.typography.labelMedium, color = c.brand)
                     }
                 }
-                ActionRow("Disconnect", destructive = true) { confirmDisconnect = true }
+                testResult?.let {
+                    Spacer(Modifier.height(6.dp))
+                    Text(it, style = MaterialTheme.typography.bodySmall, color = if (testOK == true) c.textSecondary else c.alert, modifier = Modifier.padding(horizontal = 4.dp))
+                }
             }
-            Footnote(if (mode == ConnectionMode.DIRECT) "Talks to the grow brain directly on your home network. Only works while you're on the same Wi‑Fi."
-                else "Goes through Home Assistant (for example your Nabu Casa address), so it works away from home too. The Grow Brain API key is still needed.")
+            Footnote("Set up on first launch. To change how the app connects, clear the app's data in Android settings and set it up again.")
 
             if (loading) {
                 Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -559,8 +554,6 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
             },
             onDismiss = { pendingStage = null })
     }
-    if (confirmDisconnect) ConfirmDialog("Disconnect from this grow brain?", "You'll be asked for the server address and key again.", "Disconnect", destructive = true,
-        onConfirm = { app.disconnect(); onBack() }, onDismiss = { confirmDisconnect = false })
     if (showTimePicker) {
         val tp = rememberTimePickerState(initialHour = briefTime.hour, initialMinute = briefTime.minute, is24Hour = true)
         AlertDialog(

@@ -72,6 +72,7 @@ fun MainTabs(app: AppState) {
         app.startPolling()
         app.refreshSettings()
         app.loadPlants()
+        app.loadHealth()
     }
     LaunchedEffect(pending) {
         pending?.let { selected = it; app.pendingTab.value = null }
