@@ -263,3 +263,11 @@ async def test_alerts_resolve_on_recovery(client):
     assert any("paused" in a["message"] for a in (await c.get("/api/status")).json()["alerts"])
     await c.post("/api/control/resume")
     assert not any("paused" in a["message"] for a in (await c.get("/api/status")).json()["alerts"])
+
+
+async def test_stale_ha_alert_clears_on_first_good_cycle(client):
+    c, ha, store, controller = client
+    await store.add_event("alert", "system", "Cannot reach Home Assistant: 502 (from before a restart)")
+    controller.ha_ok = False  # simulate a fresh process
+    await controller.cycle()
+    assert not any("Cannot reach" in a["message"] for a in (await c.get("/api/status")).json()["alerts"])

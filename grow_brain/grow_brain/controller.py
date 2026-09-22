@@ -407,8 +407,10 @@ class Controller:
             return
         if self._ha_fail_reported:
             await self.store.add_event("info", "system", "Home Assistant connection restored")
-            await self.store.resolve_alerts("system", "Cannot reach Home Assistant")
             self._ha_fail_reported = False
+        if not self.ha_ok:
+            # first good cycle since startup (or since an outage): any older "cannot reach" alert is over
+            await self.store.resolve_alerts("system", "Cannot reach Home Assistant")
         self.ha_ok = True
         self.states = {s["entity_id"]: s for s in states}
 
