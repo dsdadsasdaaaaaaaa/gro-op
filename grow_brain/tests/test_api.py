@@ -27,6 +27,7 @@ class FakeHA:
         self._now = now
         self.light_w = 118.0
         self.humid_w = 0.0
+        self.exhaust_total_kwh = 100.0
         self.notifications = []
 
     async def ping(self):
@@ -42,6 +43,11 @@ class FakeHA:
                         "last_updated": self._now, "last_reported": self._now})
             out.append({"entity_id": f"sensor.{base}_today_s_consumption", "state": "1.5", "attributes": {"unit_of_measurement": "kWh"},
                         "last_updated": self._now, "last_reported": self._now})
+        # a Matter-style cumulative meter on the exhaust plug
+        out.append({"entity_id": "sensor.grow_exhaust_power", "state": "24.0", "attributes": {"unit_of_measurement": "W"},
+                    "last_updated": self._now, "last_reported": self._now})
+        out.append({"entity_id": "sensor.grow_exhaust_energy", "state": str(self.exhaust_total_kwh), "attributes": {"unit_of_measurement": "kWh"},
+                    "last_updated": self._now, "last_reported": self._now})
         for e, (v, u, dc) in self.sensors.items():
             out.append({"entity_id": e, "state": v, "attributes": {"unit_of_measurement": u, "device_class": dc, "friendly_name": e},
                         "last_updated": self._now, "last_reported": self._now})
@@ -230,3 +236,15 @@ async def test_power_energy_offsets_history_backup(client):
     r = await c.get("/api/backup")
     import io, zipfile
     assert r.status_code == 200 and "grow_brain.sqlite" in zipfile.ZipFile(io.BytesIO(r.content)).namelist()
+
+
+async def test_cumulative_energy_meter_baselines(client):
+    c, ha, store, controller = client
+    e = (await c.get("/api/energy")).json()
+    ex = next(d for d in e["devices"] if d["role"] == "exhaust_fan")
+    assert ex["power_w"] == 24.0 and ex["today_kwh"] == 0.0  # baseline just recorded at 100.0
+    ha.exhaust_total_kwh = 100.75
+    await controller.cycle()
+    ex = next(d for d in (await c.get("/api/energy")).json()["devices"] if d["role"] == "exhaust_fan")
+    assert ex["today_kwh"] == 0.75 and ex["month_kwh"] == 0.75
+    assert (await store.get_kv("energy_baselines"))["exhaust_fan:today"]["kwh"] == 100.0

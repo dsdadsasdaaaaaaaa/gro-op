@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 POWER_SUFFIXES = ("_current_consumption", "_power", "_current_power", "_active_power", "_watts")
 ENERGY_TODAY_SUFFIXES = ("_today_s_consumption", "_today_consumption", "_energy_today", "_today_energy")
 ENERGY_MONTH_SUFFIXES = ("_this_month_s_consumption", "_month_consumption", "_energy_month")
+ENERGY_TOTAL_SUFFIXES = ("_energy", "_total_energy", "_energy_total", "_total_consumption")  # cumulative meters (Matter, Shelly...)
 LOW_POWER_W = {"light": 15.0, "exhaust_fan": 3.0, "intake_fan": 2.0, "circulation_fan": 2.0, "circulation_fan_2": 2.0,
                "humidifier": 3.0, "dehumidifier": 20.0, "heater": 20.0, "cooler": 30.0}
 POWER_GRACE_S = 180
@@ -267,6 +268,7 @@ class Controller:
         self.last_cycle_at: Optional[datetime] = None
         self._on_since: dict[str, datetime] = {}
         self._power_warned: dict[str, datetime] = {}
+        self._energy_baselines: dict[tuple[str, str], float] = {}
 
     # ---- config helpers (read from store each cycle so app changes apply immediately) ----
     async def settings(self) -> dict:
@@ -415,6 +417,7 @@ class Controller:
         self.sensor = self._read_sensors(dmap)
         ctx = await self.build_context()
         await self._power_watchdog(dmap)
+        await self._update_energy_baselines(dmap, ctx.now_local)
 
         if self.sensor.stale and not self._stale_reported and dmap.get("temperature_sensor"):
             await self.store.add_event("warn", "safety", "Tent sensor is stale or unavailable. Running in safe mode (exhaust on, climate devices off).")
@@ -485,16 +488,52 @@ class Controller:
         unit = (self.states[sensor].get("attributes", {}).get("unit_of_measurement") or "W")
         return round(v * 1000, 1) if unit.lower() == "kw" else round(v, 1)
 
-    def energy_kwh(self, role: str, dmap: dict[str, str], which: str) -> Optional[float]:
-        eid = dmap.get(role)
-        sensor = self._sibling_sensor(eid, ENERGY_TODAY_SUFFIXES if which == "today" else ENERGY_MONTH_SUFFIXES) if eid else None
-        if not sensor:
-            return None
+    def _kwh(self, sensor: str) -> Optional[float]:
         v = self._numeric_sensor(sensor)
         if v is None:
             return None
         unit = (self.states[sensor].get("attributes", {}).get("unit_of_measurement") or "kWh")
         return round(v / 1000, 3) if unit.lower() == "wh" else round(v, 3)
+
+    def energy_kwh(self, role: str, dmap: dict[str, str], which: str) -> Optional[float]:
+        eid = dmap.get(role)
+        if not eid:
+            return None
+        sensor = self._sibling_sensor(eid, ENERGY_TODAY_SUFFIXES if which == "today" else ENERGY_MONTH_SUFFIXES)
+        if sensor:
+            return self._kwh(sensor)
+        # Cumulative meter: today/month = now minus the baseline recorded at the start of the period.
+        total_sensor = self._sibling_sensor(eid, ENERGY_TOTAL_SUFFIXES)
+        if not total_sensor:
+            return None
+        now_kwh = self._kwh(total_sensor)
+        base = self._energy_baselines.get((role, which))
+        if now_kwh is None or base is None:
+            return None
+        return round(max(now_kwh - base, 0.0), 3)
+
+    async def _update_energy_baselines(self, dmap: dict[str, str], now_local: datetime) -> None:
+        """Remember each cumulative meter's reading at local midnight and on the 1st of the month (persisted)."""
+        keys = {"today": now_local.strftime("%Y-%m-%d"), "month": now_local.strftime("%Y-%m")}
+        stored = await self.store.get_kv("energy_baselines", {}) or {}
+        changed = False
+        for role in SWITCH_ROLES:
+            eid = dmap.get(role)
+            sensor = self._sibling_sensor(eid, ENERGY_TOTAL_SUFFIXES) if eid else None
+            if not sensor:
+                continue
+            now_kwh = self._kwh(sensor)
+            if now_kwh is None:
+                continue
+            for which, period in keys.items():
+                k = f"{role}:{which}"
+                rec = stored.get(k)
+                if not rec or rec.get("period") != period or now_kwh < rec.get("kwh", 0):
+                    stored[k] = {"period": period, "kwh": now_kwh}
+                    changed = True
+                self._energy_baselines[(role, which)] = stored[k]["kwh"]
+        if changed:
+            await self.store.set_kv("energy_baselines", stored)
 
     async def _power_watchdog(self, dmap: dict[str, str]) -> None:
         """A device that is switched ON but draws no power is broken, unplugged, or (humidifier) out of water."""
