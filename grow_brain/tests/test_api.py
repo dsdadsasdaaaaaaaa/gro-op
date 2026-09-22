@@ -210,7 +210,7 @@ async def test_power_energy_offsets_history_backup(client):
     c, ha, store, controller = client
     s = (await c.get("/api/status")).json()
     byrole = {d["role"]: d for d in s["devices"]}
-    assert byrole["light"]["power_w"] == 118.0 and byrole["humidifier"]["power_w"] == 0.0 and byrole["exhaust_fan"]["power_w"] is None
+    assert byrole["light"]["power_w"] == 118.0 and byrole["humidifier"]["power_w"] == 0.0 and byrole["exhaust_fan"]["power_w"] == 24.0
     e = (await c.get("/api/energy")).json()
     assert e["today_kwh"] == 3.0 and e["today_cost"] is None
     await c.put("/api/settings", json={"price_per_kwh": 0.2, "currency": "CAD", "temp_offset_c": -1.0, "humidity_offset": 2.5})
