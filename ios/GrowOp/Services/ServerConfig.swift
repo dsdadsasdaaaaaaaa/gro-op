@@ -44,6 +44,22 @@ struct ServerConfig: Equatable {
 
     static func load() -> ServerConfig {
         let d = UserDefaults.standard
+        // Provisioning: values passed as launch arguments (`-growop.server.mode homeAssistant -growop.server.haURL …`)
+        // live only in the volatile argument domain; persist them once so the app stays configured after relaunch.
+        let args = d.volatileDomain(forName: UserDefaults.argumentDomain)
+        if args[Keys.apiKey] != nil, (args[Keys.url] != nil || args[Keys.haURL] != nil) {
+            let provisioned = ServerConfig(
+                mode: ConnectionMode(rawValue: args[Keys.mode] as? String ?? "") ?? .direct,
+                baseURL: args[Keys.url] as? String ?? "",
+                apiKey: args[Keys.apiKey] as? String ?? "",
+                haURL: args[Keys.haURL] as? String ?? "",
+                haToken: args[Keys.haToken] as? String ?? "",
+                haAddonSlug: nil, haIngressPath: nil)
+            provisioned.save()
+            d.removeVolatileDomain(forName: UserDefaults.argumentDomain)
+            d.setVolatileDomain([:], forName: UserDefaults.argumentDomain)
+            return provisioned
+        }
         return ServerConfig(
             mode: ConnectionMode(rawValue: d.string(forKey: Keys.mode) ?? "") ?? .direct,
             baseURL: d.string(forKey: Keys.url) ?? "",
