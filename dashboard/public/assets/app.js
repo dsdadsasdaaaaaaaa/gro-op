@@ -132,7 +132,7 @@ async function boot() {
 // Hosted copy (Vercel): the key field is the dashboard password, not the add-on key. // growop-hosted-label
 if (location.port !== '8099') {
   const lbl = document.querySelector('label[for="connect-key"]'); if (lbl) lbl.textContent = 'Dashboard password';
-  const hint = document.querySelector('#connect-card p.muted, .connect p.muted'); if (hint && /API key/.test(hint.textContent)) hint.textContent = 'Enter the dashboard password you were given.';
+  const hint = document.querySelector('p.muted.small'); if (hint && /API key/.test(hint.textContent)) hint.textContent = 'Enter the dashboard password you were given.';
   const inp = document.getElementById('connect-key'); if (inp) inp.setAttribute('autocomplete', 'current-password');
 }
 window.addEventListener('growop:unauthorized', () => { if (state.connected) { showConnect(location.port === '8099' ? 'The API key was rejected — enter it again.' : 'Wrong dashboard password — try again.'); } });
