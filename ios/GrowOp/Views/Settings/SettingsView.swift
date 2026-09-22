@@ -4,16 +4,11 @@ struct SettingsView: View {
     @Environment(AppState.self) private var app
     @Environment(\.dismiss) private var dismiss
 
-    // Server
-    @State private var mode: ConnectionMode = .direct
-    @State private var serverURL = ""
-    @State private var haURL = ""
-    @State private var haToken = ""
-    @State private var apiKey = ""
+    // Server (read-only: the connection is provisioned at first launch and never edited here)
     @State private var testing = false
     @State private var testResult: String?
     @State private var testOK: Bool?
-    @State private var confirmDisconnect = false
+    @State private var serverVersion: String?
 
     // Grow
     @State private var grow: GrowProfile?
@@ -103,26 +98,14 @@ struct SettingsView: View {
             } message: {
                 Text("This records today as the start of the new stage, resets targets to that stage's defaults, and tells the advisor.")
             }
-            .confirmationDialog("Disconnect from this grow brain?", isPresented: $confirmDisconnect, titleVisibility: .visible) {
-                Button("Disconnect", role: .destructive) {
-                    app.disconnect()
-                    dismiss()
-                }
-            } message: {
-                Text("You'll be asked for the server address and key again.")
-            }
         }
     }
 
     // MARK: - Loading
 
     private func loadAll() async {
-        mode = app.config.mode
-        serverURL = app.config.baseURL.isEmpty ? ServerConfig.defaultURL : app.config.baseURL
-        haURL = app.config.haURL
-        haToken = app.config.haToken
-        apiKey = app.config.apiKey
         guard app.isConfigured else { loading = false; return }
+        Task { serverVersion = (try? await app.client.health())?.version }
         loading = true
         async let g = try? app.client.grow()
         async let t = try? app.client.targets()
@@ -184,74 +167,44 @@ struct SettingsView: View {
         model = s.model ?? ""
     }
 
-    // MARK: - Server
+    // MARK: - Server (read-only)
 
-    private var candidate: ServerConfig {
-        ServerConfig(mode: mode, baseURL: serverURL, apiKey: apiKey, haURL: haURL, haToken: haToken,
-                     haAddonSlug: app.config.haAddonSlug, haIngressPath: app.config.haIngressPath)
+    private var connectionTitle: String {
+        app.config.mode == .homeAssistant ? "Connected through Home Assistant" : "Connected on home Wi‑Fi"
     }
 
-    private var serverChanged: Bool { candidate.differsInUserFields(from: app.config) }
+    /// Green only when the most recent status poll succeeded.
+    private var isHealthy: Bool { app.status != nil && app.statusError == nil }
 
     private var serverSection: some View {
         Section {
-            Picker("Connection", selection: $mode) {
-                ForEach(ConnectionMode.allCases, id: \.self) { m in Text(m.title).tag(m) }
-            }
-            .pickerStyle(.segmented)
-            .onChange(of: mode) { _, _ in testResult = nil; testOK = nil }
-
-            if mode == .direct {
-                TextField("http://homeassistant.local:8099", text: $serverURL)
-                    .keyboardType(.URL).textContentType(.URL)
-                    .autocorrectionDisabled().textInputAutocapitalization(.never)
-            } else {
-                TextField("https://….ui.nabu.casa", text: $haURL)
-                    .keyboardType(.URL).textContentType(.URL)
-                    .autocorrectionDisabled().textInputAutocapitalization(.never)
-                VStack(alignment: .leading, spacing: 4) {
-                    SecureField("Home Assistant access token", text: $haToken)
-                        .autocorrectionDisabled().textInputAutocapitalization(.never)
-                    Text("Home Assistant → your profile (bottom left) → Security → Create token")
+            HStack(spacing: 12) {
+                Image(systemName: isHealthy ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .font(.title3)
+                    .foregroundStyle(isHealthy ? Color.good : Color.warn)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(connectionTitle)
+                    Text(serverVersion.map { "Grow Brain v\($0)" } ?? (isHealthy ? "Grow Brain" : "Last update failed"))
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                if let slug = app.config.haAddonSlug, mode == app.config.mode {
-                    Text("Add-on: \(slug)").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    Task { await testConnection() }
+                } label: {
+                    if testing { ProgressView().controlSize(.small) } else { Text("Test connection") }
                 }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(Color.brand)
+                .disabled(testing)
             }
-            TextField("Grow Brain API key", text: $apiKey)
-                .autocorrectionDisabled().textInputAutocapitalization(.never)
-
-            Button {
-                Task { await testConnection() }
-            } label: {
-                HStack {
-                    if testing { ProgressView() }
-                    Text(testing ? "Testing…" : "Test connection")
-                    Spacer()
-                    if let ok = testOK {
-                        Image(systemName: ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                            .foregroundStyle(ok ? Color.good : Color.alertRed)
-                    }
-                }
-            }
-            .disabled(testing || !candidate.isConfigured)
             if let testResult {
-                Text(testResult).font(.footnote).foregroundStyle(testOK == true ? Color.secondary : Color.alertRed)
-            }
-            if serverChanged {
-                Button("Save and connect") { Task { await saveServer() } }
-                    .disabled(testing || !candidate.isConfigured)
-            }
-            if app.isConfigured {
-                Button("Disconnect", role: .destructive) { confirmDisconnect = true }
+                Label(testResult, systemImage: testOK == true ? "checkmark.circle" : "xmark.octagon")
+                    .font(.footnote)
+                    .foregroundStyle(testOK == true ? Color.secondary : Color.alertRed)
             }
         } header: {
             Text("Server")
-        } footer: {
-            Text(mode == .direct
-                 ? "Talks to the grow brain directly on your home network. Only works while you're on the same Wi‑Fi."
-                 : "Goes through Home Assistant (for example your Nabu Casa address), so it works away from home too. The Grow Brain API key is still needed.")
         }
     }
 
@@ -261,31 +214,12 @@ struct SettingsView: View {
         testOK = nil
         defer { testing = false }
         do {
-            let r = try await app.client.verify(candidate)
-            var parts: [String] = [mode == .homeAssistant ? "Connected through Home Assistant" : "Connected"]
-            if let v = r.health.version { parts.append("v\(v)") }
-            if mode == .homeAssistant, let slug = r.config.haAddonSlug { parts.append("add-on \(slug)") }
-            parts.append(r.health.haConnected == true ? "Home Assistant OK" : "Home Assistant NOT connected")
-            parts.append(r.health.advisorEnabled == true ? "advisor on" : "advisor off")
-            if let t = r.status.sensor?.tempC { parts.append("temp \(Formatting.number(t))°C") }
-            testResult = parts.joined(separator: " · ")
+            let r = try await app.client.verify(app.config)
+            serverVersion = r.health.version
+            testResult = "OK" + (r.health.haConnected == true ? " · Home Assistant connected" : " · Home Assistant not connected")
             testOK = true
         } catch {
-            testResult = error.localizedDescription
-            testOK = false
-        }
-    }
-
-    private func saveServer() async {
-        testing = true
-        defer { testing = false }
-        do {
-            try await app.connect(candidate)
-            testResult = "Saved and connected."
-            testOK = true
-            await loadAll()
-        } catch {
-            testResult = error.localizedDescription
+            testResult = "Failed: \(error.localizedDescription)"
             testOK = false
         }
     }
