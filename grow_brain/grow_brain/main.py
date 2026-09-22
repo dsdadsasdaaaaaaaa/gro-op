@@ -119,6 +119,13 @@ def create_app() -> FastAPI:
         if (web / "assets").exists():
             app.mount("/assets", StaticFiles(directory=str(web / "assets")), name="assets")
 
+        @app.middleware("http")
+        async def _no_cache_assets(request, call_next):
+            response = await call_next(request)
+            if request.url.path.startswith("/assets/") or request.url.path == "/":
+                response.headers["Cache-Control"] = "no-cache"
+            return response
+
         @app.get("/", include_in_schema=False)
         async def dashboard():
             return FileResponse(web / "index.html", headers={"Cache-Control": "no-cache"})
