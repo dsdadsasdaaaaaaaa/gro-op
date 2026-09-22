@@ -1,0 +1,7 @@
+{
+  "name": "growop-dashboard",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "24.x" },
+  "scripts": { "sync": "./sync-web.sh" }
+}
