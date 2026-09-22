@@ -17,6 +17,8 @@ enum APIError: LocalizedError {
     case haAddonNotFound
     case haIngressSessionFailed(String)
     case haError(status: Int, message: String?)
+    /// The WebSocket to Home Assistant could not be opened or misbehaved (detail includes the URL).
+    case haWebSocket(String)
     /// Wraps an error with the name of the connection step that failed.
     case step(String, Error)
 
@@ -65,45 +67,160 @@ enum APIError: LocalizedError {
         case .haIngressSessionFailed(let why):
             return "Ingress session failed: Home Assistant wouldn't open a session for the add-on. \(why)"
         case .haError(let status, let message):
+            if status == 0, let message, !message.isEmpty { return "Home Assistant replied: \(message)" }
             if let message, !message.isEmpty { return "Home Assistant replied: \(message) (\(status))" }
             if status == 404 { return "Home Assistant replied 404. This needs a Home Assistant OS or Supervised install with the Grow Brain add-on." }
             return "Home Assistant replied with an error (\(status))."
+        case .haWebSocket(let detail):
+            return "Couldn't open Home Assistant's WebSocket at \(detail)"
         case .step(let name, let e):
             return "\(name): \(e.localizedDescription)"
         }
     }
 }
 
-// MARK: - Home Assistant response models (Supervisor API envelope)
+// MARK: - Home Assistant WebSocket (what the HA frontend uses; the REST /api/hassio proxy allow-lists almost nothing)
 
-private struct HAEnvelope<T: Decodable>: Decodable {
-    var result: String?
-    var message: String?
-    var data: T?
-}
+/// One short-lived, authenticated WebSocket conversation with Home Assistant.
+/// Protocol: server `auth_required` → client `auth` → server `auth_ok` | `auth_invalid`,
+/// then `supervisor/api` commands with incrementing integer ids answered by `result` messages.
+final class HASocket {
+    private let task: URLSessionWebSocketTask
+    let urlString: String
+    private var nextID = 1
+    private var closed = false
 
-private struct HAAddonList: Decodable {
-    var addons: [HAAddon]?
-}
+    init(cfg: ServerConfig, session: URLSession) throws {
+        let base = cfg.normalizedHAURL
+        var ws = base
+        if ws.lowercased().hasPrefix("https://") { ws = "wss://" + ws.dropFirst(8) }
+        else if ws.lowercased().hasPrefix("http://") { ws = "ws://" + ws.dropFirst(7) }
+        let str = ws + "/api/websocket"
+        guard let url = URL(string: str), url.host != nil else { throw APIError.invalidURL(base) }
+        urlString = str
+        task = session.webSocketTask(with: url)
+        task.resume()
+    }
 
-private struct HAAddon: Decodable {
-    var slug: String
-    var name: String?
-}
+    deinit { close() }
 
-private struct HAAddonInfo: Decodable {
-    var ingressUrl: String?
-    enum CodingKeys: String, CodingKey { case ingressUrl = "ingress_url" }
-}
+    func close() {
+        guard !closed else { return }
+        closed = true
+        task.cancel(with: .normalClosure, reason: nil)
+    }
 
-private struct HAIngressSessionData: Decodable {
-    var session: String?
+    // MARK: Auth
+
+    func authenticate(token: String) async throws {
+        let first = try await receive()
+        guard first["type"] as? String == "auth_required" else {
+            throw APIError.haWebSocket("\(urlString): it didn't ask for authentication. Is this address really Home Assistant?")
+        }
+        try await send(["type": "auth", "access_token": token])
+        let reply = try await receive()
+        switch reply["type"] as? String {
+        case "auth_ok": return
+        case "auth_invalid": throw APIError.haTokenRejected
+        default: throw APIError.haWebSocket("\(urlString): unexpected reply while signing in (\(reply["type"] ?? "?"))")
+        }
+    }
+
+    // MARK: supervisor/api
+
+    /// Sends one `supervisor/api` command and returns the Supervisor's data object.
+    /// HA returns the Supervisor's `data` directly in `result`; the `{result, data}` envelope is tolerated too.
+    func supervisor(_ endpoint: String, method: String) async throws -> [String: Any] {
+        let id = nextID
+        nextID += 1
+        try await send(["id": id, "type": "supervisor/api", "endpoint": endpoint, "method": method])
+        var msg: [String: Any]
+        repeat {
+            msg = try await receive()
+        } while (msg["id"] as? Int) != id || (msg["type"] as? String) != "result"
+
+        if (msg["success"] as? Bool) != true {
+            let err = msg["error"] as? [String: Any]
+            let code = (err?["code"] as? String) ?? ""
+            let message = (err?["message"] as? String) ?? "Supervisor command failed"
+            switch code {
+            case "unauthorized": throw APIError.haNotAdmin
+            case "unknown_command": throw APIError.haError(status: 404, message: nil)
+            default: throw APIError.haError(status: 0, message: message)
+            }
+        }
+        var result = (msg["result"] as? [String: Any]) ?? [:]
+        if let envelopeResult = result["result"] as? String {
+            if envelopeResult == "error" {
+                throw APIError.haError(status: 0, message: (result["message"] as? String) ?? "Supervisor error")
+            }
+            if let inner = result["data"] as? [String: Any] { result = inner }
+        }
+        return result
+    }
+
+    // MARK: Plumbing
+
+    private func send(_ obj: [String: Any]) async throws {
+        let data = try JSONSerialization.data(withJSONObject: obj)
+        let text = String(decoding: data, as: UTF8.self)
+        let task = self.task
+        do {
+            try await HASocket.withTimeout(15, url: urlString) { try await task.send(.string(text)) }
+        } catch let e as APIError {
+            throw e
+        } catch {
+            throw APIError.haWebSocket("\(urlString): \(HASocket.describe(error))")
+        }
+    }
+
+    private func receive() async throws -> [String: Any] {
+        let task = self.task
+        let message: URLSessionWebSocketTask.Message
+        do {
+            message = try await HASocket.withTimeout(20, url: urlString) { try await task.receive() }
+        } catch let e as APIError {
+            throw e
+        } catch {
+            throw APIError.haWebSocket("\(urlString): \(HASocket.describe(error))")
+        }
+        let data: Data
+        switch message {
+        case .string(let s): data = Data(s.utf8)
+        case .data(let d): data = d
+        @unknown default: throw APIError.haWebSocket("\(urlString): unexpected message type")
+        }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw APIError.haWebSocket("\(urlString): it sent something that isn't JSON")
+        }
+        return obj
+    }
+
+    private static func withTimeout<T>(_ seconds: Double, url: String, _ op: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await op() }
+            group.addTask {
+                try await Task.sleep(for: .seconds(seconds))
+                throw APIError.haWebSocket("\(url): no reply after \(Int(seconds)) s")
+            }
+            guard let first = try await group.next() else { throw APIError.haWebSocket("\(url): no reply") }
+            group.cancelAll()
+            return first
+        }
+    }
+
+    static func describe(_ error: Error) -> String {
+        if let e = error as? URLError { return "\(e.localizedDescription) (\(e.code.rawValue))" }
+        return error.localizedDescription
+    }
 }
 
 // MARK: - Home Assistant ingress resolver
 
-/// Discovers the Grow Brain add-on's ingress path and keeps a fresh ingress session.
-/// One instance per configured connection; concurrent callers share in-flight work.
+/// Discovers the Grow Brain add-on's ingress path and keeps a fresh ingress session,
+/// using Home Assistant's WebSocket API. One instance per configured connection;
+/// concurrent callers share in-flight work. A fresh socket is opened for each
+/// discovery and each session renewal and closed right after.
 actor HAIngress {
     struct Resolved: Equatable {
         /// HA base + ingress path (no trailing slash). API paths are appended directly.
@@ -141,7 +258,7 @@ actor HAIngress {
         return Resolved(base: ha + path, cookie: "ingress_session=\(sid)")
     }
 
-    // MARK: Discovery (steps 1 + 2)
+    // MARK: Discovery (steps 1 + 2, one socket)
 
     private func discover(_ cfg: ServerConfig) async throws {
         var created = false
@@ -161,19 +278,36 @@ actor HAIngress {
     }
 
     private static func performDiscovery(_ cfg: ServerConfig, session: URLSession) async throws -> (String, String) {
-        let list: HAAddonList = try await supervisor("/api/hassio/addons", cfg: cfg, session: session)
-        let addons = list.addons ?? []
-        guard let addon = addons.first(where: { $0.slug == "grow_brain" || $0.slug.hasSuffix("_grow_brain") }) else {
+        let sock = try HASocket(cfg: cfg, session: session)
+        defer { sock.close() }
+        do {
+            try await sock.authenticate(token: cfg.trimmedHAToken)
+        } catch {
+            throw APIError.step("Signing in to Home Assistant", error)
+        }
+        let list: [String: Any]
+        do {
+            list = try await sock.supervisor("/addons", method: "get")
+        } catch {
+            throw APIError.step("Listing Home Assistant add-ons", error)
+        }
+        let slugs = ((list["addons"] as? [[String: Any]]) ?? []).compactMap { $0["slug"] as? String }
+        guard let slug = slugs.first(where: { $0 == "grow_brain" || $0.hasSuffix("_grow_brain") }) else {
             throw APIError.haAddonNotFound
         }
-        let info: HAAddonInfo = try await supervisor("/api/hassio/addons/\(addon.slug)/info", cfg: cfg, session: session)
-        guard let path = info.ingressUrl, !path.isEmpty else {
+        let info: [String: Any]
+        do {
+            info = try await sock.supervisor("/addons/\(slug)/info", method: "get")
+        } catch {
+            throw APIError.step("Reading the Grow Brain add-on's ingress address", error)
+        }
+        guard let path = info["ingress_url"] as? String, !path.isEmpty else {
             throw APIError.haError(status: 200, message: "The Grow Brain add-on has no ingress URL. Is ingress enabled and the add-on running?")
         }
-        return (addon.slug, path)
+        return (slug, path)
     }
 
-    // MARK: Session (step 3)
+    // MARK: Session (step 3, its own socket)
 
     private func currentSession(_ cfg: ServerConfig, force: Bool) async throws -> String {
         if !force, let sid = sessionID, Date().timeIntervalSince(sessionCreatedAt) < Self.sessionMaxAge {
@@ -197,60 +331,24 @@ actor HAIngress {
     }
 
     private static func createSession(_ cfg: ServerConfig, session: URLSession) async throws -> String {
+        let sock = try HASocket(cfg: cfg, session: session)
+        defer { sock.close() }
         do {
-            let d: HAIngressSessionData = try await supervisor("/api/hassio/ingress/session", method: "POST", cfg: cfg, session: session)
-            guard let sid = d.session, !sid.isEmpty else {
-                throw APIError.haIngressSessionFailed("No session id was returned.")
-            }
-            return sid
+            try await sock.authenticate(token: cfg.trimmedHAToken)
+        } catch {
+            throw APIError.step("Signing in to Home Assistant", error)
+        }
+        let d: [String: Any]
+        do {
+            d = try await sock.supervisor("/ingress/session", method: "post")
         } catch let e as APIError {
-            switch e {
-            case .haTokenRejected, .haIngressSessionFailed, .network: throw e
-            default: throw APIError.haIngressSessionFailed(e.localizedDescription)
-            }
+            if case .haNotAdmin = e { throw APIError.step("Opening an ingress session", e) }
+            throw APIError.haIngressSessionFailed(e.localizedDescription)
         }
-    }
-
-    // MARK: Supervisor call helper (Bearer token)
-
-    private static func supervisor<T: Decodable>(_ path: String, method: String = "GET", cfg: ServerConfig, session: URLSession) async throws -> T {
-        let base = cfg.normalizedHAURL
-        guard let url = URL(string: base + path), url.host != nil else { throw APIError.invalidURL(base) }
-        var req = URLRequest(url: url)
-        req.httpMethod = method
-        req.timeoutInterval = 20
-        req.setValue("Bearer \(cfg.trimmedHAToken)", forHTTPHeaderField: "Authorization")
-        req.setValue("application/json", forHTTPHeaderField: "Accept")
-        if method == "POST" {
-            req.httpBody = Data()
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        guard let sid = d["session"] as? String, !sid.isEmpty else {
+            throw APIError.haIngressSessionFailed("No session id was returned.")
         }
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: req)
-        } catch let e as URLError {
-            throw APIError.network(e)
-        } catch {
-            throw APIError.other(error)
-        }
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 200
-        if status == 401 { throw APIError.haTokenRejected }
-        if status == 403 { throw APIError.haNotAdmin }
-        let decoder = JSONDecoder()
-        guard (200..<300).contains(status) else {
-            let env = try? decoder.decode(HAEnvelope<T>.self, from: data)
-            throw APIError.haError(status: status, message: env?.message)
-        }
-        let env: HAEnvelope<T>
-        do {
-            env = try decoder.decode(HAEnvelope<T>.self, from: data)
-        } catch {
-            throw APIError.haError(status: status, message: "Unexpected reply. Is this address really Home Assistant?")
-        }
-        if env.result == "error" { throw APIError.haError(status: status, message: env.message) }
-        guard let d = env.data else { throw APIError.haError(status: status, message: "Empty reply from Home Assistant.") }
-        return d
+        return sid
     }
 }
 
