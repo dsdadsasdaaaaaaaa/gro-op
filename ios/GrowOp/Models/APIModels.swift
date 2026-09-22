@@ -771,6 +771,7 @@ struct Settings: Codable {
     var minSwitchIntervalS: Double?
     var cameraEntity: String?
     var cameraCaptureMinutes: Double?
+    var advisorMonthUsd: Double?
 
     enum CodingKeys: String, CodingKey {
         case units, timezone, model
@@ -785,6 +786,7 @@ struct Settings: Codable {
         case safetyTempMinC = "safety_temp_min_c"
         case controlIntervalS = "control_interval_s"
         case minSwitchIntervalS = "min_switch_interval_s"
+        case advisorMonthUsd = "advisor_month_usd"
     }
 }
 

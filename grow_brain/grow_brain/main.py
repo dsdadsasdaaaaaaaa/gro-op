@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 
 import uvicorn
 from pathlib import Path
@@ -49,7 +49,50 @@ async def brief_scheduler(app: FastAPI) -> None:
                         await st.store.add_event("warn", "advisor", f"Daily brief failed: {e}")
         except Exception:
             log.exception("brief scheduler error")
+        try:
+            await _camera_check_tick(st)
+            await _nudge_tick(st)
+        except Exception:
+            log.exception("scheduler tick error")
         await asyncio.sleep(60)
+
+
+async def _camera_check_tick(st) -> None:
+    """One hour after lights-on, once per local day, while the tent is running."""
+    if not st.advisor.enabled or not await st.camera.entity_id() or await st.controller.standby():
+        return
+    settings = await st.controller.settings()
+    tz = st.controller.tz(settings)
+    now = datetime.now(tz)
+    targets, _, _ = await st.controller.effective_targets()
+    if targets.light_hours <= 0:
+        return
+    hh, mm = (int(x) for x in targets.light_on_time.split(":"))
+    minutes_since_on = ((now.hour * 60 + now.minute) - (hh * 60 + mm)) % (24 * 60)
+    if not (60 <= minutes_since_on < 62):
+        return
+    if await st.store.get_kv("last_camera_check_date") == now.date().isoformat():
+        return
+    await st.store.set_kv("last_camera_check_date", now.date().isoformat())
+    log.info("Running daily camera check")
+    await st.advisor.camera_check()
+
+
+async def _nudge_tick(st) -> None:
+    """Remind the plant's owner about photo requests that have sat open for two days (at most once a day)."""
+    last = await st.store.get_kv("last_nudge_hour")
+    hour_key = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
+    if last == hour_key:
+        return
+    await st.store.set_kv("last_nudge_hour", hour_key)
+    plants = {p["id"]: p for p in await st.store.plants()}
+    for pr in await st.store.photo_requests_to_nudge(older_than_hours=48, nudge_gap_hours=24):
+        plant = plants.get(pr.get("plant_id"))
+        who = f" for {plant['name']}" if plant else ""
+        svc = plant.get("notify_service") if plant else None
+        await st.notifier.send(f"nudge:{pr['id']}", f"Still waiting for a photo{who}: {pr['title']}", title="Photo request",
+                               url="growop://photos", service=svc, everyone=svc is None)
+        await st.store.mark_nudged(pr["id"])
 
 
 @asynccontextmanager

@@ -48,6 +48,11 @@ CREATE TABLE IF NOT EXISTS briefs (
 CREATE TABLE IF NOT EXISTS chat (
     id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, kind TEXT NOT NULL, model TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL, cache_read INTEGER NOT NULL, cache_write INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+    usd REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS camera_frames (
     id INTEGER PRIMARY KEY AUTOINCREMENT, t TEXT NOT NULL, path TEXT NOT NULL, lights_on INTEGER
 );
@@ -64,6 +69,7 @@ CREATE TABLE IF NOT EXISTS plants (
 # Columns added after the first release; applied idempotently at open().
 MIGRATIONS = [
     ("events", "resolved_at", "TEXT"),
+    ("photo_requests", "nudged_at", "TEXT"),
     ("log_entries", "plant_id", "INTEGER"),
     ("photo_requests", "plant_id", "INTEGER"),
     ("photos", "plant_id", "INTEGER"),
@@ -105,6 +111,29 @@ class Store:
             if col not in cols:
                 await self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
         await self.db.execute("PRAGMA journal_mode=WAL")
+        await self.db.commit()
+
+    # ---- advisor usage / cost ----
+    async def add_usage(self, kind: str, model: str, input_tokens: int, cache_read: int, cache_write: int, output_tokens: int, usd: float) -> None:
+        await self.db.execute("INSERT INTO usage(at, kind, model, input_tokens, cache_read, cache_write, output_tokens, usd) VALUES(?,?,?,?,?,?,?,?)",
+                              (iso(utcnow()), kind, model, input_tokens, cache_read, cache_write, output_tokens, usd))
+        await self.db.commit()
+
+    async def usage_summary(self, since_iso: str) -> dict:
+        async with self.db.execute("SELECT kind, COUNT(*) AS n, SUM(usd) AS usd, SUM(input_tokens+cache_read+cache_write) AS tin, SUM(output_tokens) AS tout FROM usage WHERE at>=? GROUP BY kind", (since_iso,)) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+        return {"calls": sum(r["n"] for r in rows), "usd": round(sum(r["usd"] or 0 for r in rows), 2),
+                "input_tokens": sum(r["tin"] or 0 for r in rows), "output_tokens": sum(r["tout"] or 0 for r in rows),
+                "by_kind": {r["kind"]: {"calls": r["n"], "usd": round(r["usd"] or 0, 2)} for r in rows}}
+
+    async def photo_requests_to_nudge(self, older_than_hours: float, nudge_gap_hours: float) -> list[dict]:
+        cutoff = iso(utcnow() - timedelta(hours=older_than_hours))
+        gap = iso(utcnow() - timedelta(hours=nudge_gap_hours))
+        async with self.db.execute("SELECT * FROM photo_requests WHERE status='open' AND created_at<=? AND (nudged_at IS NULL OR nudged_at<=?)", (cutoff, gap)) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def mark_nudged(self, rid: int) -> None:
+        await self.db.execute("UPDATE photo_requests SET nudged_at=? WHERE id=?", (iso(utcnow()), rid))
         await self.db.commit()
 
     # ---- camera frames ----

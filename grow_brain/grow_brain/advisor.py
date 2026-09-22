@@ -30,6 +30,20 @@ T = TypeVar("T", bound=BaseModel)
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
+# USD per million tokens: (input, output, cache read, cache write). Unknown models fall back to Opus 5 pricing.
+PRICES = {
+    "claude-opus-5": (5.0, 25.0, 0.5, 6.25),
+    "claude-opus-4-8": (5.0, 25.0, 0.5, 6.25),
+    "claude-sonnet-5": (2.0, 10.0, 0.2, 2.5),
+    "claude-haiku-4-5": (1.0, 5.0, 0.1, 1.25),
+    "claude-fable-5-1": (10.0, 50.0, 1.0, 12.5),
+}
+
+
+def _cost(model: str, inp: int, out: int, cache_read: int, cache_write: int) -> float:
+    p = PRICES.get(model) or PRICES["claude-opus-5"]
+    return (inp * p[0] + out * p[1] + cache_read * p[2] + cache_write * p[3]) / 1_000_000
+
 
 class AdvisorError(Exception):
     pass
@@ -162,7 +176,7 @@ class Advisor:
     # ------------------------------------------------------------------ Claude calls
 
     async def _parse(self, output_model: type[T], user_content: Any, settings: dict, history: list[dict] | None = None,
-                     effort: str = "high", max_tokens: int = 16000) -> T:
+                     effort: str = "high", max_tokens: int = 16000, kind: str = "other") -> T:
         if not self.client:
             raise AdvisorError("Advisor is off: add your Anthropic API key in the add-on configuration.")
         model = settings.get("model") or self.default_model
@@ -202,8 +216,12 @@ class Advisor:
                 parsed = output_model.model_validate_json(text)
             except Exception as e:
                 raise AdvisorError(f"Could not understand Claude's reply: {e}")
-        log.info("advisor %s: in=%s cached=%s out=%s", output_model.__name__, resp.usage.input_tokens,
-                 getattr(resp.usage, "cache_read_input_tokens", 0), resp.usage.output_tokens)
+        u = resp.usage
+        cr = getattr(u, "cache_read_input_tokens", 0) or 0
+        cw = getattr(u, "cache_creation_input_tokens", 0) or 0
+        usd = _cost(getattr(resp, "model", model) or model, u.input_tokens, u.output_tokens, cr, cw)
+        await self.store.add_usage(kind, getattr(resp, "model", model) or model, u.input_tokens, cr, cw, u.output_tokens, usd)
+        log.info("advisor %s: in=%s cached=%s out=%s ≈$%.3f", output_model.__name__, u.input_tokens, cr, u.output_tokens, usd)
         return parsed
 
     # ------------------------------------------------------------------ applying what Claude asked for
@@ -299,7 +317,7 @@ class Advisor:
                 {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.standard_b64encode(img).decode()}},
                 {"type": "text", "text": prompt + f"\n\nThe image is the latest frame from the fixed tent camera (taken {when[:16]} UTC, wide view of the whole tent). Use it: comment on what you can actually see; if it's dark or empty say so."},
             ]
-        out = await self._parse(BriefOut, content, settings, effort="high")
+        out = await self._parse(BriefOut, content, settings, effort="high", kind="brief")
         applied = await self._apply(out, settings, "brief")
         data = out.model_dump()
         data["camera_frame_at"] = frame[1] if frame else None
@@ -319,7 +337,7 @@ class Advisor:
         prompt = (f"{ctx}\n\n---\n{who}: kind={entry['kind']} {v} "
                   f"context={entry.get('context') or '-'} note={entry.get('note') or '-'}.\n"
                   f"Tell them what this means and exactly what to do next. Tasks/photo requests are for this plant unless clearly tent-wide.")
-        out = await self._parse(LogAdviceOut, prompt, settings, effort="medium")
+        out = await self._parse(LogAdviceOut, prompt, settings, effort="medium", kind="log")
         applied = await self._apply(out, settings, "log", default_plant_id=entry.get("plant_id"))
         advice = out.model_dump()
         advice.update(applied)
@@ -344,7 +362,7 @@ class Advisor:
             {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": data}},
             {"type": "text", "text": f"{ctx}\n\n---\n{ask}\nAnalyse the plant in the photo and say what to do."},
         ]
-        out = await self._parse(PhotoAnalysisOut, content, settings, effort="high")
+        out = await self._parse(PhotoAnalysisOut, content, settings, effort="high", kind="photo")
         applied = await self._apply(out, settings, "photo", default_plant_id=plant_id)
         analysis = out.model_dump()
         analysis.update(applied)
@@ -352,6 +370,44 @@ class Advisor:
         if request:
             await self.store.set_photo_request_status(request["id"], "done", photo_id)
         await self.store.add_event("info", "advisor", f"Photo analysed: health {out.health_score}/10 – {out.summary[:120]}")
+        return analysis
+
+    async def camera_check(self) -> dict | None:
+        """Once a day, an hour after lights-on: look at the tent camera and only speak up if something is wrong."""
+        if not self.camera:
+            return None
+        data = await self.camera.snapshot(max_age_s=0)
+        if not data:
+            return None
+        import io
+        from PIL import Image
+        im = Image.open(io.BytesIO(data)).convert("RGB")
+        im.thumbnail((2000, 2000))
+        pid = await self.store.add_photo(None, "Tent camera daily check", "", None)
+        path = self.photo_dir / f"{pid}.jpg"
+        im.save(path, "JPEG", quality=88)
+        thumb = im.copy(); thumb.thumbnail((400, 400)); thumb.save(self.photo_dir / f"{pid}_thumb.jpg", "JPEG", quality=80)
+        await self.store.db.execute("UPDATE photos SET path=? WHERE id=?", (str(path), pid))
+        await self.store.db.commit()
+        ctx, settings = await self._context()
+        content = [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.standard_b64encode(path.read_bytes()).decode()}},
+            {"type": "text", "text": f"{ctx}\n\n---\nThis is the automatic daily camera check, one hour after lights-on. Look at both plants. "
+                                     f"If everything looks normal, say so in one sentence with no findings and no tasks. Only report findings with severity "
+                                     f"'warn' or 'alert' when you can actually see a problem (drooping, colour change, dry surface, pests, light too close, "
+                                     f"something fallen over). Health score reflects what you can see."},
+        ]
+        out = await self._parse(PhotoAnalysisOut, content, settings, effort="medium", kind="camera_check")
+        applied = await self._apply(out, settings, "camera_check")
+        analysis = out.model_dump(); analysis.update(applied)
+        await self.store.set_photo_analysis(pid, analysis)
+        serious = [f for f in out.findings if f.severity in ("warn", "alert")]
+        if serious or out.health_score < 6:
+            msg = "; ".join(f.title for f in serious) or out.summary
+            await self.store.add_event("warn", "advisor", f"Camera check: {msg}")
+            await self.notifier.send("camera_check", f"Camera check: {msg}", title="Grow tent", url="growop://photos", everyone=True)
+        else:
+            await self.store.add_event("info", "advisor", f"Camera check: {out.summary[:120]}")
         return analysis
 
     async def chat(self, message: str, plant_id: int | None = None) -> dict:
@@ -363,7 +419,7 @@ class Advisor:
         # Fresh context goes into the latest user turn so the cached system prompt stays stable.
         user = f"<current_state>\n{ctx}\n</current_state>\n\n{who}: {message}"
         await self.store.add_chat("user", (f"[{plant['owner'] or plant['name']}] " if plant else "") + message)
-        out = await self._parse(ChatOut, user, settings, history=history, effort="medium")
+        out = await self._parse(ChatOut, user, settings, history=history, effort="medium", kind="chat")
         applied = await self._apply(out, settings, "chat", default_plant_id=plant_id)
         reply = out.reply
         extras = []

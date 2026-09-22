@@ -28,23 +28,39 @@ export function createJournal(ctx) {
     render();
   }
 
-  function items() {
+  function items(which = tab) {
     const out = [];
-    const forTab = (pid) => (tab === 'tent' ? pid == null : pid === tab);
+    const forTab = (pid) => (which === 'tent' ? pid == null : pid === which);
     for (const e of data.log) if (forTab(e.plant_id)) out.push({ type: 'log', at: e.created_at, d: e });
     for (const p of data.photos) if (forTab(p.plant_id)) out.push({ type: 'photo', at: p.created_at, d: p });
     for (const r of data.reqs) if (forTab(r.plant_id)) out.push({ type: 'request', at: r.created_at, d: r });
     for (const t of data.tasks) if (forTab(t.plant_id)) out.push({ type: 'task', at: t.created_at, d: t });
     const b = data.brief;
     if (b) {
-      if (tab === 'tent') out.push({ type: 'brief', at: b.created_at, d: b });
-      else { const pb = (b.per_plant || []).find((x) => x.plant_id === tab); if (pb) out.push({ type: 'brief', at: b.created_at, d: { ...b, headline: pb.headline, summary: pb.summary, plantOnly: true } }); }
+      if (which === 'tent') out.push({ type: 'brief', at: b.created_at, d: b });
+      else { const pb = (b.per_plant || []).find((x) => x.plant_id === which); if (pb) out.push({ type: 'brief', at: b.created_at, d: { ...b, headline: pb.headline, summary: pb.summary, plantOnly: true } }); }
     }
     return out.filter((i) => filter === 'all' || i.type === filter).sort((a, b) => (parseISO(b.at)?.getTime() || 0) - (parseISO(a.at)?.getTime() || 0));
   }
 
+  function column(p) {
+    const list = items(p.id);
+    const lastPhoto = data.photos.filter((x) => x.plant_id === p.id && x.analysis && x.analysis.health_score > 0).sort((a, b) => (parseISO(b.created_at)?.getTime() || 0) - (parseISO(a.created_at)?.getTime() || 0))[0];
+    const openTasks = data.tasks.filter((t) => t.plant_id === p.id && t.status === 'open').length;
+    const lastWater = data.log.filter((e) => e.plant_id === p.id && e.kind === 'water')[0];
+    const stats = h('div', { class: 'muted small' }, `Day ${p.day_total ?? '–'} · health ${lastPhoto ? lastPhoto.analysis.health_score + '/10' : '–'} · ${openTasks} open task${openTasks === 1 ? '' : 's'} · last watered ${lastWater ? dayKey(lastWater.created_at) : 'never logged'}`);
+    const nodes = []; let lastDay = null;
+    for (const it of list.slice(0, 60)) { const dk = dayKey(it.at); if (dk !== lastDay) { nodes.push(h('div', { class: 'tl-day' }, dk)); lastDay = dk; } nodes.push(renderItem(it)); }
+    return h('div', { class: 'compare-col' }, h('h3', null, plantLabel(p)), stats, h('div', { class: 'timeline' }, nodes.length ? nodes : h('div', { class: 'empty' }, 'Nothing yet.')));
+  }
+
   function render() {
     if (!data) return;
+    if (tab === 'compare') {
+      for (const u of thumbUrls) URL.revokeObjectURL(u); thumbUrls = [];
+      replaceChildren(refs.timeline, h('div', { class: 'compare' }, ...plants().map(column)));
+      return;
+    }
     const list = items();
     for (const u of thumbUrls) URL.revokeObjectURL(u); thumbUrls = [];
     if (!list.length) { replaceChildren(refs.timeline, h('div', { class: 'empty' }, 'Nothing here yet.')); return; }
@@ -142,9 +158,10 @@ export function createJournal(ctx) {
   function renderTabs() {
     const ps = plants();
     if (tab == null || (tabAuto && tab === 'tent' && ps.length)) tab = ps[0]?.id ?? 'tent';
-    replaceChildren(refs.tabs, [...ps.map((p) => ({ id: p.id, label: plantLabel(p) })), { id: 'tent', label: 'Tent' }].map((t) =>
-      h('button', { type: 'button', role: 'tab', 'aria-selected': String(tab === t.id), onclick: () => { tab = t.id; tabAuto = false; renderTabs(); refs.forLabel.textContent = t.id === 'tent' ? 'for the tent' : `for ${t.label} plant`; render(); } }, t.label)));
-    refs.forLabel.textContent = tab === 'tent' ? 'for the tent' : `for ${plantLabel(ps.find((p) => p.id === tab))} plant`;
+    const extra = ps.length > 1 ? [{ id: 'compare', label: 'Compare' }] : [];
+    replaceChildren(refs.tabs, [...ps.map((p) => ({ id: p.id, label: plantLabel(p) })), { id: 'tent', label: 'Tent' }, ...extra].map((t) =>
+      h('button', { type: 'button', role: 'tab', 'aria-selected': String(tab === t.id), onclick: () => { tab = t.id; tabAuto = false; renderTabs(); render(); } }, t.label)));
+    refs.forLabel.textContent = tab === 'tent' ? 'for the tent' : tab === 'compare' ? 'for a plant (pick its tab)' : `for ${plantLabel(ps.find((p) => p.id === tab))} plant`;
   }
 
   function renderFilters() {

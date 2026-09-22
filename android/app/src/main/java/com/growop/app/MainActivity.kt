@@ -58,6 +58,12 @@ class MainActivity : ComponentActivity() {
         val uri = intent?.data ?: return
         if (uri.scheme?.lowercase() != "growop") return
         val host = (uri.host ?: uri.path?.trim('/') ?: "").lowercase()
+        if (host == "setup") {
+            // growop://setup?mode=direct&url=http://…:8099&key=… from the dashboard's "Set up a phone" QR code
+            val url = uri.getQueryParameter("url").orEmpty(); val key = uri.getQueryParameter("key").orEmpty()
+            if (url.isNotBlank() && key.isNotBlank()) appState.provisionDirect(url, key)
+            return
+        }
         appState.pendingTab.value = when (host) {
             "advisor" -> AppTab.ADVISOR
             "photos" -> AppTab.PHOTOS

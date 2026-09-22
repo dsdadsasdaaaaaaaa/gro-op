@@ -105,6 +105,7 @@ class SettingsModel(BaseModel):
     humidity_offset: float = 0.0
     price_per_kwh: Optional[float] = None
     currency: str = "CAD"
+    advisor_month_usd: float = 0.0
 
 
 class SettingsUpdate(BaseModel):

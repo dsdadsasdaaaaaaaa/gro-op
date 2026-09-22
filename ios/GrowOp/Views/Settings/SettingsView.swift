@@ -532,6 +532,7 @@ struct SettingsView: View {
                         Text("Safety limits: \(Formatting.number(lo))–\(Formatting.number(hi))°C")
                     }
                     if let ci = s.controlIntervalS { Text("Control loop every \(Formatting.number(ci))s") }
+                    if let usd = s.advisorMonthUsd { Text("Advisor spend this month: $\(String(format: "%.2f", usd)) USD") }
                 }
                 .font(.footnote).foregroundStyle(.secondary)
             }

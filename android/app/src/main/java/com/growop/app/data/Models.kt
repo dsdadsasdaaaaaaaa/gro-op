@@ -459,6 +459,7 @@ data class Settings(
     @SerialName("min_switch_interval_s") val minSwitchIntervalS: Double? = null,
     @SerialName("camera_entity") val cameraEntity: String? = null,
     @SerialName("camera_capture_minutes") val cameraCaptureMinutes: Int? = null,
+    @SerialName("advisor_month_usd") val advisorMonthUsd: Double? = null,
 )
 
 // MARK: Control

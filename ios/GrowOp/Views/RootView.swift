@@ -16,6 +16,15 @@ struct RootView: View {
             }
         }
         .animation(.default, value: app.isConfigured)
+        // growop://setup?mode=direct&url=http://…:8099&key=… (from the dashboard's "Set up a phone" QR code)
+        .onOpenURL { url in
+            guard url.host?.lowercased() == "setup",
+                  let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+                  let server = items.first(where: { $0.name == "url" })?.value, !server.isEmpty,
+                  let key = items.first(where: { $0.name == "key" })?.value, !key.isEmpty else { return }
+            let cfg = ServerConfig(mode: .direct, baseURL: server, apiKey: key, haURL: "", haToken: "", haAddonSlug: nil, haIngressPath: nil)
+            Task { _ = try? await app.connect(cfg) }
+        }
     }
 }
 

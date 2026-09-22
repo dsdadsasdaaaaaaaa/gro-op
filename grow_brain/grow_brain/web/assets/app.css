@@ -509,3 +509,9 @@ details.exp[open] > summary::after { transform: rotate(-90deg); }
   .device { flex-direction: column; align-items: flex-start; }
   .device .why { white-space: normal; }
 }
+
+/* Journal: side-by-side plants */
+.compare { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.compare-col h3 { margin: 0 0 4px; }
+.compare-col .timeline { margin-top: 8px; }
+@media (max-width: 800px) { .compare { grid-template-columns: 1fr; } }

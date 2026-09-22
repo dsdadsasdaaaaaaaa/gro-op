@@ -528,6 +528,7 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
                         Column(Modifier.padding(horizontal = 4.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             s.timezone?.let { Text("Timezone: $it", style = MaterialTheme.typography.bodySmall, color = c.textSecondary) }
                             if (s.safetyTempMinC != null && s.safetyTempMaxC != null) Text("Safety limits: ${Formatting.number(s.safetyTempMinC)}–${Formatting.number(s.safetyTempMaxC)}°C", style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
+                            s.advisorMonthUsd?.let { Text("Advisor spend this month: $" + String.format(java.util.Locale.US, "%.2f", it) + " USD", style = MaterialTheme.typography.bodySmall, color = c.textSecondary) }
                             s.controlIntervalS?.let { Text("Control loop every ${Formatting.number(it)}s", style = MaterialTheme.typography.bodySmall, color = c.textSecondary) }
                         }
                     }

@@ -272,3 +272,27 @@ async def test_stale_ha_alert_clears_on_first_good_cycle(client):
     controller.ha_ok = False  # simulate a fresh process
     await controller.cycle()
     assert not any("Cannot reach" in a["message"] for a in (await c.get("/api/status")).json()["alerts"])
+
+
+async def test_usage_qr_and_nudges(client):
+    c, ha, store, controller = client
+    await store.add_usage("brief", "claude-opus-5", 8000, 6000, 0, 500, 0.0555)
+    u = (await c.get("/api/usage")).json()
+    assert u["month"]["calls"] == 1 and u["month"]["usd"] == 0.06 and "brief" in u["month"]["by_kind"]
+    assert (await c.get("/api/settings")).json()["advisor_month_usd"] == 0.06
+    r = await c.get("/api/setup-qr.png", params={"url": "http://192.168.2.67:8099"})
+    assert r.status_code == 200 and r.headers["content-type"] == "image/png" and r.content[:4] == b"\x89PNG"
+    # a photo request open for 3 days gets one nudge to the plant owner, and not again within a day
+    p = await store.add_plant(name="Levi's plant", owner="Levi", notify_service="notify.levi")
+    pr = await store.add_photo_request("Top of canopy", "From above", "check", p["id"])
+    await store.db.execute("UPDATE photo_requests SET created_at=? WHERE id=?", ("2026-01-01T00:00:00Z", pr["id"]))
+    await store.db.commit()
+    from grow_brain.main import _nudge_tick
+    app_state = c._transport.app.state
+    app_state.notifier = controller.notifier
+    await _nudge_tick(app_state)
+    assert any("Still waiting for a photo" in n for n in ha.notifications)
+    n_before = len(ha.notifications)
+    await store.set_kv("last_nudge_hour", None)
+    await _nudge_tick(app_state)
+    assert len(ha.notifications) == n_before  # nudged_at set → no second nudge yet

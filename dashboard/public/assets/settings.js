@@ -143,7 +143,22 @@ export function createSettings(ctx) {
       }); } },
         h('div', { class: 'form-grid' }, field('Units', f.units), field('Brief time', f.brief_time), field('Timezone', f.timezone), field('Default notify service', f.notify_service, { hint: 'Briefs and safety alerts go to everyone' }), field('Advisor model', f.model), h('label', { class: 'check' }, f.auto, 'Let the advisor adjust targets'),
           field('Temp offset (°C)', f.temp_offset_c, { hint: 'Added to the raw sensor reading' }), field('Humidity offset (%)', f.humidity_offset), field('Price per kWh', f.price), field('Currency', f.currency), field('Camera frame every (min)', f.capture)),
+        h('p', { class: 'muted small' }, `Advisor spend this month: $${Number(s.advisor_month_usd || 0).toFixed(2)} USD (${s.model || 'claude-opus-5'})`),
         h('div', { class: 'form-actions' }, btn)));
+  }
+
+  // ---------- set up a phone (QR) ----------
+  let qrUrl = null;
+  async function showQr() {
+    const server = refs.qrUrl.value.trim();
+    if (!server) { toast('Enter the add-on address first', 'error'); return; }
+    try {
+      const blob = await api.blob('/api/setup-qr.png?url=' + encodeURIComponent(server));
+      if (qrUrl) URL.revokeObjectURL(qrUrl);
+      qrUrl = URL.createObjectURL(blob);
+      replaceChildren(refs.qrBox, h('img', { src: qrUrl, alt: 'Setup QR code', style: { width: '240px', height: '240px', borderRadius: '12px', background: '#fff', padding: '8px' } }),
+        h('p', { class: 'muted small' }, 'Contains the address and the API key; only show it to people who should control the tent.'));
+    } catch (e) { toast(errText(e), 'error'); }
   }
 
   // ---------- backup / connection / events ----------
@@ -185,6 +200,8 @@ export function createSettings(ctx) {
     refs.plants = h('div', null, loading()); refs.tent = h('div', null, loading()); refs.targets = h('div', null, loading()); refs.camera = h('div', null, loading()); refs.prefs = h('div', null, loading()); refs.conn = h('div'); refs.events = h('div', { class: 'events' }, loading());
     refs.version = h('span', { class: 'muted' }, '…');
     const backupBtn = h('button', { class: 'btn' }, icon('download'), 'Download backup');
+    refs.qrUrl = input({ value: location.port === '8099' ? location.origin : 'http://homeassistant.local:8099', placeholder: 'http://homeassistant.local:8099' });
+    refs.qrBox = h('div', { class: 'stack' });
     backupBtn.onclick = () => backup(backupBtn);
     const card = (title, ic, body, cls = '') => h('section', { class: `card ${cls}`.trim(), 'aria-label': title }, h('div', { class: 'card-head' }, h('h2', null, icon(ic), title)), body);
     replaceChildren(root,
@@ -193,6 +210,7 @@ export function createSettings(ctx) {
         card('Plants', 'leaf', refs.plants, 'span2'),
         card('Tent', 'home', refs.tent), card('Targets', 'vpd', refs.targets),
         card('Camera', 'camera', refs.camera), card('Preferences', 'gear', refs.prefs),
+        card('Set up a phone', 'key', h('div', { class: 'stack' }, h('p', { class: 'muted small' }, 'Show this QR code and scan it with the phone\'s camera: the GrowOp app opens already connected (home Wi-Fi mode).'), refs.qrUrl, h('div', { class: 'row' }, h('button', { class: 'btn', onclick: showQr }, icon('key'), 'Show QR code')), refs.qrBox)),
         card('Backup', 'archive', h('div', { class: 'stack' }, h('p', { class: 'muted small' }, 'A zip of the database and photos. Keep one somewhere safe now and then.'), h('div', null, backupBtn))),
         card('Connection', 'key', refs.conn),
         card('Events', 'list', refs.events, 'span2')));

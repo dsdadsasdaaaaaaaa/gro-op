@@ -433,6 +433,8 @@ async def _settings_api(request: Request) -> dict:
     s = await st.controller.settings()
     s["model"] = s.get("model") or st.boot.model
     s["advisor_enabled"] = st.advisor.enabled
+    month_start = datetime.now(st.controller.tz(s)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    s["advisor_month_usd"] = (await st.store.usage_summary(iso(month_start)))["usd"]
     try:
         s["notify_services_available"] = await st.controller.ha.list_notify_services()
     except Exception:
@@ -802,6 +804,29 @@ async def camera_analyse(body: CameraAnalyse, request: Request):
         except AdvisorError as e:
             await st.store.set_photo_analysis(pid, {"summary": str(e), "health_score": 0, "findings": [], "actions": [], "photo_requests": [], "tasks": []})
     return _photo_api(await st.store.get_photo(pid))
+
+
+# ------------------------------------------------------------------ usage / setup QR
+
+@router.get("/usage", dependencies=auth)
+async def usage(request: Request):
+    st = request.app.state
+    tz = st.controller.tz(await st.controller.settings())
+    now = datetime.now(tz)
+    month = await st.store.usage_summary(iso(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)))
+    today = await st.store.usage_summary(iso(now.replace(hour=0, minute=0, second=0, microsecond=0)))
+    return {"today": today, "month": month, "model": (await st.controller.settings()).get("model") or st.boot.model}
+
+
+@router.get("/setup-qr.png", dependencies=auth)
+async def setup_qr(request: Request, url: str):
+    """QR code a phone scans with its camera: opens the GrowOp app pre-configured for this server (home Wi-Fi mode)."""
+    import qrcode
+    from urllib.parse import quote
+    link = f"growop://setup?mode=direct&url={quote(url.rstrip('/'), safe='')}&key={quote(request.app.state.boot.api_key, safe='')}"
+    img = qrcode.make(link, box_size=8, border=2)
+    buf = io.BytesIO(); img.save(buf, "PNG"); buf.seek(0)
+    return Response(content=buf.getvalue(), media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 # ------------------------------------------------------------------ events

@@ -15,6 +15,7 @@ import com.growop.app.data.LogResponse
 import com.growop.app.data.Photo
 import com.growop.app.data.PhotoRequest
 import com.growop.app.data.Plant
+import com.growop.app.data.ConnectionMode
 import com.growop.app.data.ServerConfig
 import com.growop.app.data.Settings
 import com.growop.app.data.StatusResponse
@@ -168,6 +169,13 @@ class AppState(context: Context) {
     // MARK: Connection management
 
     /** Runs the full connection chain for a candidate config; if every step succeeds, saves it and becomes configured. */
+    /** Configure from a scanned setup QR code (home Wi-Fi mode) and connect. */
+    fun provisionDirect(url: String, key: String) {
+        scope.launch {
+            runCatching { connect(ServerConfig(mode = ConnectionMode.DIRECT, baseUrl = url, apiKey = key)) }
+        }
+    }
+
     suspend fun connect(candidate: ServerConfig): HealthResponse {
         val result = client.verify(candidate)
         store.saveConfig(result.config)
