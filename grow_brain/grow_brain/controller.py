@@ -407,6 +407,7 @@ class Controller:
             return
         if self._ha_fail_reported:
             await self.store.add_event("info", "system", "Home Assistant connection restored")
+            await self.store.resolve_alerts("system", "Cannot reach Home Assistant")
             self._ha_fail_reported = False
         self.ha_ok = True
         self.states = {s["entity_id"]: s for s in states}
@@ -425,6 +426,7 @@ class Controller:
             self._stale_reported = True
         elif not self.sensor.stale and self._stale_reported:
             await self.store.add_event("info", "safety", "Tent sensor is reporting again.")
+            await self.store.resolve_alerts("safety", "Tent sensor is stale")
             self._stale_reported = False
 
         if not self.sensor.stale:
@@ -543,6 +545,8 @@ class Controller:
             st = self.states.get(eid) if eid else None
             if not st or st.get("state") != "on":
                 self._on_since.pop(role, None)
+                if self._power_warned.pop(role, None):
+                    await self.store.resolve_alerts("device", f"{ROLE_BY_NAME[role].label} is switched on but drawing")
                 continue
             self._on_since.setdefault(role, now)
             w = self.power_w(role, dmap)
@@ -559,7 +563,8 @@ class Controller:
                 await self.notifier.send(f"power:{role}", msg, hours=1, title="Grow tent", everyone=True)
                 self._power_warned[role] = now
             else:
-                self._power_warned.pop(role, None)
+                if self._power_warned.pop(role, None):
+                    await self.store.resolve_alerts("device", f"{ROLE_BY_NAME[role].label} is switched on but drawing")
 
     async def _report_safety(self, ctx: ControlContext, decisions: dict[str, Decision]) -> None:
         active = None
@@ -579,6 +584,8 @@ class Controller:
             self._safety_reported = active
         elif not active and self._safety_reported:
             await self.store.add_event("info", "safety", "Safety condition cleared.")
+            for prefix in ("OVERHEATING", "TOO COLD", "HUMIDITY CRITICAL"):
+                await self.store.resolve_alerts("safety", prefix)
             self._safety_reported = None
 
     async def run(self) -> None:

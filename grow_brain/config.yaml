@@ -1,5 +1,5 @@
 name: Grow Brain
-version: "0.4.2"
+version: "0.4.3"
 slug: grow_brain
 description: Fully automated grow tent controller with a Claude-powered grow advisor. Pairs with the GrowOp iPhone app.
 url: https://github.com/dsdadsasdaaaaaaaa/gro-op
@@ -12,6 +12,7 @@ boot: auto
 homeassistant_api: true
 hassio_api: false
 host_network: false
+watchdog: http://[HOST]:[PORT:8099]/api/health
 ingress: true
 ingress_port: 8099
 panel_icon: mdi:sprout

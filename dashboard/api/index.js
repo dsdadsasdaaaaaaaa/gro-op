@@ -58,9 +58,19 @@ async function supervisor(commands) {
   }
 }
 
+let inflight = null;
+
 async function ensureSession(force = false) {
   const fresh = cache.ingressPath && cache.session && Date.now() - cache.sessionAt < SESSION_TTL_MS;
   if (fresh && !force) return cache;
+  // Many parallel requests (snapshot + frames + status) must share one WebSocket handshake.
+  if (!inflight) {
+    inflight = refreshSession(force).finally(() => { inflight = null; });
+  }
+  return inflight;
+}
+
+async function refreshSession(force) {
   if (!cache.ingressPath || force) {
     let slug = process.env.ADDON_SLUG;
     if (!slug) {

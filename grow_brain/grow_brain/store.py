@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS plants (
 
 # Columns added after the first release; applied idempotently at open().
 MIGRATIONS = [
+    ("events", "resolved_at", "TEXT"),
     ("log_entries", "plant_id", "INTEGER"),
     ("photo_requests", "plant_id", "INTEGER"),
     ("photos", "plant_id", "INTEGER"),
@@ -276,11 +277,19 @@ class Store:
         await self.db.commit()
         return cur.lastrowid
 
+    async def resolve_alerts(self, kind: str, message_prefix: str) -> int:
+        """Mark open warn/alert events of one kind (matching a message prefix) as resolved, so they stop showing as alerts."""
+        cur = await self.db.execute(
+            "UPDATE events SET resolved_at=? WHERE resolved_at IS NULL AND level IN ('warn','alert') AND kind=? AND message LIKE ?",
+            (iso(utcnow()), kind, message_prefix + "%"))
+        await self.db.commit()
+        return cur.rowcount
+
     async def events(self, limit: int = 50, min_level: str | None = None, hours: float | None = None) -> list[dict]:
-        q = "SELECT id, at, level, kind, message FROM events"
+        q = "SELECT id, at, level, kind, message, resolved_at FROM events"
         conds, args = [], []
         if min_level == "warn":
-            conds.append("level IN ('warn','alert')")
+            conds.append("level IN ('warn','alert') AND resolved_at IS NULL")
         if hours:
             conds.append("at>=?")
             args.append(iso(utcnow() - timedelta(hours=hours)))

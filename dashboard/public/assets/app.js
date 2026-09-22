@@ -108,7 +108,7 @@ async function tryConnect(e) {
   e?.preventDefault();
   const key = document.getElementById('connect-key').value.trim(), server = document.getElementById('connect-server').value.trim().replace(/\/+$/, '');
   const err = document.getElementById('connect-err'), btn = document.getElementById('connect-btn');
-  if (!key) { err.textContent = 'Enter the API key from the add-on settings.'; return; }
+  if (!key) { err.textContent = location.port === '8099' ? 'Enter the API key from the add-on settings.' : 'Enter the dashboard password.'; return; }
   setConn({ key, server });
   btn.disabled = true; replaceChildren(btn, spinner(), 'Connecting…'); err.textContent = '';
   try {
@@ -129,7 +129,13 @@ async function boot() {
   startPolling();
 }
 
-window.addEventListener('growop:unauthorized', () => { if (state.connected) { showConnect('The API key was rejected — enter it again.'); } });
+// Hosted copy (Vercel): the key field is the dashboard password, not the add-on key. // growop-hosted-label
+if (location.port !== '8099') {
+  const lbl = document.querySelector('label[for="connect-key"]'); if (lbl) lbl.textContent = 'Dashboard password';
+  const hint = document.querySelector('#connect-card p.muted, .connect p.muted'); if (hint && /API key/.test(hint.textContent)) hint.textContent = 'Enter the dashboard password you were given.';
+  const inp = document.getElementById('connect-key'); if (inp) inp.setAttribute('autocomplete', 'current-password');
+}
+window.addEventListener('growop:unauthorized', () => { if (state.connected) { showConnect(location.port === '8099' ? 'The API key was rejected — enter it again.' : 'Wrong dashboard password — try again.'); } });
 
 // ---------- init ----------
 function init() {

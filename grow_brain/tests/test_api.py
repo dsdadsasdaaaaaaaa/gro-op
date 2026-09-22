@@ -248,3 +248,18 @@ async def test_cumulative_energy_meter_baselines(client):
     ex = next(d for d in (await c.get("/api/energy")).json()["devices"] if d["role"] == "exhaust_fan")
     assert ex["today_kwh"] == 0.75 and ex["month_kwh"] == 0.75
     assert (await store.get_kv("energy_baselines"))["exhaust_fan:today"]["kwh"] == 100.0
+
+
+async def test_alerts_resolve_on_recovery(client):
+    c, ha, store, controller = client
+    await store.add_event("alert", "system", "Cannot reach Home Assistant: 502")
+    assert any("Cannot reach" in a["message"] for a in (await c.get("/api/status")).json()["alerts"])
+    controller._ha_fail_reported = True
+    await controller.cycle()  # HA answers → "connection restored" → the alert is resolved
+    assert not any("Cannot reach" in a["message"] for a in (await c.get("/api/status")).json()["alerts"])
+    evs = (await c.get("/api/events", params={"limit": 5})).json()["events"]
+    assert any(e["message"] == "Home Assistant connection restored" for e in evs)
+    await c.post("/api/control/pause", json={"minutes": 5})
+    assert any("paused" in a["message"] for a in (await c.get("/api/status")).json()["alerts"])
+    await c.post("/api/control/resume")
+    assert not any("paused" in a["message"] for a in (await c.get("/api/status")).json()["alerts"])

@@ -476,6 +476,8 @@ async def resume(request: Request):
     await st.store.del_kv("control_paused_until")
     await st.store.set_kv("standby", False)
     await st.store.add_event("info", "system", "Automation resumed")
+    await st.store.resolve_alerts("system", "Automation paused")
+    await st.store.resolve_alerts("system", "Tent put in standby")
     return {"control_paused_until": None, "standby": False}
 
 
@@ -507,6 +509,8 @@ async def start(request: Request):
     for role in SWITCH_ROLES:
         await st.store.set_override(role, "auto", None)
     await st.store.add_event("info", "system", "Tent started: automation fully on, manual overrides cleared")
+    await st.store.resolve_alerts("system", "Automation paused")
+    await st.store.resolve_alerts("system", "Tent put in standby")
     return {"standby": False, "control_paused_until": None}
 
 
@@ -739,13 +743,6 @@ async def camera_stream(request: Request):
     eid = await st.camera.entity_id()
     if not eid:
         raise HTTPException(404, "No tent camera configured")
-
-    async def gen():
-        async with st.ha.camera_stream_request(eid) as r:
-            ctype = r.headers.get("content-type", "multipart/x-mixed-replace")
-            gen.ctype = ctype
-            async for chunk in r.aiter_bytes():
-                yield chunk
 
     # Open the upstream first so we can mirror its multipart boundary header.
     upstream = st.ha.camera_stream_request(eid)
