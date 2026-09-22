@@ -255,6 +255,7 @@ async def test_alerts_resolve_on_recovery(client):
     await store.add_event("alert", "system", "Cannot reach Home Assistant: 502")
     assert any("Cannot reach" in a["message"] for a in (await c.get("/api/status")).json()["alerts"])
     controller._ha_fail_reported = True
+    controller.ha_ok = False  # as the real failure path sets it
     await controller.cycle()  # HA answers → "connection restored" → the alert is resolved
     assert not any("Cannot reach" in a["message"] for a in (await c.get("/api/status")).json()["alerts"])
     evs = (await c.get("/api/events", params={"limit": 5})).json()["events"]
