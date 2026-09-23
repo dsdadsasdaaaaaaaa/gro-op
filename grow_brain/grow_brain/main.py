@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+import httpx
 import uvicorn
 from pathlib import Path
 
@@ -52,9 +54,46 @@ async def brief_scheduler(app: FastAPI) -> None:
         try:
             await _camera_check_tick(st)
             await _nudge_tick(st)
+            await _update_check_tick(st)
         except Exception:
             log.exception("scheduler tick error")
         await asyncio.sleep(60)
+
+
+REPO_CONFIG_URL = "https://raw.githubusercontent.com/dsdadsasdaaaaaaaa/gro-op/main/grow_brain/config.yaml"
+
+
+def _vtuple(v: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", v))
+
+
+async def _update_check_tick(st) -> None:
+    """Every 6 hours: is a newer add-on version published? A failed build in Home Assistant is easy to miss,
+    so the timeline says so until the running version catches up."""
+    now = datetime.now(timezone.utc)
+    last = await st.store.get_kv("update_check_at")
+    if last and (now - datetime.fromisoformat(last)).total_seconds() < 6 * 3600:
+        return
+    await st.store.set_kv("update_check_at", now.isoformat())
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(REPO_CONFIG_URL)
+            r.raise_for_status()
+        mm = re.search(r'^version:\s*"?([\d.]+)"?', r.text, re.M)
+        latest = mm.group(1) if mm else None
+    except Exception as e:  # offline or GitHub hiccup: try again next time
+        log.debug("update check skipped: %s", e)
+        return
+    if not latest:
+        return
+    if _vtuple(latest) > _vtuple(__version__):
+        if await st.store.get_kv("update_notified") != latest:
+            await st.store.set_kv("update_notified", latest)
+            await st.store.add_event("warn", "system",
+                                     f"Grow Brain {latest} is available (running {__version__}). Open the add-on in Home Assistant "
+                                     f"and press Update; if it fails, send Claude the Supervisor log.")
+    else:
+        await st.store.resolve_alerts("system", "Grow Brain ")
 
 
 async def _camera_check_tick(st) -> None:

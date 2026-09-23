@@ -218,6 +218,8 @@ Brief:
 ## POST /api/control/standby → `{"standby": true}` — tent off: every device switches off and stays off. `assessment.level` becomes `"standby"`, headline "Tent is off".
 ## POST /api/control/start → `{"standby": false}` — fully automatic again: clears standby, pause and all manual overrides.
 Status includes `"control_paused_until": null | "..."` and `"standby": true|false`.
+
+Status also includes `"learned": {"humidifier_pts_per_min": 1.8, "exhaust_c_per_min": 0.3}` (0.6.0): the controller runs the humidifier and the exhaust cooling in **pulses** sized to the deficit, waits five minutes for the slow tent sensor, and learns each device's strength from every pulse. Keys are absent until the first clean measurement.
 ## GET /api/plan → the grow roadmap (phases with status done/current/upcoming, dates, what/watch_for/environment).
 
 ## Plants (v0.2.0): two plants, two people, one shared tent

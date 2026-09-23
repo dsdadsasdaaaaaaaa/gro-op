@@ -186,6 +186,7 @@ async def status(request: Request):
         "unread_brief": await st.store.unread_brief(),
         "alerts": alerts,
         "control_paused_until": paused,
+        "learned": dict(c.learned),
     }
 
 

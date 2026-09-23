@@ -295,6 +295,12 @@ class Store:
                               (iso(utcnow()), role, state, reason))
         await self.db.commit()
 
+    async def last_device_switches(self) -> dict[str, str]:
+        """{role: iso time} of the most recent switch the controller logged for each device."""
+        async with self.db.execute(
+                "SELECT role, t FROM device_log WHERE id IN (SELECT MAX(id) FROM device_log GROUP BY role)") as cur:
+            return {r["role"]: r["t"] for r in await cur.fetchall()}
+
     async def device_log_since(self, hours: float) -> list[dict]:
         since = iso(utcnow() - timedelta(hours=hours))
         async with self.db.execute("SELECT t, role, state, reason FROM device_log WHERE t>=? ORDER BY t", (since,)) as cur:

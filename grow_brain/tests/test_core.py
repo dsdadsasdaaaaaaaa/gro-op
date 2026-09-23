@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from grow_brain.controller import (ControlContext, DeviceInput, SensorSnapshot, decide, light_window)
+from grow_brain.controller import (ControlContext, DeviceInput, SensorSnapshot, decide, learn_gain, light_window)
 from grow_brain.devices import automap, suggest_role
 from grow_brain.targets import Targets, apply_overrides, stage_defaults, vpd_kpa
 
@@ -39,12 +39,13 @@ def test_light_window():
 
 
 def _ctx(temp, rh, stage="veg", lights_on=True, states=None, paused=False, overrides=None, stale=False,
-         safety_max=35.0, safety_min=12.0, switched=None):
+         safety_max=35.0, safety_min=12.0, switched=None, on_readings=None, on_tags=None):
     roles = ["light", "exhaust_fan", "intake_fan", "circulation_fan", "humidifier", "dehumidifier", "heater", "cooler"]
     states = states or {}
     overrides = overrides or {}
-    switched = switched or {}
-    devices = {r: DeviceInput(r, f"switch.{r}", states.get(r, "off"), True, switched.get(r), overrides.get(r), None) for r in roles}
+    switched, on_readings, on_tags = switched or {}, on_readings or {}, on_tags or {}
+    devices = {r: DeviceInput(r, f"switch.{r}", states.get(r, "off"), True, switched.get(r), overrides.get(r), None,
+                              on_readings.get(r), on_tags.get(r)) for r in roles}
     day = stage_defaults(stage)
     t = day if lights_on else day.for_night()
     return ControlContext(
@@ -70,12 +71,32 @@ def test_hot_turns_on_exhaust_and_cooler():
     assert d["intake_fan"].desired is True
 
 
-def test_hysteresis_keeps_exhaust_on():
-    # veg max is 28; at 27.5 with exhaust already on it should stay on (hyst 1.0)
-    d = decide(_ctx(27.5, 60.0, states={"exhaust_fan": "on"}))
+NOW = datetime(2026, 9, 20, 12, 7, tzinfo=timezone.utc)
+
+
+def test_cooling_runs_in_pulses_sized_to_the_excess():
+    # veg max is 28. 28.6 → excess 1.1 °C → at 0.25 °C/min that is a 264 s pulse
+    d = decide(_ctx(28.6, 60.0))
+    assert d["exhaust_fan"].desired is True and "264 s pulse" in d["exhaust_fan"].reason and d["exhaust_fan"].tag == "exhaust_cool"
+    # 2 minutes into that pulse the (stale) reading is still 28.6: keep going
+    d = decide(_ctx(28.6, 60.0, states={"exhaust_fan": "on"}, switched={"exhaust_fan": NOW - timedelta(seconds=120)},
+                    on_readings={"exhaust_fan": 28.6}, on_tags={"exhaust_fan": "exhaust_cool"}))
     assert d["exhaust_fan"].desired is True
-    d = decide(_ctx(26.5, 60.0, states={"exhaust_fan": "on"}))
-    assert d["exhaust_fan"].desired is False
+    # pulse over: stop and wait for the sensor even though the reading is still above max
+    d = decide(_ctx(28.6, 60.0, states={"exhaust_fan": "on"}, switched={"exhaust_fan": NOW - timedelta(seconds=270)},
+                    on_readings={"exhaust_fan": 28.6}, on_tags={"exhaust_fan": "exhaust_cool"}))
+    assert d["exhaust_fan"].desired is False and d["exhaust_fan"].tag == "exhaust_cool_done"
+    # resting: no new pulse for LAG_S after it stopped
+    d = decide(_ctx(28.6, 60.0, switched={"exhaust_fan": NOW - timedelta(seconds=200)}))
+    assert d["exhaust_fan"].desired is False and "resting" in d["exhaust_fan"].reason
+    # far above max: continuous, no pulsing
+    assert decide(_ctx(29.6, 60.0, switched={"exhaust_fan": NOW - timedelta(seconds=200)}))["exhaust_fan"].desired is True
+
+
+def test_learned_gain_changes_the_pulse_length():
+    ctx = _ctx(28.6, 60.0)
+    ctx.cool_gain = 0.5
+    assert "132 s pulse" in decide(ctx)["exhaust_fan"].reason
 
 
 def test_dry_turns_on_humidifier():
@@ -189,26 +210,47 @@ def test_standby_turns_everything_off_but_respects_overrides():
     assert decide(ctx)["light"].desired is True  # a manual "on" still wins
 
 
-def test_humidifier_stops_as_soon_as_band_is_reached():
-    # veg band 55-65: at 56 with the humidifier on it switches off (1-point hysteresis, not 4)
-    assert decide(_ctx(25.0, 56.5, states={"humidifier": "on"}))["humidifier"].desired is False
-    assert decide(_ctx(25.0, 55.5, states={"humidifier": "on"}))["humidifier"].desired is True
-
-
-def test_humidifier_bursts_near_the_minimum():
-    now = datetime(2026, 9, 20, 12, 7, tzinfo=timezone.utc)
-    # far below the band: runs continuously regardless of how long it has been on
-    d = decide(_ctx(25.0, 45.0, states={"humidifier": "on"}, switched={"humidifier": now - timedelta(minutes=10)}))
+def test_humidifier_pulses_toward_the_band():
+    # veg band 55-65, target = 57. From 48: deficit 9 → 360 s at 1.5 pts/min → capped at 300 s
+    d = decide(_ctx(25.0, 48.0))
+    assert d["humidifier"].desired is True and "300 s pulse" in d["humidifier"].reason and d["humidifier"].tag == "humidifier"
+    # from 55.5: deficit 1.5 → 60 s minimum pulse
+    assert "60 s pulse" in decide(_ctx(25.0, 55.5))["humidifier"].reason
+    # inside the band: nothing
+    assert decide(_ctx(25.0, 58.0))["humidifier"].desired is False
+    # mid-pulse with a stale reading: keep going until the planned time
+    d = decide(_ctx(25.0, 48.0, states={"humidifier": "on"}, switched={"humidifier": NOW - timedelta(seconds=100)},
+                    on_readings={"humidifier": 48.0}, on_tags={"humidifier": "humidifier"}))
     assert d["humidifier"].desired is True
-    # within 4 points: after a 3-minute burst it rests
-    d = decide(_ctx(25.0, 53.0, states={"humidifier": "on"}, switched={"humidifier": now - timedelta(seconds=200)}))
-    assert d["humidifier"].desired is False and "burst" in d["humidifier"].reason
-    # still resting 2 minutes after it went off
-    d = decide(_ctx(25.0, 53.0, states={"humidifier": "off"}, switched={"humidifier": now - timedelta(seconds=120)}))
+    d = decide(_ctx(25.0, 48.0, states={"humidifier": "on"}, switched={"humidifier": NOW - timedelta(seconds=310)},
+                    on_readings={"humidifier": 48.0}, on_tags={"humidifier": "humidifier"}))
+    assert d["humidifier"].desired is False and d["humidifier"].tag == "humidifier_done"
+    # the sensor caught up mid-pulse and shows the target: stop early
+    d = decide(_ctx(25.0, 57.5, states={"humidifier": "on"}, switched={"humidifier": NOW - timedelta(seconds=100)},
+                    on_readings={"humidifier": 48.0}, on_tags={"humidifier": "humidifier"}))
+    assert d["humidifier"].desired is False and d["humidifier"].tag == "humidifier_done"
+    # resting after a pulse even though the reading is still low; ready again after LAG_S
+    d = decide(_ctx(25.0, 50.0, switched={"humidifier": NOW - timedelta(seconds=120)}))
     assert d["humidifier"].desired is False and "resting" in d["humidifier"].reason
-    # rest over: next burst
-    d = decide(_ctx(25.0, 53.0, states={"humidifier": "off"}, switched={"humidifier": now - timedelta(seconds=300)}))
-    assert d["humidifier"].desired is True
+    assert decide(_ctx(25.0, 50.0, switched={"humidifier": NOW - timedelta(seconds=320)}))["humidifier"].desired is True
+
+
+def test_humidifier_preloads_before_an_air_exchange():
+    # seedling band 65-75, exchange pulse at minute 0 of every 30. Three minutes before it, 69 % is "low":
+    ctx = _ctx(25.0, 69.0, stage="seedling")
+    ctx.now_local = ctx.now_local.replace(minute=27)
+    d = decide(ctx)
+    assert d["humidifier"].desired is True and "pre-loading" in d["humidifier"].reason
+    # ten minutes before: 69 % is fine
+    ctx.now_local = ctx.now_local.replace(minute=20)
+    assert decide(ctx)["humidifier"].desired is False
+
+
+def test_learn_gain_blends_and_rejects_nonsense():
+    assert learn_gain(None, 2.0, 0.2, 6.0) == 2.0
+    assert learn_gain(2.0, 1.0, 0.2, 6.0) == 1.7
+    assert learn_gain(2.0, 9.0, 0.2, 6.0) == 2.0      # out of range: ignored
+    assert learn_gain(None, -0.5, 0.2, 6.0) is None
 
 
 def test_exhaust_waits_for_a_real_humidity_excess():

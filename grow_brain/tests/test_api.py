@@ -216,6 +216,9 @@ async def test_power_energy_offsets_history_backup(client):
     await c.put("/api/settings", json={"price_per_kwh": 0.2, "currency": "CAD", "temp_offset_c": -1.0, "humidity_offset": 2.5})
     e = (await c.get("/api/energy")).json()
     assert e["today_cost"] == 0.6 and e["currency"] == "CAD"
+    # the fake tent's humidifier is on: pretend the controller started that pulse a moment ago so it keeps running
+    ha.state["switch.grow_humidifier"] = "on"
+    controller.last_switched["humidifier"] = datetime.now(timezone.utc)
     await controller.cycle()
     s = (await c.get("/api/status")).json()
     assert s["sensor"]["temp_c"] == 23.0 and s["sensor"]["humidity"] == 57.5  # offsets applied to 24.0 / 55.0

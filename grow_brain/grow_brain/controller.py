@@ -35,11 +35,14 @@ POWER_GRACE_S = 180
 
 TEMP_HYST = 1.0      # °C
 RH_HYST = 4.0        # % RH (dehumidifier)
-HUM_HYST = 1.0       # humidifier stops as soon as RH is back inside the band
-HUM_NEAR = 4.0       # within this many points of the minimum the humidifier runs in bursts
-HUM_BURST_S = 180    # burst length; the tent hygrometer only reports every 2-3 minutes
-HUM_REST_S = 240     # rest between bursts so the sensor can catch up before the next one
-RH_EXHAUST_MARGIN = 3.0  # exhaust only dumps humidity this far above the max (mist settles on its own)
+LAG_S = 300              # the tent sensor reports a change 2-5 min after it happens: pulse, then wait this long
+HUM_GAIN_DEFAULT = 1.5   # % RH per minute of humidifier; learned from every pulse
+COOL_GAIN_DEFAULT = 0.25  # °C per minute of exhaust; learned from every cooling pulse
+HUM_PULSE_S = (60, 300)   # shortest / longest humidifier pulse
+COOL_PULSE_S = (120, 360)  # shortest / longest exhaust cooling pulse
+PREHUMIDIFY_MIN = 4       # top humidity up this many minutes before a scheduled air exchange
+WAY_TOO_HOT_C = 1.5       # this far above max the exhaust runs continuously instead of pulsing
+RH_EXHAUST_MARGIN = 3.0   # exhaust only dumps humidity this far above the max (mist settles on its own)
 RH_CRITICAL = 85.0   # bud-rot territory; always dehumidify/exhaust above this
 STALE_AFTER_S = 30 * 60
 EXHAUST_DUTY_ON_MIN = 5
@@ -78,6 +81,8 @@ class DeviceInput:
     last_switched: Optional[datetime]
     override_mode: Optional[str]  # "on" | "off" | None
     override_until: Optional[str]
+    on_reading: Optional[float] = None   # RH (humidifier) or °C (exhaust) when the controller switched it on
+    on_tag: Optional[str] = None         # what the controller switched it on for ("humidifier", "exhaust_cool", "exhaust_duty"...)
 
 
 @dataclass
@@ -86,6 +91,7 @@ class Decision:
     desired: Optional[bool]  # None = leave as is
     reason: str
     force: bool = False
+    tag: Optional[str] = None  # pulse bookkeeping: "<what>" when starting a pulse, "<what>_done" when ending one
 
 
 @dataclass
@@ -103,6 +109,8 @@ class ControlContext:
     paused: bool
     devices: dict[str, DeviceInput] = field(default_factory=dict)
     standby: bool = False
+    hum_gain: float = HUM_GAIN_DEFAULT    # learned humidifier strength, % RH per minute
+    cool_gain: float = COOL_GAIN_DEFAULT  # learned exhaust cooling, °C per minute
 
 
 # ---------------------------------------------------------------- light schedule
@@ -133,9 +141,9 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
     have = lambda r: r in ctx.devices and ctx.devices[r].entity_id
     is_on = lambda r: ctx.devices[r].state == "on" if have(r) else False
 
-    def set_(role, desired, reason, force=False):
+    def set_(role, desired, reason, force=False, tag=None):
         if have(role):
-            d[role] = Decision(role, desired, reason, force)
+            d[role] = Decision(role, desired, reason, force, tag)
 
     # --- standby: nothing planted, everything off; manual overrides still respected ---
     if ctx.standby:
@@ -186,25 +194,34 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
     too_cold = temp < t.temp_min_c or (is_on("heater") and temp < t.temp_min_c + TEMP_HYST)
     # --- humidity ---
     too_humid = rh > t.humidity_max or (is_on("dehumidifier") and rh > t.humidity_max - RH_HYST)
-    too_dry = rh < t.humidity_min or (is_on("humidifier") and rh < t.humidity_min + HUM_HYST)
 
-    # --- exhaust: reacts to heat and humidity, plus a baseline air-exchange duty while lights on ---
-    exhaust_hot = temp > t.temp_max_c or (is_on("exhaust_fan") and temp > t.temp_max_c - TEMP_HYST)
+    # --- exhaust: cooling pulses, humidity dump, plus a baseline air-exchange duty while lights on ---
     exhaust_humid = rh > t.humidity_max + RH_EXHAUST_MARGIN or (is_on("exhaust_fan") and rh > t.humidity_max)
     duty_on, duty_period = EXHAUST_DUTY_SEEDLING if ctx.stage == "seedling" else (EXHAUST_DUTY_ON_MIN, EXHAUST_DUTY_PERIOD_MIN)
     minute_of_period = (ctx.now_local.hour * 60 + ctx.now_local.minute) % duty_period
-    duty = ctx.lights_on and minute_of_period < duty_on and ctx.stage not in ("curing", "done")
+    growing = ctx.stage not in ("curing", "done")
+    duty = ctx.lights_on and minute_of_period < duty_on and growing
+    minutes_to_duty = (duty_period - minute_of_period) % duty_period
     ducted_note = "" if ctx.exhaust_ducted else " (not ducted outside yet: limited effect)"
+    ex = ctx.devices.get("exhaust_fan")
+    cooling = temp > t.temp_max_c or (is_on("exhaust_fan") and ex is not None and ex.on_tag == "exhaust_cool")
+    cool = None
+    if cooling and ex is not None and temp < t.temp_max_c + WAY_TOO_HOT_C:
+        start_temp = ex.on_reading if ex.on_reading is not None else temp
+        cool = _pulse(ex, ctx.now_local, temp - t.temp_max_c + 0.5, start_temp - t.temp_max_c + 0.5,
+                      ctx.cool_gain, COOL_PULSE_S, "exhaust_cool")
     if rh >= RH_CRITICAL:
         set_("exhaust_fan", True, f"RH {rh:.1f}% critical, exhaust on" + ducted_note, force=True)
-    elif exhaust_hot:
-        set_("exhaust_fan", True, f"{temp:.1f}°C above max {t.temp_max_c:g}°C" + ducted_note)
+    elif temp >= t.temp_max_c + WAY_TOO_HOT_C:
+        set_("exhaust_fan", True, f"{temp:.1f}°C far above max {t.temp_max_c:g}°C, exhaust on" + ducted_note, tag="exhaust_cool")
+    elif cool is not None and (cool[0] or not (exhaust_humid or duty)):
+        set_("exhaust_fan", cool[0], f"{temp:.1f}°C vs max {t.temp_max_c:g}°C: " + cool[1] + ducted_note, tag=cool[2])
     elif exhaust_humid:
         set_("exhaust_fan", True, f"RH {rh:.1f}% above max {t.humidity_max:g}%" + ducted_note)
     elif too_cold and not too_humid:
         set_("exhaust_fan", False, f"{temp:.1f}°C below min {t.temp_min_c:g}°C, keeping heat in")
     elif duty:
-        set_("exhaust_fan", True, f"fresh-air exchange ({duty_on} min every {duty_period})")
+        set_("exhaust_fan", True, f"fresh-air exchange ({duty_on} min every {duty_period})", tag="exhaust_duty")
     else:
         set_("exhaust_fan", False, f"{temp:.1f}°C / {rh:.1f}% RH within targets")
     if "exhaust_fan" in d:
@@ -228,30 +245,56 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
     elif too_humid:
         set_("dehumidifier", True, f"RH {rh:.1f}% above max {t.humidity_max:g}%")
         set_("humidifier", False, "too humid")
-    elif too_dry:
-        # Don't fight the exhaust if it is on for heat; humidifying into an exhausting tent is wasteful
-        # but still the right call when very dry, so only skip when exhaust is on for humidity.
-        set_("humidifier", *_humidifier_burst(ctx, rh, t))
-        set_("dehumidifier", False, "too dry")
     else:
-        set_("humidifier", False, f"RH {rh:.1f}% within {t.humidity_min:g}–{t.humidity_max:g}%")
         set_("dehumidifier", False, f"RH {rh:.1f}% within {t.humidity_min:g}–{t.humidity_max:g}%")
+        # Humidifier: pulse, then wait for the slow sensor. Normally it tops up to just inside the band;
+        # in the minutes before a scheduled air exchange it pre-loads toward the top of the band so the
+        # dry air the exhaust pulls in lands inside the band instead of far below it.
+        start_below, target, why = t.humidity_min + 1.0, t.humidity_min + 2.0, "below min"
+        if ctx.lights_on and growing and 0 < minutes_to_duty <= PREHUMIDIFY_MIN and rh < t.humidity_max - 4.0:
+            start_below, target, why = t.humidity_max - 4.0, t.humidity_max - 2.0, "pre-loading before the air exchange"
+        hum = ctx.devices.get("humidifier")
+        if hum is None or not hum.entity_id:
+            pass
+        elif is_on("humidifier") and rh >= target:
+            set_("humidifier", False, f"RH {rh:.1f}% reached {target:g}%", tag="humidifier_done")
+        elif rh < start_below or is_on("humidifier"):
+            start_rh = hum.on_reading if hum.on_reading is not None else rh
+            on, note, tag = _pulse(hum, ctx.now_local, target - rh, target - start_rh, ctx.hum_gain, HUM_PULSE_S, "humidifier")
+            set_("humidifier", on, f"RH {rh:.1f}% {why} ({note})", tag=tag)
+        else:
+            set_("humidifier", False, f"RH {rh:.1f}% within {t.humidity_min:g}–{t.humidity_max:g}%")
 
     return _apply_overrides_and_pause(ctx, d)
 
 
-def _humidifier_burst(ctx: ControlContext, rh: float, t: Targets) -> tuple[bool, str]:
-    """Close to the minimum, run the humidifier in short bursts with rests in between. The hygrometer
-    reports every few minutes, so running flat out until it *reads* in-band overshoots the band."""
-    dev = ctx.devices.get("humidifier")
-    if rh < t.humidity_min - HUM_NEAR or dev is None or dev.last_switched is None:
-        return True, f"RH {rh:.1f}% below min {t.humidity_min:g}%"
-    since = (ctx.now_local - dev.last_switched).total_seconds()
-    if dev.state == "on" and since >= HUM_BURST_S:
-        return False, f"RH {rh:.1f}%: burst done, letting the sensor catch up"
-    if dev.state != "on" and since < HUM_REST_S:
-        return False, f"RH {rh:.1f}%: resting between bursts"
-    return True, f"RH {rh:.1f}% below min {t.humidity_min:g}% (burst)"
+def _pulse(dev: DeviceInput, now: datetime, deficit_now: float, deficit_at_start: float, gain_per_min: float,
+           bounds: tuple[int, int], what: str) -> tuple[bool, str, Optional[str]]:
+    """Run a device for a pulse sized to the deficit, then rest LAG_S so the slow sensor can report the
+    effect before deciding again. Returns (desired, note, tag)."""
+    lo, hi = bounds
+    gain = max(gain_per_min, 0.01)
+    if dev.state == "on":
+        if dev.last_switched is None:
+            return False, "ending the pulse that was running before the restart", f"{what}_done"
+        planned = max(lo, min(hi, deficit_at_start / gain * 60.0))
+        elapsed = (now - dev.last_switched).total_seconds()
+        if elapsed >= planned:
+            return False, f"{planned:.0f} s pulse done, waiting for the sensor", f"{what}_done"
+        return True, f"pulse {elapsed:.0f}/{planned:.0f} s", what
+    if dev.last_switched is not None and (now - dev.last_switched).total_seconds() < LAG_S:
+        return False, "resting until the sensor catches up", None
+    planned = max(lo, min(hi, deficit_now / gain * 60.0))
+    return True, f"{planned:.0f} s pulse", what
+
+
+def learn_gain(current: Optional[float], sample: float, low: float, high: float) -> Optional[float]:
+    """Blend a measured response into the learned gain; ignore samples outside the plausible range."""
+    if not (low <= sample <= high):
+        return current
+    if current is None:
+        return round(sample, 3)
+    return round(0.7 * current + 0.3 * sample, 3)
 
 
 def _apply_overrides_and_pause(ctx: ControlContext, d: dict[str, Decision]) -> dict[str, Decision]:
@@ -290,6 +333,11 @@ class Controller:
         self._on_since: dict[str, datetime] = {}
         self._power_warned: dict[str, datetime] = {}
         self._energy_baselines: dict[tuple[str, str], float] = {}
+        self.on_reading: dict[str, float] = {}
+        self.on_tag: dict[str, str] = {}
+        self.learned: dict = {}            # {"humidifier_pts_per_min": x, "exhaust_c_per_min": y}
+        self._pending_samples: list[dict] = []
+        self._restored = False
 
     # ---- config helpers (read from store each cycle so app changes apply immediately) ----
     async def settings(self) -> dict:
@@ -363,6 +411,7 @@ class Controller:
             devices[role] = DeviceInput(
                 role, eid, state, bool(st) and st["state"] not in ("unavailable", "unknown"),
                 self.last_switched.get(role), ov["mode"] if ov else None, ov["until"] if ov else None,
+                self.on_reading.get(role), self.on_tag.get(role),
             )
         light_state = devices["light"].state if devices.get("light") else None
         lights_on = light_state == "on" if light_state is not None else scheduled_on
@@ -370,6 +419,8 @@ class Controller:
         return ControlContext(
             now_local=now_local, stage=profile["stage"], targets=targets, day_targets=day_targets,
             light_scheduled_on=scheduled_on, lights_on=lights_on, sensor=self.sensor,
+            hum_gain=float(self.learned.get("humidifier_pts_per_min") or HUM_GAIN_DEFAULT),
+            cool_gain=float(self.learned.get("exhaust_c_per_min") or COOL_GAIN_DEFAULT),
             safety_temp_max_c=float(settings["safety_temp_max_c"]), safety_temp_min_c=float(settings["safety_temp_min_c"]),
             exhaust_ducted=bool(profile.get("exhaust_ducted")), paused=bool(await self.paused_until()),
             devices=devices, standby=await self.standby(),
@@ -439,7 +490,10 @@ class Controller:
         _s = await self.settings()
         self._offsets = (float(_s.get("temp_offset_c") or 0.0), float(_s.get("humidity_offset") or 0.0))
         self.sensor = self._read_sensors(dmap)
+        if not self._restored:
+            await self._restore_switch_times()
         ctx = await self.build_context()
+        await self._learn(ctx)
         await self._power_watchdog(dmap)
         await self._update_energy_baselines(dmap, ctx.now_local)
 
@@ -470,12 +524,15 @@ class Controller:
             if dev.state == ("on" if dec.desired else "off"):
                 continue
             iv = max(min_iv, 300) if role in ("dehumidifier", "cooler") else min_iv
+            if role == "humidifier":
+                iv = min(iv, 60)  # an ultrasonic humidifier is happy to pulse; this is what makes the pulses short
             last = self.last_switched.get(role)
             if last and not dec.force and (now - last).total_seconds() < iv:
                 self.last_reasons[role] = dec.reason + " (waiting for minimum switch interval)"
                 continue
             ok = await self.ha.turn(dev.entity_id, dec.desired)
             if ok:
+                self._note_switch(role, dec, ctx, last, now)
                 self.last_switched[role] = now
                 await self.store.log_device(role, "on" if dec.desired else "off", dec.reason)
                 await self.store.add_event("info", "device",
@@ -483,6 +540,70 @@ class Controller:
                 # optimistic local state so the next cycle's hysteresis sees it
                 self.states.setdefault(dev.entity_id, {})["state"] = "on" if dec.desired else "off"
         self.last_cycle_at = now
+
+    # ---- pulse learning: how strong are the humidifier and the exhaust in *this* tent? ----
+    def _note_switch(self, role: str, dec: Decision, ctx: ControlContext, on_at: Optional[datetime], now: datetime) -> None:
+        reading = self.sensor.humidity if role == "humidifier" else self.sensor.temp_c
+        if dec.desired:
+            if reading is not None:
+                self.on_reading[role] = reading
+            if dec.tag:
+                self.on_tag[role] = dec.tag
+            return
+        start = self.on_reading.pop(role, None)
+        tag = self.on_tag.pop(role, None)
+        if dec.tag in ("humidifier_done", "exhaust_cool_done") and start is not None and on_at is not None \
+                and tag in ("humidifier", "exhaust_cool"):
+            minutes = (now - on_at).total_seconds() / 60.0
+            if minutes >= 0.5:
+                self._pending_samples.append({
+                    "role": role, "start": start, "minutes": minutes, "on_at": on_at, "ended": now,
+                    "lights_on": ctx.lights_on,
+                })
+
+    async def _learn(self, ctx: ControlContext) -> None:
+        if not self._pending_samples or self.sensor.stale:
+            return
+        now = utcnow()
+        keep = []
+        changed = False
+        for smp in self._pending_samples:
+            if (now - smp["ended"]).total_seconds() < LAG_S:
+                keep.append(smp)
+                continue
+            if smp["role"] == "humidifier":
+                ex_last = self.last_switched.get("exhaust_fan")
+                if ex_last and ex_last > smp["on_at"] or self.sensor.humidity is None:
+                    continue  # the exhaust ran during the window: not a clean measurement
+                sample = (self.sensor.humidity - smp["start"]) / smp["minutes"]
+                key, lo, hi, label = "humidifier_pts_per_min", 0.2, 6.0, "humidifier raises humidity about %.1f points per minute"
+            else:
+                if ctx.lights_on != smp["lights_on"] or self.sensor.temp_c is None:
+                    continue
+                sample = (smp["start"] - self.sensor.temp_c) / smp["minutes"]
+                key, lo, hi, label = "exhaust_c_per_min", 0.05, 1.5, "exhaust cools the tent about %.2f °C per minute"
+            new = learn_gain(self.learned.get(key), sample, lo, hi)
+            if new is not None and new != self.learned.get(key):
+                first = key not in self.learned
+                self.learned[key] = new
+                changed = True
+                if first:
+                    await self.store.add_event("info", "system", "Learned: " + label % new)
+        self._pending_samples = keep
+        if changed:
+            await self.store.set_kv("learned", self.learned)
+
+    async def _restore_switch_times(self) -> None:
+        """After a restart, pick up when each device was last switched so pulses and rests carry on."""
+        self._restored = True
+        self.learned = await self.store.get_kv("learned", {}) or {}
+        try:
+            for role, t in (await self.store.last_device_switches()).items():
+                when = parse_iso(t)
+                if when and (utcnow() - when).total_seconds() < 24 * 3600:
+                    self.last_switched.setdefault(role, when)
+        except Exception:
+            log.exception("could not restore switch times")
 
     # ---- power monitoring (smart plugs with energy metering, e.g. Tapo P110 / Kasa) ----
     def _numeric_sensor(self, entity_id: str) -> Optional[float]:
