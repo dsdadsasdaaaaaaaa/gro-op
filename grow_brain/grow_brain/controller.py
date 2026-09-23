@@ -351,6 +351,7 @@ class Controller:
         self._restored = False
         self._climate_checked_at: Optional[datetime] = None
         self._climate_alert = False
+        self._tank: Optional[dict] = None   # humidifier water: run seconds since the last refill, open task id
 
     # ---- config helpers (read from store each cycle so app changes apply immediately) ----
     async def settings(self) -> dict:
@@ -360,6 +361,7 @@ class Controller:
         s.setdefault("safety_temp_min_c", 12.0)
         s.setdefault("control_interval_s", 30)
         s.setdefault("min_switch_interval_s", 180)
+        s.setdefault("humidifier_tank_hours", 4.0)   # hours of misting one tank lasts at the knob setting in use
         s.setdefault("auto_apply_advisor_targets", True)
         s.setdefault("units", "c")
         s.setdefault("brief_time", "08:00")
@@ -527,6 +529,7 @@ class Controller:
         decisions = decide(ctx)
         await self._report_safety(ctx, decisions)
         await self._climate_check(ctx)
+        await self._tank_tracker(ctx)
         settings = await self.settings()
         min_iv = int(settings["min_switch_interval_s"])
         now = utcnow()
@@ -661,6 +664,68 @@ class Controller:
             on_s += max(0.0, (now - cursor).total_seconds())
         return round(min(1.0, on_s / (hours * 3600.0)), 3)
 
+    # ---- humidifier water: how many hours of misting since the last refill? ----
+    async def _tank_load(self) -> dict:
+        if self._tank is None:
+            refill_at = await self.store.get_kv("humidifier_refill_at")
+            if not refill_at:
+                refill_at = iso(utcnow())
+                await self.store.set_kv("humidifier_refill_at", refill_at)
+            self._tank = {"run_s": float(await self.store.get_kv("humidifier_run_s", 0.0) or 0.0),
+                          "refill_at": refill_at, "task_id": await self.store.get_kv("humidifier_refill_task")}
+        return self._tank
+
+    async def tank_status(self) -> Optional[dict]:
+        tk = await self._tank_load()
+        hours = float((await self.settings()).get("humidifier_tank_hours") or 4.0)
+        return {"run_hours_since_refill": round(tk["run_s"] / 3600.0, 2), "tank_hours": hours,
+                "refill_at": tk["refill_at"], "refill_task_id": tk["task_id"]}
+
+    async def _tank_tracker(self, ctx: ControlContext) -> None:
+        hum = ctx.devices.get("humidifier")
+        if hum is None or not hum.entity_id:
+            return
+        tk = await self._tank_load()
+        if tk["task_id"]:
+            task = await self.store.get_task(tk["task_id"])
+            if not task or task["status"] != "open":
+                await self._tank_reset("Tank marked as refilled")
+                return
+        now = utcnow()
+        if hum.state == "on" and self.last_cycle_at:
+            tk["run_s"] += min(600.0, max(0.0, (now - self.last_cycle_at).total_seconds()))
+            await self.store.set_kv("humidifier_run_s", tk["run_s"])
+        hours = float((await self.settings()).get("humidifier_tank_hours") or 4.0)
+        if tk["run_s"] >= 0.8 * hours * 3600.0 and not tk["task_id"]:
+            await self._tank_alert(f"about {tk['run_s'] / 3600.0:.1f} h of misting since the last fill")
+
+    async def _tank_alert(self, why: str) -> None:
+        tk = await self._tank_load()
+        if tk["task_id"]:
+            return
+        task = await self.store.add_task(
+            "Refill the humidifier tank",
+            f"Humidifier: {why}. Tick this off once it's filled and the counter starts again.",
+            utcnow().date().isoformat(), "high", "system")
+        tk["task_id"] = task["id"]
+        await self.store.set_kv("humidifier_refill_task", task["id"])
+        await self.store.add_event("warn", "device", f"Humidifier tank is probably low: {why}. Refill it.")
+        await self.notifier.send("tank", f"Refill the humidifier tank: {why}.", hours=12, title="Grow tent", everyone=True)
+
+    async def _tank_reset(self, why: str) -> None:
+        tk = await self._tank_load()
+        now = iso(utcnow())
+        if tk["task_id"]:
+            task = await self.store.get_task(tk["task_id"])
+            if task and task["status"] == "open":
+                await self.store.set_task_status(tk["task_id"], "done")
+        tk.update(run_s=0.0, refill_at=now, task_id=None)
+        await self.store.set_kv("humidifier_run_s", 0.0)
+        await self.store.set_kv("humidifier_refill_at", now)
+        await self.store.set_kv("humidifier_refill_task", None)
+        await self.store.resolve_alerts("device", "Humidifier tank is probably low")
+        await self.store.add_event("info", "device", f"{why}: misting counter reset.")
+
     async def _restore_switch_times(self) -> None:
         """After a restart, pick up when each device was last switched so pulses and rests carry on."""
         self._restored = True
@@ -774,9 +839,13 @@ class Controller:
                 await self.store.add_event("warn", "device", msg)
                 await self.notifier.send(f"power:{role}", msg, hours=1, title="Grow tent", everyone=True)
                 self._power_warned[role] = now
+                if role == "humidifier":
+                    await self._tank_alert("it has run dry")
             else:
                 if self._power_warned.pop(role, None):
                     await self.store.resolve_alerts("device", f"{ROLE_BY_NAME[role].label} is switched on but drawing")
+                    if role == "humidifier":
+                        await self._tank_reset("Humidifier is drawing power again, so the tank was refilled")
 
     async def _report_safety(self, ctx: ControlContext, decisions: dict[str, Decision]) -> None:
         active = None

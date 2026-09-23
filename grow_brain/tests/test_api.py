@@ -323,3 +323,31 @@ async def test_climate_diagnosis_when_the_light_is_too_hot(client):
     hit = [e for e in evs if e["message"].startswith("Can't hold the climate")]
     assert hit and "dim it or raise it" in hit[0]["message"] and "humidity" in hit[0]["message"]
     assert (await c.get("/api/status")).json()["exhaust_duty_1h"] >= 0.45
+
+
+async def test_humidifier_tank_tracking(client):
+    c, ha, store, controller = client
+    from datetime import timedelta
+    ha.state["switch.grow_humidifier"] = "on"
+    controller.last_switched["humidifier"] = datetime.now(timezone.utc)
+    controller.last_cycle_at = datetime.now(timezone.utc) - timedelta(seconds=30)
+    await controller.cycle()
+    tank = (await c.get("/api/status")).json()["humidifier_tank"]
+    assert 0.005 <= tank["run_hours_since_refill"] <= 0.02 and tank["tank_hours"] == 4.0 and tank["refill_task_id"] is None
+    # 3.3 h of misting on a 4 h tank → a refill task and a phone notification, once
+    await store.set_kv("settings", {**(await store.get_kv("settings") or {}), "notify_service": "notify.test"})
+    controller._tank["run_s"] = 3.3 * 3600
+    await controller.cycle()
+    await controller.cycle()
+    tasks = (await c.get("/api/tasks")).json()["tasks"]
+    refill = [x for x in tasks if x["title"].startswith("Refill the humidifier")]
+    assert len(refill) == 1 and refill[0]["priority"] == "high"
+    assert sum("Refill the humidifier" in n for n in ha.notifications) == 1
+    # ticking the task off restarts the counter
+    await c.post(f"/api/tasks/{refill[0]['id']}/complete")
+    await controller.cycle()
+    tank = (await c.get("/api/status")).json()["humidifier_tank"]
+    assert tank["run_hours_since_refill"] < 0.02 and tank["refill_task_id"] is None
+    # the setting is adjustable
+    await c.put("/api/settings", json={"humidifier_tank_hours": 2.5})
+    assert (await c.get("/api/status")).json()["humidifier_tank"]["tank_hours"] == 2.5

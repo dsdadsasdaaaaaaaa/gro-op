@@ -119,6 +119,7 @@ class SettingsUpdate(BaseModel):
     safety_temp_min_c: Optional[float] = None
     control_interval_s: Optional[int] = None
     min_switch_interval_s: Optional[int] = None
+    humidifier_tank_hours: Optional[float] = None  # hours of misting one tank lasts
     camera_entity: Optional[str] = None
     camera_capture_minutes: Optional[int] = None
     temp_offset_c: Optional[float] = None
