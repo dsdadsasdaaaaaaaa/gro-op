@@ -267,3 +267,29 @@ def test_seedlings_get_shorter_air_exchange():
     assert decide(ctx)["exhaust_fan"].desired is True and "3 min every 30" in decide(ctx)["exhaust_fan"].reason
     ctx.now_local = ctx.now_local.replace(minute=4)   # would still be on under the old 5-of-20 rule
     assert decide(ctx)["exhaust_fan"].desired is False
+
+
+def test_humidifier_waits_while_the_exhaust_runs():
+    # veg: 28.6 °C starts a cooling pulse; 48 % RH would start a humidifier pulse, but not into an exhausting tent
+    d = decide(_ctx(28.6, 48.0))
+    assert d["exhaust_fan"].desired is True
+    assert d["humidifier"].desired is False and "waiting for the exhaust" in d["humidifier"].reason
+    # a pulse that is already running keeps going (it partly offsets the dry air; the measurement is discarded)
+    d = decide(_ctx(28.6, 48.0, states={"humidifier": "on"}, switched={"humidifier": NOW - timedelta(seconds=60)},
+                    on_readings={"humidifier": 48.0}, on_tags={"humidifier": "humidifier"}))
+    assert d["humidifier"].desired is True
+
+
+def test_air_exchange_skipped_when_the_exhaust_just_ran():
+    at = NOW.replace(minute=1)   # inside the 3-minute window
+    ctx = _ctx(25.0, 70.0, stage="seedling", switched={"exhaust_fan": at - timedelta(minutes=4)})
+    ctx.now_local = at
+    assert decide(ctx)["exhaust_fan"].desired is False
+    ctx = _ctx(25.0, 70.0, stage="seedling", switched={"exhaust_fan": at - timedelta(minutes=15)})
+    ctx.now_local = at
+    assert decide(ctx)["exhaust_fan"].desired is True
+    # a running exchange is not cut short by its own start time
+    ctx = _ctx(25.0, 70.0, stage="seedling", states={"exhaust_fan": "on"}, switched={"exhaust_fan": at - timedelta(seconds=60)},
+               on_tags={"exhaust_fan": "exhaust_duty"})
+    ctx.now_local = at
+    assert decide(ctx)["exhaust_fan"].desired is True

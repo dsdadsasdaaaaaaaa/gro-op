@@ -43,6 +43,7 @@ COOL_PULSE_S = (120, 360)  # shortest / longest exhaust cooling pulse
 PREHUMIDIFY_MIN = 4       # top humidity up this many minutes before a scheduled air exchange
 WAY_TOO_HOT_C = 1.5       # this far above max the exhaust runs continuously instead of pulsing
 RH_EXHAUST_MARGIN = 3.0   # exhaust only dumps humidity this far above the max (mist settles on its own)
+DUTY_SKIP_S = 600         # skip a scheduled air exchange if the exhaust ran (for any reason) within this long
 RH_CRITICAL = 85.0   # bud-rot territory; always dehumidify/exhaust above this
 STALE_AFTER_S = 30 * 60
 EXHAUST_DUTY_ON_MIN = 5
@@ -200,10 +201,14 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
     duty_on, duty_period = EXHAUST_DUTY_SEEDLING if ctx.stage == "seedling" else (EXHAUST_DUTY_ON_MIN, EXHAUST_DUTY_PERIOD_MIN)
     minute_of_period = (ctx.now_local.hour * 60 + ctx.now_local.minute) % duty_period
     growing = ctx.stage not in ("curing", "done")
-    duty = ctx.lights_on and minute_of_period < duty_on and growing
+    ex = ctx.devices.get("exhaust_fan")
+    # A cooling pulse already exchanged the air: don't dump the humidity a second time.
+    recently_ran = ex is not None and ex.last_switched is not None and \
+        (ctx.now_local - ex.last_switched).total_seconds() < DUTY_SKIP_S
+    duty_window = ctx.lights_on and minute_of_period < duty_on and growing
+    duty = duty_window and ((is_on("exhaust_fan") and ex is not None and ex.on_tag == "exhaust_duty") or not recently_ran)
     minutes_to_duty = (duty_period - minute_of_period) % duty_period
     ducted_note = "" if ctx.exhaust_ducted else " (not ducted outside yet: limited effect)"
-    ex = ctx.devices.get("exhaust_fan")
     cooling = temp > t.temp_max_c or (is_on("exhaust_fan") and ex is not None and ex.on_tag == "exhaust_cool")
     cool = None
     if cooling and ex is not None and temp < t.temp_max_c + WAY_TOO_HOT_C:
@@ -254,10 +259,14 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
         if ctx.lights_on and growing and 0 < minutes_to_duty <= PREHUMIDIFY_MIN and rh < t.humidity_max - 4.0:
             start_below, target, why = t.humidity_max - 4.0, t.humidity_max - 2.0, "pre-loading before the air exchange"
         hum = ctx.devices.get("humidifier")
+        exhaust_now = d["exhaust_fan"].desired if "exhaust_fan" in d and d["exhaust_fan"].desired is not None else is_on("exhaust_fan")
         if hum is None or not hum.entity_id:
             pass
         elif is_on("humidifier") and rh >= target:
             set_("humidifier", False, f"RH {rh:.1f}% reached {target:g}%", tag="humidifier_done")
+        elif not is_on("humidifier") and rh < start_below and exhaust_now:
+            # mist into an exhausting tent goes straight outside; wait for the pulse to end
+            set_("humidifier", False, f"RH {rh:.1f}% {why}: waiting for the exhaust to finish")
         elif rh < start_below or is_on("humidifier"):
             start_rh = hum.on_reading if hum.on_reading is not None else rh
             on, note, tag = _pulse(hum, ctx.now_local, target - rh, target - start_rh, ctx.hum_gain, HUM_PULSE_S, "humidifier")
