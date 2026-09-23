@@ -34,11 +34,17 @@ LOW_POWER_W = {"light": 15.0, "exhaust_fan": 3.0, "intake_fan": 2.0, "circulatio
 POWER_GRACE_S = 180
 
 TEMP_HYST = 1.0      # °C
-RH_HYST = 4.0        # % RH
+RH_HYST = 4.0        # % RH (dehumidifier)
+HUM_HYST = 1.0       # humidifier stops as soon as RH is back inside the band
+HUM_NEAR = 4.0       # within this many points of the minimum the humidifier runs in bursts
+HUM_BURST_S = 180    # burst length; the tent hygrometer only reports every 2-3 minutes
+HUM_REST_S = 240     # rest between bursts so the sensor can catch up before the next one
+RH_EXHAUST_MARGIN = 3.0  # exhaust only dumps humidity this far above the max (mist settles on its own)
 RH_CRITICAL = 85.0   # bud-rot territory; always dehumidify/exhaust above this
 STALE_AFTER_S = 30 * 60
 EXHAUST_DUTY_ON_MIN = 5
 EXHAUST_DUTY_PERIOD_MIN = 20
+EXHAUST_DUTY_SEEDLING = (3, 30)  # seedlings use little CO2; fewer pulses keep humidity up
 
 
 @dataclass
@@ -180,13 +186,14 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
     too_cold = temp < t.temp_min_c or (is_on("heater") and temp < t.temp_min_c + TEMP_HYST)
     # --- humidity ---
     too_humid = rh > t.humidity_max or (is_on("dehumidifier") and rh > t.humidity_max - RH_HYST)
-    too_dry = rh < t.humidity_min or (is_on("humidifier") and rh < t.humidity_min + RH_HYST)
+    too_dry = rh < t.humidity_min or (is_on("humidifier") and rh < t.humidity_min + HUM_HYST)
 
     # --- exhaust: reacts to heat and humidity, plus a baseline air-exchange duty while lights on ---
     exhaust_hot = temp > t.temp_max_c or (is_on("exhaust_fan") and temp > t.temp_max_c - TEMP_HYST)
-    exhaust_humid = rh > t.humidity_max or (is_on("exhaust_fan") and rh > t.humidity_max - RH_HYST)
-    minute_of_period = (ctx.now_local.hour * 60 + ctx.now_local.minute) % EXHAUST_DUTY_PERIOD_MIN
-    duty = ctx.lights_on and minute_of_period < EXHAUST_DUTY_ON_MIN and ctx.stage not in ("curing", "done")
+    exhaust_humid = rh > t.humidity_max + RH_EXHAUST_MARGIN or (is_on("exhaust_fan") and rh > t.humidity_max)
+    duty_on, duty_period = EXHAUST_DUTY_SEEDLING if ctx.stage == "seedling" else (EXHAUST_DUTY_ON_MIN, EXHAUST_DUTY_PERIOD_MIN)
+    minute_of_period = (ctx.now_local.hour * 60 + ctx.now_local.minute) % duty_period
+    duty = ctx.lights_on and minute_of_period < duty_on and ctx.stage not in ("curing", "done")
     ducted_note = "" if ctx.exhaust_ducted else " (not ducted outside yet: limited effect)"
     if rh >= RH_CRITICAL:
         set_("exhaust_fan", True, f"RH {rh:.1f}% critical, exhaust on" + ducted_note, force=True)
@@ -197,7 +204,7 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
     elif too_cold and not too_humid:
         set_("exhaust_fan", False, f"{temp:.1f}°C below min {t.temp_min_c:g}°C, keeping heat in")
     elif duty:
-        set_("exhaust_fan", True, f"fresh-air exchange ({EXHAUST_DUTY_ON_MIN} min every {EXHAUST_DUTY_PERIOD_MIN})")
+        set_("exhaust_fan", True, f"fresh-air exchange ({duty_on} min every {duty_period})")
     else:
         set_("exhaust_fan", False, f"{temp:.1f}°C / {rh:.1f}% RH within targets")
     if "exhaust_fan" in d:
@@ -224,13 +231,27 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
     elif too_dry:
         # Don't fight the exhaust if it is on for heat; humidifying into an exhausting tent is wasteful
         # but still the right call when very dry, so only skip when exhaust is on for humidity.
-        set_("humidifier", True, f"RH {rh:.1f}% below min {t.humidity_min:g}%")
+        set_("humidifier", *_humidifier_burst(ctx, rh, t))
         set_("dehumidifier", False, "too dry")
     else:
         set_("humidifier", False, f"RH {rh:.1f}% within {t.humidity_min:g}–{t.humidity_max:g}%")
         set_("dehumidifier", False, f"RH {rh:.1f}% within {t.humidity_min:g}–{t.humidity_max:g}%")
 
     return _apply_overrides_and_pause(ctx, d)
+
+
+def _humidifier_burst(ctx: ControlContext, rh: float, t: Targets) -> tuple[bool, str]:
+    """Close to the minimum, run the humidifier in short bursts with rests in between. The hygrometer
+    reports every few minutes, so running flat out until it *reads* in-band overshoots the band."""
+    dev = ctx.devices.get("humidifier")
+    if rh < t.humidity_min - HUM_NEAR or dev is None or dev.last_switched is None:
+        return True, f"RH {rh:.1f}% below min {t.humidity_min:g}%"
+    since = (ctx.now_local - dev.last_switched).total_seconds()
+    if dev.state == "on" and since >= HUM_BURST_S:
+        return False, f"RH {rh:.1f}%: burst done, letting the sensor catch up"
+    if dev.state != "on" and since < HUM_REST_S:
+        return False, f"RH {rh:.1f}%: resting between bursts"
+    return True, f"RH {rh:.1f}% below min {t.humidity_min:g}% (burst)"
 
 
 def _apply_overrides_and_pause(ctx: ControlContext, d: dict[str, Decision]) -> dict[str, Decision]:

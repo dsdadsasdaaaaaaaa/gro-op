@@ -39,11 +39,12 @@ def test_light_window():
 
 
 def _ctx(temp, rh, stage="veg", lights_on=True, states=None, paused=False, overrides=None, stale=False,
-         safety_max=35.0, safety_min=12.0):
+         safety_max=35.0, safety_min=12.0, switched=None):
     roles = ["light", "exhaust_fan", "intake_fan", "circulation_fan", "humidifier", "dehumidifier", "heater", "cooler"]
     states = states or {}
     overrides = overrides or {}
-    devices = {r: DeviceInput(r, f"switch.{r}", states.get(r, "off"), True, None, overrides.get(r), None) for r in roles}
+    switched = switched or {}
+    devices = {r: DeviceInput(r, f"switch.{r}", states.get(r, "off"), True, switched.get(r), overrides.get(r), None) for r in roles}
     day = stage_defaults(stage)
     t = day if lights_on else day.for_night()
     return ControlContext(
@@ -186,3 +187,41 @@ def test_standby_turns_everything_off_but_respects_overrides():
     ctx = _ctx(30.0, 40.0, overrides={"light": "on"})
     ctx.standby = True
     assert decide(ctx)["light"].desired is True  # a manual "on" still wins
+
+
+def test_humidifier_stops_as_soon_as_band_is_reached():
+    # veg band 55-65: at 56 with the humidifier on it switches off (1-point hysteresis, not 4)
+    assert decide(_ctx(25.0, 56.5, states={"humidifier": "on"}))["humidifier"].desired is False
+    assert decide(_ctx(25.0, 55.5, states={"humidifier": "on"}))["humidifier"].desired is True
+
+
+def test_humidifier_bursts_near_the_minimum():
+    now = datetime(2026, 9, 20, 12, 7, tzinfo=timezone.utc)
+    # far below the band: runs continuously regardless of how long it has been on
+    d = decide(_ctx(25.0, 45.0, states={"humidifier": "on"}, switched={"humidifier": now - timedelta(minutes=10)}))
+    assert d["humidifier"].desired is True
+    # within 4 points: after a 3-minute burst it rests
+    d = decide(_ctx(25.0, 53.0, states={"humidifier": "on"}, switched={"humidifier": now - timedelta(seconds=200)}))
+    assert d["humidifier"].desired is False and "burst" in d["humidifier"].reason
+    # still resting 2 minutes after it went off
+    d = decide(_ctx(25.0, 53.0, states={"humidifier": "off"}, switched={"humidifier": now - timedelta(seconds=120)}))
+    assert d["humidifier"].desired is False and "resting" in d["humidifier"].reason
+    # rest over: next burst
+    d = decide(_ctx(25.0, 53.0, states={"humidifier": "off"}, switched={"humidifier": now - timedelta(seconds=300)}))
+    assert d["humidifier"].desired is True
+
+
+def test_exhaust_waits_for_a_real_humidity_excess():
+    # veg max 65: 67 is not worth dumping the tent's humidity for; 69 is
+    assert decide(_ctx(25.0, 67.0))["exhaust_fan"].desired is False
+    assert decide(_ctx(25.0, 69.0))["exhaust_fan"].desired is True
+    # once on, it stops as soon as RH is back under the max instead of 4 points lower
+    assert decide(_ctx(25.0, 64.5, states={"exhaust_fan": "on"}))["exhaust_fan"].desired is False
+
+
+def test_seedlings_get_shorter_air_exchange():
+    ctx = _ctx(25.0, 70.0, stage="seedling")
+    ctx.now_local = ctx.now_local.replace(minute=2)   # minute 2 of the 30-minute period → 3-minute pulse is on
+    assert decide(ctx)["exhaust_fan"].desired is True and "3 min every 30" in decide(ctx)["exhaust_fan"].reason
+    ctx.now_local = ctx.now_local.replace(minute=4)   # would still be on under the old 5-of-20 rule
+    assert decide(ctx)["exhaust_fan"].desired is False
