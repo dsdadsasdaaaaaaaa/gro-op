@@ -7,9 +7,8 @@ All timestamps are ISO-8601 UTC strings. All temperatures are returned in BOTH �
 Errors: non-2xx with JSON `{"detail": "human readable message"}`.
 
 ## GET /api/health   (no auth)
-```json
-{"ok": true, "version": "0.1.0", "ha_connected": true, "advisor_enabled": true}
-```
+`{"ok": true, "version": "0.7.0", "ha_connected": true, "advisor_enabled": true, "control": "ok", "last_cycle_at": "...", "consecutive_failures": 0}`.
+Returns **503** with `ok:false` when the control loop has stopped or is stuck (used by the Supervisor watchdog; turn the add-on's Watchdog toggle on).
 
 ## GET /api/status
 The single call that drives the dashboard.
@@ -217,7 +216,7 @@ Brief:
 ## POST /api/control/pause  Body `{"minutes": 30}` — pauses automatic control (all devices left as-is). POST /api/control/resume (clears pause and standby, keeps overrides).
 ## POST /api/control/standby → `{"standby": true}` — tent off: every device switches off and stays off. `assessment.level` becomes `"standby"`, headline "Tent is off".
 ## POST /api/control/start → `{"standby": false}` — fully automatic again: clears standby, pause and all manual overrides.
-Status includes `"control_paused_until": null | "..."` and `"standby": true|false`.
+Status includes `"control_paused_until": null | "..."` and `"standby": true|false`. `alerts[]` items carry `kind`; safety/device/climate/system problems stay listed until they clear themselves, advisor warnings for 24 h. Safety, sensor, plug and climate alerts are also pushed to every plant owner's phone.
 
 Status also includes `"learned": {"humidifier_pts_per_min": 1.8, "exhaust_c_per_min": 0.3}` (0.6.0): the controller runs the humidifier and the exhaust cooling in **pulses** sized to the deficit, waits five minutes for the slow tent sensor, and learns each device's strength from every pulse. Keys are absent until the first clean measurement.
 ## GET /api/plan → the grow roadmap (phases with status done/current/upcoming, dates, what/watch_for/environment).

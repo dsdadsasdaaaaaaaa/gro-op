@@ -321,7 +321,7 @@ async def test_climate_diagnosis_when_the_light_is_too_hot(client):
     await controller.cycle()
     evs = (await c.get("/api/events", params={"limit": 20})).json()["events"]
     hit = [e for e in evs if e["message"].startswith("Can't hold the climate")]
-    assert hit and "dim it or raise it" in hit[0]["message"] and "humidity" in hit[0]["message"]
+    assert hit and "turn the dimmer down" in hit[0]["message"] and "humidity" in hit[0]["message"]
     assert (await c.get("/api/status")).json()["exhaust_duty_1h"] >= 0.45
 
 
@@ -351,3 +351,147 @@ async def test_humidifier_tank_tracking(client):
     # the setting is adjustable
     await c.put("/api/settings", json={"humidifier_tank_hours": 2.5})
     assert (await c.get("/api/status")).json()["humidifier_tank"]["tank_hours"] == 2.5
+
+
+# ------------------------------------------------------------------ safety hardening (0.7.0)
+
+async def _plants_with_phones(c):
+    for name, owner in (("Levi's plant", "Levi"), ("Dad's plant", "Dad")):
+        if len((await c.get("/api/plants")).json()["plants"]) < 2:
+            await c.post("/api/plants", json={"name": name, "owner": owner})
+    ps = (await c.get("/api/plants")).json()["plants"]
+    assert len(ps) == 2
+    for p, svc in zip(ps, ("notify.levi_phone", "notify.dad_phone")):
+        await c.put(f"/api/plants/{p['id']}", json={"notify_service": svc})
+    return ps
+
+
+async def test_overheat_reaches_every_phone_latches_and_reports_results(client):
+    c, ha, store, controller = client
+    await _plants_with_phones(c)
+    await c.post("/api/control/start")
+    ha.state["switch.grow_light"] = "on"
+    ha.sensors["sensor.tent_temperature"] = ("35.5", "°C", "temperature")
+    ha.notifications.clear()
+    await controller.cycle()
+    assert ("switch.grow_light", False) in ha.calls and ha.state["switch.grow_exhaust"] == "on"
+    assert len(ha.notifications) == 2 and all("OVERHEATING" in n and "Grow light off: done" in n for n in ha.notifications)
+    # it cools a little: the cut holds (no flapping at 34.9 °C), and no second alert
+    ha.sensors["sensor.tent_temperature"] = ("34.9", "°C", "temperature")
+    controller.last_switched.clear()
+    await controller.cycle()
+    assert ha.state["switch.grow_light"] == "off" and len(ha.notifications) == 2
+    assert (await store.get_kv("safety_latch"))["kind"] == "hot"
+    # cooled below the release point, but not for long enough yet
+    ha.sensors["sensor.tent_temperature"] = ("24.0", "°C", "temperature")
+    await controller.cycle()
+    assert ha.state["switch.grow_light"] == "off"
+    # 15 minutes later: released, lights back on schedule, alert resolved
+    from datetime import timedelta
+    from grow_brain.store import iso
+    controller.safety_latch["since"] = iso(datetime.now(timezone.utc) - timedelta(minutes=16))
+    await c.put("/api/targets", json={"light_hours": 24})
+    controller.last_switched.clear()
+    await controller.cycle()
+    assert controller.safety_latch is None and ha.state["switch.grow_light"] == "on"
+    alerts = (await c.get("/api/status")).json()["alerts"]
+    assert not any(a["message"].startswith("OVERHEATING") for a in alerts)
+
+
+async def test_standby_still_cuts_a_light_switched_on_by_hand(client):
+    c, ha, store, controller = client
+    await c.post("/api/control/standby")
+    await c.post("/api/devices/light/override", json={"mode": "on"})
+    await controller.cycle()
+    assert ha.state["switch.grow_light"] == "on"          # the override works normally
+    ha.sensors["sensor.tent_temperature"] = ("36.0", "°C", "temperature")
+    await controller.cycle()
+    assert ha.state["switch.grow_light"] == "off" and ha.state["switch.grow_exhaust"] == "on"
+
+
+async def test_bad_light_time_is_refused_and_a_stored_one_cannot_stop_the_loop(client):
+    c, ha, store, controller = client
+    for bad in ("6am", "18.00", "06:00:00", "25:00"):
+        r = await c.put("/api/targets", json={"light_on_time": bad})
+        assert r.status_code == 422 and "like 06:00" in r.json()["detail"]
+    assert (await c.put("/api/targets", json={"light_on_time": "6:30"})).json()["light_on_time"] == "06:30"
+    # a bad value that got stored by an older version
+    await store.set_kv("targets_override", {"values": {}, "source": "manual", "light_on_time": "6pm"})
+    await c.post("/api/control/start")
+    ha.sensors["sensor.tent_temperature"] = ("36.0", "°C", "temperature")
+    ha.calls.clear()
+    await controller.cycle()
+    assert ("switch.grow_light", False) in ha.calls
+    assert (await c.get("/api/status")).status_code == 200
+
+
+async def test_database_failure_does_not_block_switching(client):
+    c, ha, store, controller = client
+    await c.post("/api/control/start")
+
+    async def broken(*a, **k):
+        raise RuntimeError("disk full")
+    store.add_reading = broken
+    store.add_event = broken
+    store.log_device = broken
+    ha.sensors["sensor.tent_temperature"] = ("36.0", "°C", "temperature")
+    ha.calls.clear()
+    await controller.cycle()
+    assert ("switch.grow_light", False) in ha.calls
+    assert "disk full" in controller.last_error
+
+
+async def test_null_settings_cannot_disable_safety(client):
+    c, ha, store, controller = client
+    await store.set_kv("settings", {"safety_temp_max_c": None, "control_interval_s": None, "min_switch_interval_s": 0})
+    s = await controller.settings()
+    assert s["safety_temp_max_c"] == 35.0 and s["control_interval_s"] == 30 and s["min_switch_interval_s"] == 30
+    r = await c.put("/api/settings", json={"safety_temp_max_c": 95})
+    assert r.status_code == 422
+
+
+async def test_unreachable_plug_and_ignored_commands_are_reported(client):
+    c, ha, store, controller = client
+    await _plants_with_phones(c)
+    await c.post("/api/control/start")
+    from datetime import timedelta
+    # the humidifier plug drops off Home Assistant while on
+    ha.state["switch.grow_humidifier"] = "unavailable"
+    await controller.cycle()
+    controller._unavail_since["humidifier"] -= timedelta(minutes=5)
+    ha.notifications.clear()
+    await controller.cycle()
+    assert any("Humidifier plug isn't responding" in n and "switch it off at the plug" in n for n in ha.notifications)
+    ha.state["switch.grow_humidifier"] = "off"
+    await controller.cycle()
+    assert not any("Humidifier plug" in a["message"] for a in (await c.get("/api/status")).json()["alerts"])
+    # a plug that answers 200 but never actually switches
+    real_turn = ha.turn
+
+    async def ignored(entity_id, on):
+        ha.calls.append((entity_id, on))
+        return True
+    ha.turn = ignored
+    ha.sensors["sensor.tent_temperature"] = ("36.0", "°C", "temperature")   # forced decisions skip the switch interval
+    ha.state["switch.grow_light"] = "on"
+    ha.notifications.clear()
+    for _ in range(3):
+        await controller.cycle()
+    assert any("Grow light isn't responding" in n for n in ha.notifications)
+    ha.turn = real_turn
+
+
+async def test_health_reports_a_dead_control_loop(client):
+    c, ha, store, controller = client
+    assert (await c.get("/api/health")).status_code == 200
+    import asyncio
+
+    async def boom():
+        raise RuntimeError("x")
+    controller._task = asyncio.create_task(boom())
+    try:
+        await controller._task
+    except RuntimeError:
+        pass
+    r = await c.get("/api/health")
+    assert r.status_code == 503 and r.json()["ok"] is False

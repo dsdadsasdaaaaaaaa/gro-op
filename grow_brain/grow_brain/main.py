@@ -21,7 +21,7 @@ from .advisor import Advisor
 from .api import router
 from .camera import CameraService
 from .config import load_boot_config
-from .controller import Controller
+from .controller import Controller, parse_hhmm
 from .ha import HAClient
 from .notify import Notifier
 from .store import Store
@@ -37,7 +37,7 @@ async def brief_scheduler(app: FastAPI) -> None:
             settings = await st.controller.settings()
             tz = st.controller.tz(settings)
             now = datetime.now(tz)
-            hh, mm = (int(x) for x in (settings.get("brief_time") or "08:00").split(":"))
+            hh, mm = parse_hhmm(settings.get("brief_time"), "08:00")
             last = await st.store.get_kv("last_brief_date")
             if st.advisor.enabled and (now.hour, now.minute) >= (hh, mm) and last != now.date().isoformat():
                 dmap = await st.store.get_device_map()
@@ -51,12 +51,11 @@ async def brief_scheduler(app: FastAPI) -> None:
                         await st.store.add_event("warn", "advisor", f"Daily brief failed: {e}")
         except Exception:
             log.exception("brief scheduler error")
-        try:
-            await _camera_check_tick(st)
-            await _nudge_tick(st)
-            await _update_check_tick(st)
-        except Exception:
-            log.exception("scheduler tick error")
+        for tick in (_camera_check_tick, _nudge_tick, _update_check_tick):
+            try:
+                await tick(st)
+            except Exception:
+                log.exception("scheduler tick %s failed", tick.__name__)
         await asyncio.sleep(60)
 
 
@@ -72,9 +71,20 @@ async def _update_check_tick(st) -> None:
     so the timeline says so until the running version catches up."""
     now = datetime.now(timezone.utc)
     last = await st.store.get_kv("update_check_at")
-    if last and (now - datetime.fromisoformat(last)).total_seconds() < 6 * 3600:
+    fresh_install = await st.store.get_kv("update_check_version") != __version__   # just updated: check right away
+    if last and not fresh_install and (now - datetime.fromisoformat(last)).total_seconds() < 6 * 3600:
         return
     await st.store.set_kv("update_check_at", now.isoformat())
+    await st.store.set_kv("update_check_version", __version__)
+    # notices and advisor tasks about versions we're already running are finished
+    for a in await st.store.events(limit=200, min_level="warn", hours=24 * 30):
+        m = re.match(r"Grow Brain ([\d.]+) is available", a.get("message", ""))
+        if m and _vtuple(m.group(1)) <= _vtuple(__version__):
+            await st.store.resolve_alerts("system", f"Grow Brain {m.group(1)} is available")
+    for t in await st.store.tasks("open"):
+        m = re.search(r"update grow brain(?: to)? ?v?([\d.]+)?", t["title"].lower())
+        if m and (not m.group(1) or _vtuple(m.group(1)) <= _vtuple(__version__)):
+            await st.store.set_task_status(t["id"], "done")
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(REPO_CONFIG_URL)
@@ -90,8 +100,8 @@ async def _update_check_tick(st) -> None:
         if await st.store.get_kv("update_notified") != latest:
             await st.store.set_kv("update_notified", latest)
             await st.store.add_event("warn", "system",
-                                     f"Grow Brain {latest} is available (running {__version__}). Open the add-on in Home Assistant "
-                                     f"and press Update; if it fails, send Claude the Supervisor log.")
+                                     f"Grow Brain {latest} is available (running {__version__}). Levi: Home Assistant → Settings → "
+                                     f"Add-ons → Grow Brain → Update.")
     else:
         await st.store.resolve_alerts("system", "Grow Brain ")
 
@@ -106,7 +116,7 @@ async def _camera_check_tick(st) -> None:
     targets, _, _ = await st.controller.effective_targets()
     if targets.light_hours <= 0:
         return
-    hh, mm = (int(x) for x in targets.light_on_time.split(":"))
+    hh, mm = parse_hhmm(targets.light_on_time)
     minutes_since_on = ((now.hour * 60 + now.minute) - (hh * 60 + mm)) % (24 * 60)
     if not (60 <= minutes_since_on < 62):
         return

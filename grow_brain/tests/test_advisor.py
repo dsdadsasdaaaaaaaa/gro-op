@@ -139,3 +139,12 @@ async def test_no_key_means_disabled(env):
     assert not adv.enabled
     with pytest.raises(AdvisorError):
         await adv.daily_brief()
+
+
+
+def test_task_dedupe_catches_rewordings_but_not_different_jobs():
+    from grow_brain.advisor import _similar, _words
+    assert _similar(_words("Dim the LED to ~30 %"), _words("Dim the LED to about 40%"))
+    assert _similar(_words("Put a clear dome over Levi's cup"), _words("Dome over the cup"))
+    assert not _similar(_words("Check the towel"), _words("Check the cup"))
+    assert not _similar(_words("Refill the humidifier tank"), _words("Level the LED panel"))

@@ -28,17 +28,33 @@ class Notifier:
         last = self._last.get(key)
         if hours and last and now - last < timedelta(hours=hours):
             return False
-        settings = await self.store.get_kv("settings", {}) or {}
+        try:
+            settings = await self.store.get_kv("settings", {}) or {}
+            phones = {p["notify_service"] for p in await self.store.plants() if p.get("notify_service")}
+            self._cache = (settings, phones)
+        except Exception:  # database trouble must not silence an alert: use what worked last time
+            settings, phones = getattr(self, "_cache", ({}, set()))
+        default = settings.get("notify_service")
         targets = set()
         if service:
             targets.add(service)
         elif everyone:
-            targets.update(p["notify_service"] for p in await self.store.plants() if p.get("notify_service"))
-            if settings.get("notify_service"):
-                targets.add(settings["notify_service"])
-        elif settings.get("notify_service"):
-            targets.add(settings["notify_service"])
+            targets.update(phones)
+            if default:
+                targets.add(default)
+        elif default:
+            targets.add(default)
+        if not targets and phones:
+            targets.update(phones)  # no tent-wide phone chosen: every plant owner's phone instead of nobody
         if not targets:
+            if not self._last.get("_nobody") or now - self._last["_nobody"] > timedelta(hours=24):
+                self._last["_nobody"] = now
+                log.warning("notification %r not delivered: no phone is linked to any plant", key)
+                try:
+                    await self.store.add_event("warn", "system", "An alert couldn't be sent to any phone: link each person's "
+                                                                 "phone to their plant in Settings → Plants → Notifications.")
+                except Exception:
+                    pass
             return False
         data = {"url": url} if url else None
         ok = False

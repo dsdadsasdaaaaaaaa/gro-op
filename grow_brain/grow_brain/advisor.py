@@ -9,7 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from statistics import mean
 from typing import Any, Optional, TypeVar
@@ -151,6 +151,11 @@ class Advisor:
         lines += ["", "## Open tasks"]
         tasks = await self.store.tasks("open")
         lines += [f"- #{t['id']} [{pname.get(t.get('plant_id'), 'tent')}] {t['title']}" + (f" (due {t['due']})" if t["due"] else "") for t in tasks] or ["- none"]
+        recent_done = [t for t in await self.store.tasks("done", limit=40)
+                       if t.get("completed_at") and t["completed_at"] >= (datetime.now(timezone.utc) - timedelta(hours=72)).isoformat()[:19]]
+        if recent_done:
+            lines += ["", "## Done in the last 3 days (don't ask for these again)"]
+            lines += [f"- [{pname.get(t.get('plant_id'), 'tent')}] {t['title']} (done {t['completed_at'][:16]})" for t in recent_done]
         lines += ["", "## Open photo requests"]
         prs = await self.store.photo_requests("open")
         lines += [f"- #{p['id']} [{pname.get(p.get('plant_id'), 'tent')}] {p['title']} (asked {p['created_at'][:10]})" for p in prs] or ["- none"]
@@ -245,13 +250,14 @@ class Advisor:
                 closed.append(tid)
         if closed:
             await self.store.add_event("info", "advisor", f"Advisor closed task(s) {', '.join('#' + str(t) for t in closed)}")
-        open_titles = {(t.get("plant_id"), t["title"].strip().lower()) for t in open_tasks if t["id"] not in closed}
+        open_titles = [(t.get("plant_id"), _words(t["title"])) for t in open_tasks if t["id"] not in closed]
         for td in getattr(out, "tasks", []) or []:
-            key = (pid_of(td), td.title.strip().lower())
-            if key in open_titles:
+            pid, words = pid_of(td), _words(td.title)
+            # same job already open for this plant or for the whole tent → don't add a near-duplicate
+            if any((op == pid or op is None or pid is None) and _similar(words, ow) for op, ow in open_titles):
                 continue
-            created_tasks.append(await self.store.add_task(td.title, td.detail, td.due, td.priority, "advisor", key[0]))
-            open_titles.add(key)
+            created_tasks.append(await self.store.add_task(td.title, td.detail, td.due, td.priority, "advisor", pid))
+            open_titles.append((pid, words))
         open_pr_titles = {(p.get("plant_id"), p["title"].strip().lower()) for p in await self.store.photo_requests("open")}
         for pd in getattr(out, "photo_requests", []) or []:
             key = (pid_of(pd), pd.title.strip().lower())
@@ -484,3 +490,18 @@ def _group_by_day(rows: list[dict], tz: ZoneInfo) -> dict[str, list[dict]]:
         key = ts.astimezone(tz).strftime("%a %m-%d")
         out.setdefault(key, []).append(r)
     return out
+
+
+_STOP = {"the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "it", "its", "your", "with", "at", "levi's", "dad's",
+         "levi", "dad", "plant", "seedling", "seed", "both", "each", "s", "about", "around", "new"}
+
+
+def _words(title: str) -> set[str]:
+    import re as _re
+    return {w for w in _re.findall(r"[a-z0-9']+", title.lower()) if w not in _STOP and not w.isdigit()}
+
+
+def _similar(a: set[str], b: set[str]) -> bool:
+    if not a or not b:
+        return a == b
+    return len(a & b) / len(a | b) >= 0.5

@@ -43,6 +43,9 @@ COOL_PULSE_S = (120, 360)  # shortest / longest exhaust cooling pulse
 WAY_TOO_HOT_C = 1.5       # this far above max the exhaust runs continuously instead of pulsing
 RH_EXHAUST_MARGIN = 3.0   # exhaust only dumps humidity this far above the max (mist settles on its own)
 DUTY_SKIP_S = 600         # skip a scheduled air exchange if the exhaust ran (for any reason) within this long
+UNAVAILABLE_ALERT_S = 180  # a mapped plug unreachable this long gets its own alert
+LOOP_FAIL_ALERT = 5        # consecutive failed control cycles before an alert
+LATCH_MIN_S = 900          # a tripped hard limit holds at least this long
 CLIMATE_CHECK_S = 600     # how often to ask "can this tent actually hold its targets?"
 CLIMATE_DUTY_LIMIT = 0.40  # exhaust on more than this share of the last hour = the light is too hot for the band
 RH_CRITICAL = 85.0   # bud-rot territory; always dehumidify/exhaust above this
@@ -113,6 +116,29 @@ class ControlContext:
     standby: bool = False
     hum_gain: float = HUM_GAIN_DEFAULT    # learned humidifier strength, % RH per minute
     cool_gain: float = COOL_GAIN_DEFAULT  # learned exhaust cooling, °C per minute
+    safety_latch: Optional[str] = None    # "hot" / "cold": a hard limit tripped and the tent hasn't recovered yet
+
+
+# ---------------------------------------------------------------- times of day
+
+def valid_hhmm(s) -> Optional[str]:
+    """'6:05' / '06:05' → '06:05'; anything else → None."""
+    if not isinstance(s, str):
+        return None
+    parts = s.strip().split(":")
+    if len(parts) != 2 or not all(p.isdigit() for p in parts) or not (1 <= len(parts[0]) <= 2) or len(parts[1]) != 2:
+        return None
+    hh, mm = int(parts[0]), int(parts[1])
+    if not (0 <= hh <= 23 and 0 <= mm <= 59):
+        return None
+    return f"{hh:02d}:{mm:02d}"
+
+
+def parse_hhmm(s, default: str = "06:00") -> tuple[int, int]:
+    """Hours and minutes from a stored time; a bad value falls back to the default instead of stopping the loop."""
+    v = valid_hhmm(s) or default
+    hh, mm = v.split(":")
+    return int(hh), int(mm)
 
 
 # ---------------------------------------------------------------- light schedule
@@ -123,7 +149,7 @@ def light_window(now_local: datetime, on_time: str, hours: float) -> tuple[bool,
         return False, now_local + timedelta(days=365)
     if hours >= 24:
         return True, now_local + timedelta(days=365)
-    hh, mm = (int(x) for x in on_time.split(":"))
+    hh, mm = parse_hhmm(on_time)
     today_on = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
     # Find the most recent "on" moment at or before now.
     start = today_on if today_on <= now_local else today_on - timedelta(days=1)
@@ -147,10 +173,30 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
         if have(role):
             d[role] = Decision(role, desired, reason, force, tag)
 
-    # --- standby: nothing planted, everything off; manual overrides still respected ---
+    fresh = not s.stale and temp is not None and rh is not None
+    hot = ctx.safety_latch == "hot" or (fresh and temp >= ctx.safety_temp_max_c)
+    cold = not hot and (ctx.safety_latch == "cold" or (fresh and temp <= ctx.safety_temp_min_c))
+    rh_critical = fresh and rh >= RH_CRITICAL
+
+    # --- standby: nothing planted, everything off; manual overrides still respected,
+    #     except that the hard limits below still win (a light switched on by hand can't cook a closed tent) ---
     if ctx.standby:
         for role in ctx.devices:
             set_(role, False, "tent in standby")
+        if hot:
+            _hot_safety(ctx, set_, temp)
+        elif rh_critical:
+            set_("exhaust_fan", True, f"SAFETY: RH {rh:.0f}% critical, exhaust on", force=True)
+            set_("humidifier", False, "SAFETY: RH critical", force=True)
+        elif cold:
+            set_("humidifier", False, "SAFETY: too cold", force=True)
+        return _apply_overrides_and_pause(ctx, d)
+
+    # --- an overheat cut stays in force until the tent has really cooled, even if the sensor drops out ---
+    if hot and not fresh:
+        for r in ("circulation_fan", "circulation_fan_2"):
+            set_(r, True, "constant air movement")
+        _hot_safety(ctx, set_, temp)
         return _apply_overrides_and_pause(ctx, d)
 
     # --- light: schedule ---
@@ -174,16 +220,10 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
         return _apply_overrides_and_pause(ctx, d)
 
     # --- hard safety limits (bypass overrides, pause and switch intervals) ---
-    if temp >= ctx.safety_temp_max_c:
-        set_("light", False, f"SAFETY: {temp:.1f}°C ≥ {ctx.safety_temp_max_c:g}°C, lights off", force=True)
-        set_("exhaust_fan", True, "SAFETY: overheating, exhaust on", force=True)
-        set_("intake_fan", True, "SAFETY: overheating, intake on", force=True)
-        set_("cooler", True, "SAFETY: overheating", force=True)
-        set_("heater", False, "SAFETY: overheating", force=True)
-        set_("humidifier", False, "SAFETY: overheating", force=True)
-        set_("dehumidifier", False, "SAFETY: overheating (dehumidifier adds heat)", force=True)
+    if hot:
+        _hot_safety(ctx, set_, temp)
         return _apply_overrides_and_pause(ctx, d)
-    if temp <= ctx.safety_temp_min_c:
+    if cold:
         set_("heater", True, f"SAFETY: {temp:.1f}°C ≤ {ctx.safety_temp_min_c:g}°C, heater on", force=True)
         set_("cooler", False, "SAFETY: too cold", force=True)
         set_("exhaust_fan", rh >= RH_CRITICAL, "SAFETY: too cold, exhaust off" if rh < RH_CRITICAL else "RH critical", force=True)
@@ -274,6 +314,18 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
     return _apply_overrides_and_pause(ctx, d)
 
 
+def _hot_safety(ctx: ControlContext, set_, temp: Optional[float]) -> None:
+    now = f"{temp:.1f}°C" if temp is not None else "sensor not reporting"
+    why = f"SAFETY: overheat cut ({now}; holds until the tent cools to {min(ctx.day_targets.temp_max_c, ctx.safety_temp_max_c - 3):g}°C)"
+    set_("light", False, why + ", lights off", force=True)
+    set_("exhaust_fan", True, why + ", exhaust on", force=True)
+    set_("intake_fan", True, why + ", intake on", force=True)
+    set_("cooler", True, why, force=True)
+    set_("heater", False, why, force=True)
+    set_("humidifier", False, why, force=True)
+    set_("dehumidifier", False, why + " (a dehumidifier adds heat)", force=True)
+
+
 def _pulse(dev: DeviceInput, now: datetime, deficit_now: float, deficit_at_start: float, gain_per_min: float,
            bounds: tuple[int, int], what: str) -> tuple[bool, str, Optional[str]]:
     """Run a device for a pulse sized to the deficit, then rest LAG_S so the slow sensor can report the
@@ -347,6 +399,18 @@ class Controller:
         self._climate_checked_at: Optional[datetime] = None
         self._climate_alert = False
         self._tank: Optional[dict] = None   # humidifier water: run seconds since the last refill, open task id
+        self.safety_latch: Optional[dict] = None   # {"kind": "hot"|"cold", "since": iso}
+        self._unavail_since: dict[str, datetime] = {}
+        self._unavail_alerted: set[str] = set()
+        self._last_known: dict[str, str] = {}
+        self._cmd: dict[str, dict] = {}          # role → {"desired": bool, "tries": n} while a command hasn't taken effect
+        self._cmd_alerted: set[str] = set()
+        self._safety_kind: Optional[str] = None
+        self.started_at = utcnow()
+        self.last_attempt_at: Optional[datetime] = None
+        self.consecutive_failures = 0
+        self.last_error: Optional[str] = None
+        self._loop_alerted = False
 
     # ---- config helpers (read from store each cycle so app changes apply immediately) ----
     async def settings(self) -> dict:
@@ -360,6 +424,23 @@ class Controller:
         s.setdefault("auto_apply_advisor_targets", True)
         s.setdefault("units", "c")
         s.setdefault("brief_time", "08:00")
+        defaults = {"safety_temp_max_c": 35.0, "safety_temp_min_c": 12.0, "control_interval_s": 30,
+                    "min_switch_interval_s": 180, "humidifier_tank_hours": 4.0, "brief_time": "08:00", "units": "c"}
+        for k, v in defaults.items():
+            if s.get(k) is None:
+                s[k] = v
+
+        def clamp(k, lo, hi, cast=float):
+            try:
+                s[k] = cast(min(hi, max(lo, float(s[k]))))
+            except (TypeError, ValueError):
+                s[k] = defaults[k]
+        clamp("safety_temp_max_c", 28.0, 40.0)
+        clamp("safety_temp_min_c", 5.0, 20.0)
+        clamp("control_interval_s", 10, 300, int)
+        clamp("min_switch_interval_s", 30, 3600, int)
+        clamp("humidifier_tank_hours", 0.5, 48.0)
+        s["brief_time"] = valid_hhmm(s.get("brief_time")) or "08:00"
         return s
 
     def tz(self, settings: dict) -> ZoneInfo:
@@ -387,7 +468,7 @@ class Controller:
         day_in_stage = days_between(stage_started, today)
         day_total = days_between(start, today)
         override = await self.store.get_kv("targets_override", None)
-        base = stage_defaults(profile["stage"], day_in_stage, (override or {}).get("light_on_time", "06:00"))
+        base = stage_defaults(profile["stage"], day_in_stage, valid_hhmm((override or {}).get("light_on_time")) or "06:00")
         if override:
             base = apply_overrides(base, override.get("values", {}), override.get("source", "manual"))
         return base, day_in_stage, day_total
@@ -434,6 +515,7 @@ class Controller:
             safety_temp_max_c=float(settings["safety_temp_max_c"]), safety_temp_min_c=float(settings["safety_temp_min_c"]),
             exhaust_ducted=bool(profile.get("exhaust_ducted")), paused=bool(await self.paused_until()),
             devices=devices, standby=await self.standby(),
+            safety_latch=(self.safety_latch or {}).get("kind"),
         )
 
     def _read_sensors(self, dmap: dict[str, str]) -> SensorSnapshot:
@@ -478,21 +560,32 @@ class Controller:
         snap.stale = not (age_ok and snap.temp_c is not None and snap.humidity is not None)
         return snap
 
+    async def _safe(self, coro, what: str):
+        """Run one bookkeeping step; a failure (full disk, locked database...) is logged, never fatal to switching."""
+        try:
+            return await coro
+        except Exception as e:
+            log.exception("%s failed", what)
+            self.last_error = f"{what}: {e}"
+            return None
+
     async def cycle(self) -> None:
         try:
             states = await self.ha.get_states()
         except Exception as e:
             self.ha_ok = False
             if not self._ha_fail_reported:
-                await self.store.add_event("alert", "system", f"Cannot reach Home Assistant: {e}")
                 self._ha_fail_reported = True
+                await self._safe(self.notifier.send("ha_down", f"Grow Brain can't reach Home Assistant ({e}). The tent isn't being controlled.",
+                                                    hours=6, everyone=True), "notify")
+                await self._safe(self.store.add_event("alert", "system", f"Cannot reach Home Assistant: {e}"), "event")
             return
         if self._ha_fail_reported:
-            await self.store.add_event("info", "system", "Home Assistant connection restored")
+            await self._safe(self.store.add_event("info", "system", "Home Assistant connection restored"), "event")
             self._ha_fail_reported = False
         if not self.ha_ok:
             # first good cycle since startup (or since an outage): any older "cannot reach" alert is over
-            await self.store.resolve_alerts("system", "Cannot reach Home Assistant")
+            await self._safe(self.store.resolve_alerts("system", "Cannot reach Home Assistant"), "resolve")
         self.ha_ok = True
         self.states = {s["entity_id"]: s for s in states}
 
@@ -502,38 +595,53 @@ class Controller:
         self.sensor = self._read_sensors(dmap)
         if not self._restored:
             await self._restore_switch_times()
+        await self._update_latch(_s, dmap)
         ctx = await self.build_context()
-        await self._learn(ctx)
-        await self._power_watchdog(dmap)
-        await self._update_energy_baselines(dmap, ctx.now_local)
 
-        if self.sensor.stale and not self._stale_reported and dmap.get("temperature_sensor"):
-            await self.store.add_event("warn", "safety", "Tent sensor is stale or unavailable. Running in safe mode (exhaust on, climate devices off).")
-            await self.notifier.send("stale", "Tent sensor is not reporting. Automation is in safe mode.", hours=6)
-            self._stale_reported = True
-        elif not self.sensor.stale and self._stale_reported:
-            await self.store.add_event("info", "safety", "Tent sensor is reporting again.")
-            await self.store.resolve_alerts("safety", "Tent sensor is stale")
-            self._stale_reported = False
-
-        if not self.sensor.stale:
-            await self.store.add_reading(self.sensor.temp_c, self.sensor.humidity, self.sensor.vpd_kpa,
-                                         self.sensor.co2, ctx.lights_on)
-
-        self._last_lights_on = ctx.lights_on
+        # 1. decide and switch before any bookkeeping, so a database problem can never stop a safety action
         decisions = decide(ctx)
-        await self._report_safety(ctx, decisions)
-        await self._climate_check(ctx)
-        await self._tank_tracker(ctx)
-        settings = await self.settings()
+        results = await self._switch(ctx, decisions, _s)
+
+        # 2. tell people, then record
+        await self._safe(self._report_safety(ctx, decisions, results), "safety report")
+        await self._safe(self._report_stale(dmap, ctx.standby), "stale report")
+        await self._safe(self._report_unavailable(ctx, dmap), "unavailable report")
+        if not self.sensor.stale:
+            await self._safe(self.store.add_reading(self.sensor.temp_c, self.sensor.humidity, self.sensor.vpd_kpa,
+                                                    self.sensor.co2, ctx.lights_on), "reading")
+        self._last_lights_on = ctx.lights_on
+        await self._safe(self._learn(ctx), "learning")
+        await self._safe(self._power_watchdog(dmap), "power watchdog")
+        await self._safe(self._update_energy_baselines(dmap, ctx.now_local), "energy")
+        await self._safe(self._climate_check(ctx), "climate check")
+        await self._safe(self._tank_tracker(ctx), "tank")
+        self.last_cycle_at = utcnow()
+
+    async def _switch(self, ctx: ControlContext, decisions: dict[str, Decision], settings: dict) -> dict[str, str]:
+        """Apply decisions. Returns role → 'switched' | 'already' | 'failed' | 'unavailable' | 'waiting' | 'unmapped'."""
+        results: dict[str, str] = {}
         min_iv = int(settings["min_switch_interval_s"])
         now = utcnow()
         for role, dec in decisions.items():
             dev = ctx.devices[role]
             self.last_reasons[role] = dec.reason
-            if dec.desired is None or not dev.entity_id or not dev.available:
+            if dev.state in ("on", "off"):
+                self._last_known[role] = dev.state
+            if dec.desired is None:
                 continue
-            if dev.state == ("on" if dec.desired else "off"):
+            if not dev.entity_id:
+                results[role] = "unmapped"
+                continue
+            if not dev.available:
+                results[role] = "unavailable"
+                self.last_reasons[role] = "plug not responding in Home Assistant"
+                continue
+            want = "on" if dec.desired else "off"
+            if dev.state == want:
+                results[role] = "already"
+                if self._cmd.pop(role, None) is not None and role in self._cmd_alerted:
+                    self._cmd_alerted.discard(role)
+                    await self._safe(self.store.resolve_alerts("device", f"{ROLE_BY_NAME[role].label} isn't responding"), "resolve")
                 continue
             iv = max(min_iv, 300) if role in ("dehumidifier", "cooler") else min_iv
             if role == "humidifier":
@@ -541,17 +649,108 @@ class Controller:
             last = self.last_switched.get(role)
             if last and not dec.force and (now - last).total_seconds() < iv:
                 self.last_reasons[role] = dec.reason + " (waiting for minimum switch interval)"
+                results[role] = "waiting"
                 continue
             ok = await self.ha.turn(dev.entity_id, dec.desired)
+            # Home Assistant often answers 200 for a plug that is really offline: count a command that
+            # never takes effect as a failure too.
+            cmd = self._cmd.get(role)
+            tries = (cmd["tries"] + 1) if cmd and cmd["desired"] == dec.desired else 1
+            self._cmd[role] = {"desired": dec.desired, "tries": tries}
+            if not ok or tries >= 3:
+                results[role] = "failed"
+                if role not in self._cmd_alerted and (tries >= 3 or (not ok and tries >= 2)):
+                    self._cmd_alerted.add(role)
+                    label = ROLE_BY_NAME[role].label
+                    msg = (f"{label} isn't responding: Grow Brain has tried to switch it {want.upper()} {tries} times "
+                           f"({dec.reason}). Check its plug" + (", and switch it off by hand if it's running." if want == "off" else "."))
+                    await self._safe(self.notifier.send(f"cmd:{role}", msg, hours=2, everyone=True), "notify")
+                    await self._safe(self.store.add_event("alert" if dec.force else "warn", "device", msg), "event")
+            else:
+                results[role] = "switched"
             if ok:
                 self._note_switch(role, dec, ctx, last, now)
                 self.last_switched[role] = now
-                await self.store.log_device(role, "on" if dec.desired else "off", dec.reason)
-                await self.store.add_event("info", "device",
-                                           f"{ROLE_BY_NAME[role].label} → {'ON' if dec.desired else 'OFF'}: {dec.reason}")
                 # optimistic local state so the next cycle's hysteresis sees it
-                self.states.setdefault(dev.entity_id, {})["state"] = "on" if dec.desired else "off"
-        self.last_cycle_at = now
+                self.states.setdefault(dev.entity_id, {})["state"] = want
+                await self._safe(self.store.log_device(role, want, dec.reason), "device log")
+                await self._safe(self.store.add_event("info", "device",
+                                                      f"{ROLE_BY_NAME[role].label} → {want.upper()}: {dec.reason}"), "event")
+        return results
+
+    async def _update_latch(self, settings: dict, dmap: dict[str, str]) -> None:
+        """Trip on a hard limit; release only after the tent has recovered with margin and some time has passed."""
+        if self.safety_latch is None and not getattr(self, "_latch_loaded", False):
+            self._latch_loaded = True
+            self.safety_latch = await self._safe(self.store.get_kv("safety_latch", None), "latch load")
+        s = self.sensor
+        if s.stale or s.temp_c is None:
+            return
+        hi, lo = float(settings["safety_temp_max_c"]), float(settings["safety_temp_min_c"])
+        now = utcnow()
+        latch = self.safety_latch
+        if s.temp_c >= hi and (not latch or latch.get("kind") != "hot"):
+            self.safety_latch = {"kind": "hot", "since": iso(now)}
+        elif s.temp_c <= lo and not latch:
+            self.safety_latch = {"kind": "cold", "since": iso(now)}
+        elif latch:
+            since = parse_iso(latch.get("since")) or now
+            held = (now - since).total_seconds() >= LATCH_MIN_S
+            if latch.get("kind") == "hot":
+                profile = await self.profile()
+                day, _, _ = await self.effective_targets(profile, settings)
+                release_at = min(day.temp_max_c, hi - 3.0)
+                if held and s.temp_c <= release_at:
+                    self.safety_latch = None
+            elif latch.get("kind") == "cold" and held and s.temp_c >= lo + 2.0:
+                self.safety_latch = None
+        if self.safety_latch != latch:
+            await self._safe(self.store.set_kv("safety_latch", self.safety_latch), "latch save")
+
+    async def _report_stale(self, dmap: dict[str, str], standby: bool = False) -> None:
+        if self.sensor.stale and not self._stale_reported and dmap.get("temperature_sensor"):
+            self._stale_reported = True
+            what = "" if standby else " Automation is in safe mode (exhaust on, humidifier off)."
+            await self.notifier.send("stale", "The tent sensor has stopped reporting." + what +
+                                     " Check the Govee sensor's batteries and that it's in range of its hub.",
+                                     hours=6, everyone=True)
+            await self.store.add_event("warn", "safety", "Tent sensor is stale or unavailable. Running in safe mode (exhaust on, climate devices off).")
+        elif not self.sensor.stale and self._stale_reported:
+            self._stale_reported = False
+            await self.store.add_event("info", "safety", "Tent sensor is reporting again.")
+            await self.store.resolve_alerts("safety", "Tent sensor is stale")
+
+    async def _report_unavailable(self, ctx: ControlContext, dmap: dict[str, str]) -> None:
+        now = utcnow()
+        for role in SWITCH_ROLES:
+            eid = dmap.get(role)
+            dev = ctx.devices.get(role)
+            if not eid or dev is None:
+                continue
+            if dev.available:
+                self._unavail_since.pop(role, None)
+                if role in self._unavail_alerted:
+                    self._unavail_alerted.discard(role)
+                    await self.store.resolve_alerts("device", f"{ROLE_BY_NAME[role].label} plug")
+                    await self.store.add_event("info", "device", f"{ROLE_BY_NAME[role].label} plug is responding again.")
+                continue
+            since = self._unavail_since.setdefault(role, now)
+            if role in self._unavail_alerted or (now - since).total_seconds() < UNAVAILABLE_ALERT_S:
+                continue
+            self._unavail_alerted.add(role)
+            label = ROLE_BY_NAME[role].label
+            if eid not in self.states:
+                msg = (f"{label} plug ({eid}) no longer exists in Home Assistant, so Grow Brain can't switch it. "
+                       f"It may have been renamed or re-paired: ask Levi to check.")
+            else:
+                last = self._last_known.get(role)
+                msg = f"{label} plug isn't responding in Home Assistant, so Grow Brain can't switch it."
+                if last == "on":
+                    msg += " It was last ON: switch it off at the plug by hand until it's back."
+                elif last == "off":
+                    msg += " It was last off."
+            await self.notifier.send(f"unavailable:{role}", msg, hours=6, everyone=True)
+            await self.store.add_event("alert" if role in ("light", "humidifier") else "warn", "device", msg)
 
     # ---- pulse learning: how strong are the humidifier and the exhaust in *this* tent? ----
     def _note_switch(self, role: str, dec: Decision, ctx: ControlContext, on_at: Optional[datetime], now: datetime) -> None:
@@ -629,9 +828,10 @@ class Controller:
                    f"{temp:.1f}°C (max {t.temp_max_c:g}°C)")
             if rh is not None and rh < t.humidity_min - 3:
                 msg += f", and every pull of outside air drags humidity down (average {rh:.0f}%, target {t.humidity_min:g}–{t.humidity_max:g}%)"
-            msg += ". The light is making more heat than the tent can shed: dim it or raise it. Seedlings under a dome don't mind."
+            msg += (". The lights make more heat than the exhaust can remove without drying the tent: turn the dimmer down "
+                    "or switch one light off. Hanging the light higher doesn't cool the tent.")
+            await self.notifier.send("climate", msg, hours=6, title="Grow tent", everyone=True)
             await self.store.add_event("warn", "climate", msg)
-            await self.notifier.send("climate", msg, hours=6, title="Grow tent")
             self._climate_alert = True
         elif self._climate_alert and (duty < CLIMATE_DUTY_LIMIT - 0.1 or temp < t.temp_max_c - 1.0):
             await self.store.resolve_alerts("climate", "Can't hold the climate")
@@ -642,7 +842,9 @@ class Controller:
         """Share of the last `hours` the exhaust was on, from the device log. None if it never switched."""
         rows = [r for r in await self.store.device_log_since(hours) if r["role"] == "exhaust_fan"]
         if not rows:
-            return None
+            # no switching in the window: it was either on or off the whole time
+            last = self._last_known.get("exhaust_fan")
+            return 1.0 if last == "on" else (0.0 if last == "off" else None)
         now = utcnow()
         start = now - timedelta(hours=hours)
         first = parse_iso(rows[0]["t"]) or start
@@ -842,47 +1044,98 @@ class Controller:
                     if role == "humidifier":
                         await self._tank_reset("Humidifier is drawing power again, so the tank was refilled")
 
-    async def _report_safety(self, ctx: ControlContext, decisions: dict[str, Decision]) -> None:
-        active = None
-        if ctx.standby:
-            return
-        t = ctx.sensor.temp_c
-        if t is not None and not ctx.sensor.stale:
-            if t >= ctx.safety_temp_max_c:
-                active = f"OVERHEATING: tent is {t:.1f}°C. Lights off, exhaust on."
-            elif t <= ctx.safety_temp_min_c:
-                active = f"TOO COLD: tent is {t:.1f}°C. Heater on."
-            elif ctx.sensor.humidity is not None and ctx.sensor.humidity >= RH_CRITICAL:
-                active = f"HUMIDITY CRITICAL: {ctx.sensor.humidity:.0f}% RH. Bud rot risk. Exhaust and dehumidifier on."
-        if active and active != self._safety_reported:
-            await self.store.add_event("alert", "safety", active)
-            await self.notifier.send("safety", active, hours=1)
-            self._safety_reported = active
-        elif not active and self._safety_reported:
-            await self.store.add_event("info", "safety", "Safety condition cleared.")
+    async def _report_safety(self, ctx: ControlContext, decisions: dict[str, Decision], results: dict[str, str]) -> None:
+        s = ctx.sensor
+        latch = ctx.safety_latch
+        kind = None
+        if latch == "hot":
+            kind = "hot"
+        elif latch == "cold":
+            kind = "cold"
+        elif not s.stale and s.humidity is not None and (s.humidity >= RH_CRITICAL or (self._safety_kind == "rh" and s.humidity >= RH_CRITICAL - 5)):
+            kind = "rh"
+        if kind and kind != self._safety_kind:
+            now = f"{s.temp_c:.1f}°C" if s.temp_c is not None else "unknown temperature"
+            head = {"hot": f"OVERHEATING: the tent reached {now} (cut-off {ctx.safety_temp_max_c:g}°C).",
+                    "cold": f"TOO COLD: the tent is at {now} (limit {ctx.safety_temp_min_c:g}°C).",
+                    "rh": f"HUMIDITY CRITICAL: {s.humidity:.0f}% (mould and bud-rot risk)."}[kind]
+            words = {"switched": "done", "already": "done", "waiting": "pending",
+                     "failed": "FAILED, do it by hand", "unavailable": "plug not responding, do it by hand"}
+            parts = []
+            for role in ("light", "exhaust_fan", "humidifier", "heater", "dehumidifier", "cooler"):
+                dec = decisions.get(role)
+                if dec is None or not dec.force or role not in results or results[role] == "unmapped":
+                    continue
+                parts.append(f"{ROLE_BY_NAME[role].label} {'on' if dec.desired else 'off'}: {words.get(results[role], results[role])}")
+            msg = head + (" " + "; ".join(parts) + "." if parts else "")
+            if kind == "hot":
+                msg += " The lights stay off until the tent cools down."
+            await self.notifier.send(f"safety:{kind}", msg, hours=1, everyone=True)
+            await self.store.add_event("alert", "safety", msg)
+            self._safety_kind = kind
+        elif not kind and self._safety_kind:
+            await self.store.add_event("info", "safety", "Safety condition cleared: the tent is back in a safe range.")
             for prefix in ("OVERHEATING", "TOO COLD", "HUMIDITY CRITICAL"):
                 await self.store.resolve_alerts("safety", prefix)
-            self._safety_reported = None
+            self._safety_kind = None
 
     async def run(self) -> None:
-        await self.store.add_event("info", "system", "Grow Brain started")
+        await self._safe(self.store.add_event("info", "system", "Grow Brain started"), "event")
         n = 0
         while True:
+            interval = 30
             try:
+                self.last_attempt_at = utcnow()
                 await self.cycle()
-            except Exception:
+                if self.consecutive_failures >= LOOP_FAIL_ALERT:
+                    await self._safe(self.store.resolve_alerts("system", "Tent automation is failing"), "resolve")
+                    await self._safe(self.store.add_event("info", "system", "Tent automation is running normally again."), "event")
+                self.consecutive_failures = 0
+                self._loop_alerted = False
+                n += 1
+                if n % 2880 == 0:  # roughly daily at 30 s
+                    await self._safe(self.store.prune(), "prune")
+                settings = await self.settings()
+                interval = int(settings.get("control_interval_s") or 30)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
                 log.exception("control cycle failed")
-            n += 1
-            if n % 2880 == 0:  # roughly daily at 30 s
-                try:
-                    await self.store.prune()
-                except Exception:
-                    log.exception("prune failed")
-            settings = await self.settings()
-            await asyncio.sleep(max(10, int(settings.get("control_interval_s", 30))))
+                self.consecutive_failures += 1
+                self.last_error = f"{type(e).__name__}: {e}"
+                if self.consecutive_failures >= LOOP_FAIL_ALERT and not self._loop_alerted:
+                    self._loop_alerted = True
+                    msg = (f"Tent automation is failing ({self.last_error}). Devices stay as they are until it recovers: "
+                           f"check the tent and tell Claude.")
+                    await self._safe(self.notifier.send("loop", msg, hours=6, everyone=True), "notify")
+                    await self._safe(self.store.add_event("alert", "system", msg), "event")
+            await asyncio.sleep(max(10, min(300, interval)))
 
     def start(self) -> None:
         self._task = asyncio.create_task(self.run())
+        self._task.add_done_callback(self._loop_ended)
+
+    def _loop_ended(self, task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        log.error("control loop ended unexpectedly: %r; restarting it", exc)
+        self.last_error = f"loop ended: {exc!r}"
+        try:
+            self.start()
+        except RuntimeError:
+            pass  # event loop shutting down
+
+    def healthy(self) -> tuple[bool, str]:
+        """For the Supervisor watchdog: is the control loop alive and cycling?"""
+        now = utcnow()
+        if self._task is not None and self._task.done():
+            return False, "control loop is not running"
+        if (now - self.started_at).total_seconds() < 300:
+            return True, "starting"
+        if self.last_attempt_at is None or (now - self.last_attempt_at).total_seconds() > 600:
+            return False, "control loop is stuck"
+        return True, "ok"
 
     async def stop(self) -> None:
         if self._task:

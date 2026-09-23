@@ -83,7 +83,7 @@ ADJUSTABLE_BY_ADVISOR = {"temp_min_c", "temp_max_c", "humidity_min", "humidity_m
 def stage_defaults(stage: str, day_in_stage: int = 0, light_on_time: str = "06:00") -> Targets:
     """Liberty Haze defaults. day_in_stage lets flower targets tighten as buds develop."""
     if stage == "seedling":
-        return Targets(23.0, 27.0, 65.0, 75.0, 0.5, 0.9, light_on_time, 18, note="Seedling: warm and humid, gentle light")
+        return Targets(21.0, 27.0, 60.0, 75.0, 0.5, 1.0, light_on_time, 18, note="Seedling: mild and humid, gentle light")
     if stage == "veg":
         return Targets(23.0, 28.0, 55.0, 65.0, 0.8, 1.2, light_on_time, 18, note="Veg: Liberty Haze likes it warm; 18/6 light")
     if stage == "flower":

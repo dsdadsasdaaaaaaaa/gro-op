@@ -10,16 +10,16 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
 from . import __version__
 from .advisor import Advisor, AdvisorError
-from .controller import Controller, light_window
+from .controller import Controller, light_window, valid_hhmm
 from .devices import ROLE_BY_NAME, ROLES, SWITCH_ROLES, automap
 from .models import (CameraAnalyse, CameraSelect, ChatRequest, DeviceMapUpdate, GrowProfile, GrowProfileUpdate, LogCreate,
                      OverrideRequest, PauseRequest, PlantCreate, PlantUpdate, SettingsModel, SettingsUpdate, StageChange,
                      TargetsUpdate, TaskCreate)
-from .store import Store, iso, utcnow
+from .store import Store, iso, parse_iso, utcnow
 from .plan import build_plan
 from .targets import STAGES, stage_defaults
 
@@ -46,7 +46,12 @@ auth = [Depends(require_key)]
 @router.get("/health")
 async def health(request: Request):
     st = request.app.state
-    return {"ok": True, "version": __version__, "ha_connected": st.controller.ha_ok, "advisor_enabled": st.advisor.enabled}
+    c = st.controller
+    ok, why = c.healthy()
+    body = {"ok": ok, "version": __version__, "ha_connected": c.ha_ok, "advisor_enabled": st.advisor.enabled,
+            "control": why, "last_cycle_at": iso(c.last_cycle_at) if c.last_cycle_at else None,
+            "consecutive_failures": c.consecutive_failures}
+    return JSONResponse(body, status_code=200 if ok else 503)
 
 
 # ------------------------------------------------------------------ plants
@@ -164,8 +169,17 @@ async def status(request: Request):
             harvest = (date.fromisoformat(profile["flower_start_date"]) + timedelta(days=int(profile.get("expected_flower_days") or 65))).isoformat()
         except ValueError:
             harvest = None
-    alerts = [{"id": e["id"], "level": e["level"], "message": e["message"], "at": e["at"]}
-              for e in await st.store.events(5, min_level="warn", hours=6)]
+    # Problems that clear themselves when fixed (safety, device, climate, system) stay up until they do;
+    # one-off advisor warnings fade after a day. Standby's own notice isn't a problem.
+    alerts = []
+    for e in await st.store.events(40, min_level="warn", hours=24 * 7):
+        age_h = (utcnow() - (parse_iso(e["at"]) or utcnow())).total_seconds() / 3600
+        if e["message"].startswith("Tent put in standby"):
+            continue
+        if e["kind"] not in ("safety", "device", "climate", "system") and age_h > 24:
+            continue
+        alerts.append({"id": e["id"], "level": e["level"], "kind": e["kind"], "message": e["message"], "at": e["at"]})
+    alerts = alerts[:6]
     plants = await _plants_api(request)
     if plants:
         day_total = plants[0]["day_total"]
@@ -410,7 +424,10 @@ async def put_targets(body: TargetsUpdate, request: Request):
     vals = dict(override.get("values", {}))
     upd = body.model_dump(exclude_none=True)
     if "light_on_time" in upd:
-        override["light_on_time"] = upd.pop("light_on_time")
+        norm = valid_hhmm(upd.pop("light_on_time"))
+        if norm is None:
+            raise HTTPException(422, "Use a time like 06:00 or 18:30 for lights on.")
+        override["light_on_time"] = norm
     vals.update(upd)
     await st.store.set_kv("targets_override", {"values": vals, "source": "manual", "light_on_time": override.get("light_on_time", "06:00")})
     t, _, _ = await st.controller.effective_targets()
@@ -455,6 +472,18 @@ async def put_settings(body: SettingsUpdate, request: Request):
     st = request.app.state
     current = await st.store.get_kv("settings", {}) or {}
     upd = body.model_dump(exclude_unset=True)
+    if "brief_time" in upd and upd["brief_time"] is not None:
+        norm = valid_hhmm(upd["brief_time"])
+        if norm is None:
+            raise HTTPException(422, "Use a time like 08:00 for the daily brief.")
+        upd["brief_time"] = norm
+    for k in ("safety_temp_max_c", "safety_temp_min_c", "control_interval_s", "min_switch_interval_s"):
+        if k in upd and upd[k] is None:
+            upd.pop(k)  # a blank field means "leave it", never "no limit"
+    if "safety_temp_max_c" in upd and not (28 <= float(upd["safety_temp_max_c"]) <= 40):
+        raise HTTPException(422, "The overheat cut-off must be between 28 and 40 °C.")
+    if "safety_temp_min_c" in upd and not (5 <= float(upd["safety_temp_min_c"]) <= 20):
+        raise HTTPException(422, "The cold limit must be between 5 and 20 °C.")
     if "timezone" in upd:
         from zoneinfo import ZoneInfo
         try:

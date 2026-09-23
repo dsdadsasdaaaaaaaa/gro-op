@@ -289,3 +289,24 @@ def test_air_exchange_skipped_when_the_exhaust_just_ran():
                on_tags={"exhaust_fan": "exhaust_duty"})
     ctx.now_local = at
     assert decide(ctx)["exhaust_fan"].desired is True
+
+
+def test_latched_overheat_keeps_the_light_off_even_below_the_limit_and_with_a_dead_sensor():
+    ctx = _ctx(30.0, 60.0)
+    ctx.safety_latch = "hot"
+    d = decide(ctx)
+    assert d["light"].desired is False and d["light"].force and d["exhaust_fan"].desired is True
+    ctx = _ctx(None, None, stale=True)
+    ctx.safety_latch = "hot"
+    d = decide(ctx)
+    assert d["light"].desired is False and d["light"].force
+
+
+def test_bad_stored_times_fall_back_instead_of_crashing():
+    from grow_brain.controller import parse_hhmm, valid_hhmm
+    assert valid_hhmm("6:05") == "06:05" and valid_hhmm("18:00") == "18:00"
+    for bad in ("6pm", "18.00", "06:00:00", "24:00", "", None, "7:5"):
+        assert valid_hhmm(bad) is None
+    assert parse_hhmm("6pm") == (6, 0) and parse_hhmm("bad", "08:00") == (8, 0)
+    on, _ = light_window(datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc), "garbage", 18)
+    assert on is True
