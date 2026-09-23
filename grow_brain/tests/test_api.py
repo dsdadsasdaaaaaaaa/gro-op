@@ -299,3 +299,27 @@ async def test_usage_qr_and_nudges(client):
     await store.set_kv("last_nudge_hour", None)
     await _nudge_tick(app_state)
     assert len(ha.notifications) == n_before  # nudged_at set → no second nudge yet
+
+
+async def test_climate_diagnosis_when_the_light_is_too_hot(client):
+    c, ha, store, controller = client
+    from datetime import timedelta
+    from grow_brain.store import iso, utcnow
+    # last hour: exhaust on 30 of every 60 minutes, tent parked at the top of the seedling band, humidity low
+    now = utcnow()
+    for k in range(6):
+        await store.db.execute("INSERT INTO device_log(t, role, state, reason) VALUES(?,?,?,?)",
+                               (iso(now - timedelta(minutes=60 - k * 10)), "exhaust_fan", "on" if k % 2 == 0 else "off", "test"))
+    for k in range(60):
+        await store.db.execute("INSERT INTO readings(t, temp_c, humidity, vpd_kpa, co2, light_on) VALUES(?,?,?,?,?,?)",
+                               (iso(now - timedelta(minutes=60 - k)), 27.2, 50.0, 1.7, None, 1))
+    await store.db.commit()
+    assert 0.45 <= (await controller.exhaust_duty(1.0)) <= 0.55
+    await c.put("/api/targets", json={"light_hours": 24})   # lights on whatever the wall clock says
+    ha.state["switch.grow_light"] = "on"
+    controller._climate_checked_at = None
+    await controller.cycle()
+    evs = (await c.get("/api/events", params={"limit": 20})).json()["events"]
+    hit = [e for e in evs if e["message"].startswith("Can't hold the climate")]
+    assert hit and "dim it or raise it" in hit[0]["message"] and "humidity" in hit[0]["message"]
+    assert (await c.get("/api/status")).json()["exhaust_duty_1h"] >= 0.45

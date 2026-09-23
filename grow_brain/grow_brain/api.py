@@ -187,6 +187,7 @@ async def status(request: Request):
         "alerts": alerts,
         "control_paused_until": paused,
         "learned": dict(c.learned),
+        "exhaust_duty_1h": await c.exhaust_duty(1.0),
     }
 
 

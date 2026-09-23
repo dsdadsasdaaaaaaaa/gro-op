@@ -44,6 +44,8 @@ PREHUMIDIFY_MIN = 4       # top humidity up this many minutes before a scheduled
 WAY_TOO_HOT_C = 1.5       # this far above max the exhaust runs continuously instead of pulsing
 RH_EXHAUST_MARGIN = 3.0   # exhaust only dumps humidity this far above the max (mist settles on its own)
 DUTY_SKIP_S = 600         # skip a scheduled air exchange if the exhaust ran (for any reason) within this long
+CLIMATE_CHECK_S = 600     # how often to ask "can this tent actually hold its targets?"
+CLIMATE_DUTY_LIMIT = 0.40  # exhaust on more than this share of the last hour = the light is too hot for the band
 RH_CRITICAL = 85.0   # bud-rot territory; always dehumidify/exhaust above this
 STALE_AFTER_S = 30 * 60
 EXHAUST_DUTY_ON_MIN = 5
@@ -347,6 +349,8 @@ class Controller:
         self.learned: dict = {}            # {"humidifier_pts_per_min": x, "exhaust_c_per_min": y}
         self._pending_samples: list[dict] = []
         self._restored = False
+        self._climate_checked_at: Optional[datetime] = None
+        self._climate_alert = False
 
     # ---- config helpers (read from store each cycle so app changes apply immediately) ----
     async def settings(self) -> dict:
@@ -522,6 +526,7 @@ class Controller:
         self._last_lights_on = ctx.lights_on
         decisions = decide(ctx)
         await self._report_safety(ctx, decisions)
+        await self._climate_check(ctx)
         settings = await self.settings()
         min_iv = int(settings["min_switch_interval_s"])
         now = utcnow()
@@ -601,6 +606,60 @@ class Controller:
         self._pending_samples = keep
         if changed:
             await self.store.set_kv("learned", self.learned)
+
+    async def _climate_check(self, ctx: ControlContext) -> None:
+        """Once every ten minutes, look at the last hour: if the exhaust had to run most of the time and the tent
+        is still at the top of the band, the light is making more heat than the tent can shed, and every pull of
+        outside air is what keeps knocking the humidity down. Say so, once, with the fix."""
+        now = utcnow()
+        if self._climate_checked_at and (now - self._climate_checked_at).total_seconds() < CLIMATE_CHECK_S:
+            return
+        self._climate_checked_at = now
+        if ctx.standby or ctx.sensor.stale or not ctx.lights_on:
+            return
+        duty = await self.exhaust_duty(1.0)
+        readings = [r for r in await self.store.readings_since(1.0) if r.get("temp_c") is not None]
+        if duty is None or len(readings) < 20:
+            return
+        temp = sum(r["temp_c"] for r in readings) / len(readings)
+        rhs = [r["humidity"] for r in readings if r.get("humidity") is not None]
+        rh = sum(rhs) / len(rhs) if rhs else None
+        t = ctx.day_targets
+        hot = duty >= CLIMATE_DUTY_LIMIT and temp >= t.temp_max_c - 0.5
+        if hot and not self._climate_alert:
+            msg = (f"Can't hold the climate: the exhaust ran {duty * 100:.0f}% of the last hour and the tent still averages "
+                   f"{temp:.1f}°C (max {t.temp_max_c:g}°C)")
+            if rh is not None and rh < t.humidity_min - 3:
+                msg += f", and every pull of outside air drags humidity down (average {rh:.0f}%, target {t.humidity_min:g}–{t.humidity_max:g}%)"
+            msg += ". The light is making more heat than the tent can shed: dim it or raise it. Seedlings under a dome don't mind."
+            await self.store.add_event("warn", "climate", msg)
+            await self.notifier.send("climate", msg, hours=6, title="Grow tent")
+            self._climate_alert = True
+        elif self._climate_alert and (duty < CLIMATE_DUTY_LIMIT - 0.1 or temp < t.temp_max_c - 1.0):
+            await self.store.resolve_alerts("climate", "Can't hold the climate")
+            await self.store.add_event("info", "climate", f"Climate is holding again: exhaust {duty * 100:.0f}% of the last hour, {temp:.1f}°C.")
+            self._climate_alert = False
+
+    async def exhaust_duty(self, hours: float) -> Optional[float]:
+        """Share of the last `hours` the exhaust was on, from the device log. None if it never switched."""
+        rows = [r for r in await self.store.device_log_since(hours) if r["role"] == "exhaust_fan"]
+        if not rows:
+            return None
+        now = utcnow()
+        start = now - timedelta(hours=hours)
+        first = parse_iso(rows[0]["t"]) or start
+        on_s = 0.0
+        state = rows[0]["state"] != "on"          # before the first switch it was in the other state
+        cursor = start
+        for r in rows:
+            at = parse_iso(r["t"]) or cursor
+            if state:
+                on_s += max(0.0, (at - cursor).total_seconds())
+            state = r["state"] == "on"
+            cursor = at
+        if state:
+            on_s += max(0.0, (now - cursor).total_seconds())
+        return round(min(1.0, on_s / (hours * 3600.0)), 3)
 
     async def _restore_switch_times(self) -> None:
         """After a restart, pick up when each device was last switched so pulses and rests carry on."""
