@@ -235,14 +235,10 @@ def test_humidifier_pulses_toward_the_band():
     assert decide(_ctx(25.0, 50.0, switched={"humidifier": NOW - timedelta(seconds=320)}))["humidifier"].desired is True
 
 
-def test_humidifier_preloads_before_an_air_exchange():
-    # seedling band 65-75, exchange pulse at minute 0 of every 30. Three minutes before it, 69 % is "low":
+def test_no_preloading_before_an_air_exchange():
+    # seedling band 65-75: three minutes before an exchange, 69 % is in band and stays that way (no wasted mist)
     ctx = _ctx(25.0, 69.0, stage="seedling")
     ctx.now_local = ctx.now_local.replace(minute=27)
-    d = decide(ctx)
-    assert d["humidifier"].desired is True and "pre-loading" in d["humidifier"].reason
-    # ten minutes before: 69 % is fine
-    ctx.now_local = ctx.now_local.replace(minute=20)
     assert decide(ctx)["humidifier"].desired is False
 
 

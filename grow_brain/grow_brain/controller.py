@@ -40,7 +40,6 @@ HUM_GAIN_DEFAULT = 1.5   # % RH per minute of humidifier; learned from every pul
 COOL_GAIN_DEFAULT = 0.25  # °C per minute of exhaust; learned from every cooling pulse
 HUM_PULSE_S = (60, 300)   # shortest / longest humidifier pulse
 COOL_PULSE_S = (120, 360)  # shortest / longest exhaust cooling pulse
-PREHUMIDIFY_MIN = 4       # top humidity up this many minutes before a scheduled air exchange
 WAY_TOO_HOT_C = 1.5       # this far above max the exhaust runs continuously instead of pulsing
 RH_EXHAUST_MARGIN = 3.0   # exhaust only dumps humidity this far above the max (mist settles on its own)
 DUTY_SKIP_S = 600         # skip a scheduled air exchange if the exhaust ran (for any reason) within this long
@@ -209,7 +208,6 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
         (ctx.now_local - ex.last_switched).total_seconds() < DUTY_SKIP_S
     duty_window = ctx.lights_on and minute_of_period < duty_on and growing
     duty = duty_window and ((is_on("exhaust_fan") and ex is not None and ex.on_tag == "exhaust_duty") or not recently_ran)
-    minutes_to_duty = (duty_period - minute_of_period) % duty_period
     ducted_note = "" if ctx.exhaust_ducted else " (not ducted outside yet: limited effect)"
     cooling = temp > t.temp_max_c or (is_on("exhaust_fan") and ex is not None and ex.on_tag == "exhaust_cool")
     cool = None
@@ -254,12 +252,9 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
         set_("humidifier", False, "too humid")
     else:
         set_("dehumidifier", False, f"RH {rh:.1f}% within {t.humidity_min:g}–{t.humidity_max:g}%")
-        # Humidifier: pulse, then wait for the slow sensor. Normally it tops up to just inside the band;
-        # in the minutes before a scheduled air exchange it pre-loads toward the top of the band so the
-        # dry air the exhaust pulls in lands inside the band instead of far below it.
+        # Humidifier: pulse, then wait for the slow sensor, topping up to just inside the band.
+        # (No pre-loading before an air exchange: the exchange replaces the tent air, so that water goes straight out.)
         start_below, target, why = t.humidity_min + 1.0, t.humidity_min + 2.0, "below min"
-        if ctx.lights_on and growing and 0 < minutes_to_duty <= PREHUMIDIFY_MIN and rh < t.humidity_max - 4.0:
-            start_below, target, why = t.humidity_max - 4.0, t.humidity_max - 2.0, "pre-loading before the air exchange"
         hum = ctx.devices.get("humidifier")
         exhaust_now = d["exhaust_fan"].desired if "exhaust_fan" in d and d["exhaust_fan"].desired is not None else is_on("exhaust_fan")
         if hum is None or not hum.entity_id:
