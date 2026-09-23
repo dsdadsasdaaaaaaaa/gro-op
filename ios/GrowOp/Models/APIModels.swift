@@ -206,6 +206,7 @@ struct Assessment: Codable {
 struct AlertItem: Codable, Identifiable {
     var id: Int
     var level: String?
+    var kind: String?
     var message: String?
     var at: String?
 }

@@ -86,8 +86,8 @@ fun ServerFields(
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         if (mode == ConnectionMode.DIRECT) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("Server address", style = MaterialTheme.typography.titleSmall, color = c.text)
-                OutlinedTextField(value = url, onValueChange = onUrl, placeholder = { Text(ServerConfig.DEFAULT_URL) },
+                Text("Grow brain address", style = MaterialTheme.typography.titleSmall, color = c.text)
+                OutlinedTextField(value = url, onValueChange = onUrl, placeholder = { Text("http://192.168.…:8099") },
                     singleLine = true, keyboardOptions = urlKeyboard, modifier = Modifier.fillMaxWidth())
             }
         } else {
@@ -104,8 +104,8 @@ fun ServerFields(
             }
         }
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("Grow Brain API key", style = MaterialTheme.typography.titleSmall, color = c.text)
-            OutlinedTextField(value = apiKey, onValueChange = onApiKey, placeholder = { Text("Paste the key here") },
+            Text("Setup code (Levi has it)", style = MaterialTheme.typography.titleSmall, color = c.text)
+            OutlinedTextField(value = apiKey, onValueChange = onApiKey, placeholder = { Text("Paste the code here") },
                 singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, capitalization = KeyboardCapitalization.None, autoCorrect = false),
                 modifier = Modifier.fillMaxWidth())
         }
@@ -118,13 +118,15 @@ fun OnboardingScreen(app: AppState) {
     val scope = rememberCoroutineScope()
     val saved = app.value.config
     var mode by remember { mutableStateOf(saved.mode) }
-    var url by remember { mutableStateOf(saved.baseUrl.ifEmpty { ServerConfig.DEFAULT_URL }) }
+    var url by remember { mutableStateOf(saved.baseUrl) }
     var haUrl by remember { mutableStateOf(saved.haUrl) }
     var haToken by remember { mutableStateOf(saved.haToken) }
     var apiKey by remember { mutableStateOf(saved.apiKey) }
     var connecting by remember { mutableStateOf(false) }
     var errorText by remember { mutableStateOf<String?>(null) }
     val prefill by app.prefill.collectAsStateWithLifecycle()
+    val setupError by app.setupError.collectAsStateWithLifecycle()
+    LaunchedEffect(setupError) { setupError?.let { errorText = it; mode = ConnectionMode.DIRECT } }
     LaunchedEffect(prefill) {
         if (prefill.isEmpty()) return@LaunchedEffect
         prefill["url"]?.let { url = it }
@@ -148,7 +150,8 @@ fun OnboardingScreen(app: AppState) {
             Text("Connect to your grow brain", style = MaterialTheme.typography.headlineLarge, color = c.text, textAlign = TextAlign.Center)
             Text(
                 if (mode == ConnectionMode.DIRECT)
-                    "Enter the address of the grow brain on your home network and the API key it was set up with. You only need to do this once."
+                    "Easiest way: ask Levi to open the Grow Brain dashboard → Settings → Set up a phone → Show QR code, then point this " +
+                        "phone's camera at it while you're on the home Wi-Fi. It fills everything in for you. You only do this once."
                 else "Connect through Home Assistant so the app works even when you're away from home.",
                 style = MaterialTheme.typography.bodyMedium, color = c.textSecondary, textAlign = TextAlign.Center,
             )

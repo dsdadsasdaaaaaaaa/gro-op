@@ -48,6 +48,15 @@ class HAClient:
             self.last_error = str(e)
             raise
 
+    async def core_config(self) -> dict[str, Any]:
+        """Home Assistant's /api/config (location, internal_url...), or {} if unavailable."""
+        try:
+            r = await self._client.get("/config")
+            r.raise_for_status()
+            return r.json()
+        except (httpx.HTTPError, ValueError):
+            return {}
+
     async def call_service(self, domain: str, service: str, data: dict[str, Any]) -> bool:
         try:
             r = await self._client.post(f"/services/{domain}/{service}", json=data)

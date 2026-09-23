@@ -171,10 +171,20 @@ class AppState(context: Context) {
     /** Runs the full connection chain for a candidate config; if every step succeeds, saves it and becomes configured. */
     /** Configure from a scanned setup QR code (home Wi-Fi mode) and connect. */
     fun provisionDirect(url: String, key: String) {
+        setupError.value = null
         scope.launch {
             runCatching { connect(ServerConfig(mode = ConnectionMode.DIRECT, baseUrl = url, apiKey = key)) }
+                .onFailure { e ->
+                    // keep what the QR said so "Connect" can be tapped again, and say why it didn't work
+                    prefill.value = mapOf("url" to url, "apiKey" to key)
+                    setupError.value = "Scanned the code, but couldn't reach the grow brain at $url. Make sure this phone is on the " +
+                        "home Wi-Fi, then tap Connect. (${ApiError.wrap(e).message})"
+                }
         }
     }
+
+    /** Why the last QR setup failed, for the first-launch screen. */
+    val setupError = MutableStateFlow<String?>(null)
 
     suspend fun connect(candidate: ServerConfig): HealthResponse {
         val result = client.verify(candidate)

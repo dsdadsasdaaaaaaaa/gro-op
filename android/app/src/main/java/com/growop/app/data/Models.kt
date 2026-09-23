@@ -126,6 +126,7 @@ data class Assessment(
 data class AlertItem(
     val id: Int = 0,
     val level: String? = null,
+    val kind: String? = null,
     val message: String? = null,
     val at: String? = null,
 )

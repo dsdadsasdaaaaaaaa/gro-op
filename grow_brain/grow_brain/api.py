@@ -854,7 +854,14 @@ async def usage(request: Request):
 async def setup_qr(request: Request, url: str):
     """QR code a phone scans with its camera: opens the GrowOp app pre-configured for this server (home Wi-Fi mode)."""
     import qrcode
-    from urllib.parse import quote
+    from urllib.parse import quote, urlparse
+    # Android phones often can't resolve homeassistant.local: prefer the box's real LAN address when HA knows it.
+    if not url.strip() or ".local" in (urlparse(url).hostname or ""):
+        getcfg = getattr(request.app.state.ha, "core_config", None)
+        internal = (await getcfg()).get("internal_url") if getcfg else None
+        host = urlparse(internal).hostname if internal else None
+        if host and not host.endswith(".local"):
+            url = f"http://{host}:8099"
     link = f"growop://setup?mode=direct&url={quote(url.rstrip('/'), safe='')}&key={quote(request.app.state.boot.api_key, safe='')}"
     img = qrcode.make(link, box_size=8, border=2)
     buf = io.BytesIO(); img.save(buf, "PNG"); buf.seek(0)

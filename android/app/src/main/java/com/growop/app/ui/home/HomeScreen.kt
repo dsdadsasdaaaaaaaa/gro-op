@@ -155,6 +155,10 @@ private fun HomeContent(
         if (st.sensor?.stale == true && !standby) add(Triple(Icons.Filled.SensorsOff, "Sensor not reporting. Readings are muted until it comes back.", c.warn))
         val paused = Formatting.parseISO(st.controlPausedUntil)
         if (paused != null && !standby) add(Triple(Icons.Filled.Pause, "Automation paused until ${Formatting.shortTime(paused)}.", c.warn))
+        // Problems the brain has flagged (overheating, a plug offline, refill the tank, update available...)
+        st.alerts.orEmpty()
+            .filter { a -> val m = a.message.orEmpty(); m.isNotBlank() && !m.startsWith("Cannot reach Home Assistant") && !m.startsWith("Tent sensor is stale") }
+            .forEach { a -> add(Triple(Icons.Filled.Warning, a.message.orEmpty(), if (a.level == "alert") c.alert else c.warn)) }
     }
     if (notices.isNotEmpty()) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { notices.forEach { (i, t, tint) -> InlineNotice(i, t, tint) } }

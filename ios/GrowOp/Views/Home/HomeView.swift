@@ -186,6 +186,13 @@ struct HomeView: View {
             if let until = st.controlPausedUntil, let d = Formatting.parseISO(until), st.standby != true {
                 out.append(("pause.circle.fill", "Automation paused until \(d.formatted(date: .omitted, time: .shortened)).", .warn))
             }
+            // Problems the brain has flagged (overheating, a plug offline, refill the tank, update available...)
+            for a in st.alerts ?? [] {
+                guard let msg = a.message, !msg.isEmpty,
+                      !msg.hasPrefix("Cannot reach Home Assistant"), !msg.hasPrefix("Tent sensor is stale") else { continue }
+                let severe = a.level == "alert"
+                out.append((severe ? "exclamationmark.octagon.fill" : "exclamationmark.triangle.fill", msg, severe ? .alertRed : .warn))
+            }
             return out
         }()
         if !items.isEmpty {
