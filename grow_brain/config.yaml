@@ -1,7 +1,7 @@
 name: Grow Brain
-version: "0.7.1"
+version: "0.8.0"
 slug: grow_brain
-description: Fully automated grow tent controller with a Claude-powered grow advisor. Pairs with the GrowOp iPhone app.
+description: Fully automated grow tent controller with a Claude-powered grow advisor. Pairs with the GrowOp phone apps.
 url: https://github.com/dsdadsasdaaaaaaaa/gro-op
 arch:
   - aarch64
@@ -17,10 +17,14 @@ ingress: true
 ingress_port: 8099
 panel_icon: mdi:sprout
 panel_title: Grow Brain
+backup_exclude:
+  - "camera/*"
+  - "*.backup.sqlite"
+backup_pre: python /backup_pre.py
 ports:
   8099/tcp: 8099
 ports_description:
-  8099/tcp: HTTP API used by the GrowOp iPhone app
+  8099/tcp: HTTP API for the GrowOp phone apps on home Wi-Fi
 options:
   api_key: ""
   anthropic_api_key: ""
@@ -28,7 +32,7 @@ options:
   timezone: ""
   log_level: info
 schema:
-  api_key: str?
+  api_key: password?
   anthropic_api_key: password?
   model: str?
   timezone: str?

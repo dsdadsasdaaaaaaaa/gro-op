@@ -68,6 +68,11 @@ CREATE TABLE IF NOT EXISTS plants (
 
 # Columns added after the first release; applied idempotently at open().
 MIGRATIONS = [
+    ("chat", "author", "TEXT"),
+    ("chat", "plant_id", "INTEGER"),
+    ("photo_requests", "nudge_count", "INTEGER"),
+    ("briefs", "read_by", "TEXT"),
+    ("photos", "source", "TEXT"),
     ("events", "resolved_at", "TEXT"),
     ("photo_requests", "nudged_at", "TEXT"),
     ("log_entries", "plant_id", "INTEGER"),
@@ -129,12 +134,20 @@ class Store:
     async def photo_requests_to_nudge(self, older_than_hours: float, nudge_gap_hours: float) -> list[dict]:
         cutoff = iso(utcnow() - timedelta(hours=older_than_hours))
         gap = iso(utcnow() - timedelta(hours=nudge_gap_hours))
-        async with self.db.execute("SELECT * FROM photo_requests WHERE status='open' AND created_at<=? AND (nudged_at IS NULL OR nudged_at<=?)", (cutoff, gap)) as cur:
+        async with self.db.execute("SELECT * FROM photo_requests WHERE status='open' AND created_at<=? AND (nudged_at IS NULL OR nudged_at<=?) "
+                                   "AND COALESCE(nudge_count, 0) < 3", (cutoff, gap)) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
     async def mark_nudged(self, rid: int) -> None:
-        await self.db.execute("UPDATE photo_requests SET nudged_at=? WHERE id=?", (iso(utcnow()), rid))
+        await self.db.execute("UPDATE photo_requests SET nudged_at=?, nudge_count=COALESCE(nudge_count, 0) + 1 WHERE id=?", (iso(utcnow()), rid))
         await self.db.commit()
+
+    async def expire_photo_requests(self, days: float = 7) -> int:
+        """Requests nobody answered in a week are out of date: the advisor will ask again if it still needs them."""
+        cur = await self.db.execute("UPDATE photo_requests SET status='expired' WHERE status='open' AND created_at<=?",
+                                    (iso(utcnow() - timedelta(days=days)),))
+        await self.db.commit()
+        return cur.rowcount
 
     # ---- camera frames ----
     async def add_frame(self, path: str, lights_on: bool | None) -> int:
@@ -156,8 +169,8 @@ class Store:
 
     async def frames(self, days: float = 7, limit: int = 2000) -> list[dict]:
         since = iso(utcnow() - timedelta(days=days))
-        async with self.db.execute("SELECT id, t, lights_on FROM camera_frames WHERE t>=? ORDER BY id LIMIT ?", (since, limit)) as cur:
-            return [dict(r) for r in await cur.fetchall()]
+        async with self.db.execute("SELECT id, t, lights_on FROM camera_frames WHERE t>=? ORDER BY id DESC LIMIT ?", (since, limit)) as cur:
+            return [dict(r) for r in reversed(await cur.fetchall())]   # the newest frames, oldest first
 
     async def frame_count(self) -> int:
         async with self.db.execute("SELECT COUNT(*) AS n FROM camera_frames") as cur:
@@ -207,6 +220,8 @@ class Store:
 
     async def archive_plant(self, pid: int) -> None:
         await self.db.execute("UPDATE plants SET archived=1 WHERE id=?", (pid,))
+        await self.db.execute("UPDATE photo_requests SET status='skipped' WHERE status='open' AND plant_id=?", (pid,))
+        await self.db.execute("UPDATE tasks SET status='done', completed_at=? WHERE status='open' AND plant_id=?", (iso(utcnow()), pid))
         await self.db.commit()
 
     async def assign_orphans_to_plant(self, pid: int) -> None:
@@ -365,6 +380,8 @@ class Store:
             "id": r["id"], "created_at": r["created_at"], "kind": r["kind"], "value": r["value"],
             "unit": r["unit"], "context": r["context"], "note": r["note"], "plant_id": r["plant_id"],
             "advice_summary": advice.get("summary") if advice else None,
+            "advice_steps": advice.get("steps") or [] if advice else [],
+            "advice_urgency": advice.get("urgency") if advice else None,
         }
 
     # ---- photo requests ----
@@ -394,11 +411,16 @@ class Store:
         await self.db.commit()
 
     # ---- photos ----
-    async def add_photo(self, request_id: int | None, note: str | None, path: str, plant_id: int | None = None) -> int:
-        cur = await self.db.execute("INSERT INTO photos(created_at, request_id, note, path, plant_id) VALUES(?,?,?,?,?)",
-                                    (iso(utcnow()), request_id, note, path, plant_id))
+    async def add_photo(self, request_id: int | None, note: str | None, path: str, plant_id: int | None = None,
+                        source: str | None = None) -> int:
+        cur = await self.db.execute("INSERT INTO photos(created_at, request_id, note, path, plant_id, source) VALUES(?,?,?,?,?,?)",
+                                    (iso(utcnow()), request_id, note, path, plant_id, source))
         await self.db.commit()
         return cur.lastrowid
+
+    async def delete_photo_row(self, pid: int) -> None:
+        await self.db.execute("DELETE FROM photos WHERE id=?", (pid,))
+        await self.db.commit()
 
     async def set_photo_analysis(self, pid: int, analysis: dict) -> None:
         await self.db.execute("UPDATE photos SET analysis_json=? WHERE id=?", (json.dumps(analysis), pid))
@@ -468,19 +490,33 @@ class Store:
             rows = await cur.fetchall()
         return [{"id": r["id"], "created_at": r["created_at"], **json.loads(r["json"])} for r in rows]
 
-    async def mark_brief_read(self, bid: int) -> None:
-        await self.db.execute("UPDATE briefs SET read=1 WHERE id=?", (bid,))
+    async def mark_brief_read(self, bid: int, device: str | None = None) -> None:
+        """Read flags are per phone, so one person opening the brief doesn't hide it from the other."""
+        if not device:
+            await self.db.execute("UPDATE briefs SET read=1 WHERE id=?", (bid,))
+        else:
+            async with self.db.execute("SELECT read_by FROM briefs WHERE id=?", (bid,)) as cur:
+                r = await cur.fetchone()
+            if r is None:
+                return
+            who = set(json.loads(r["read_by"] or "[]"))
+            who.add(device[:64])
+            await self.db.execute("UPDATE briefs SET read_by=? WHERE id=?", (json.dumps(sorted(who)), bid))
         await self.db.commit()
 
-    async def unread_brief(self) -> bool:
-        async with self.db.execute("SELECT read FROM briefs ORDER BY id DESC LIMIT 1") as cur:
+    async def unread_brief(self, device: str | None = None) -> bool:
+        async with self.db.execute("SELECT read, read_by FROM briefs ORDER BY id DESC LIMIT 1") as cur:
             r = await cur.fetchone()
-        return bool(r) and not bool(r["read"])
+        if not r:
+            return False
+        if device:
+            return device[:64] not in set(json.loads(r["read_by"] or "[]"))
+        return not bool(r["read"])
 
     # ---- chat ----
-    async def add_chat(self, role: str, content: str) -> int:
-        cur = await self.db.execute("INSERT INTO chat(role, content, created_at) VALUES(?,?,?)",
-                                    (role, content, iso(utcnow())))
+    async def add_chat(self, role: str, content: str, author: str | None = None, plant_id: int | None = None) -> int:
+        cur = await self.db.execute("INSERT INTO chat(role, content, created_at, author, plant_id) VALUES(?,?,?,?,?)",
+                                    (role, content, iso(utcnow()), author, plant_id))
         await self.db.commit()
         return cur.lastrowid
 

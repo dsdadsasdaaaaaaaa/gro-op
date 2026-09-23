@@ -231,7 +231,7 @@ Plant: `{"id":1,"name":"Levi's plant","owner":"Levi","strain":"Liberty Haze","br
 - Photo requests notify the plant owner's `notify_service` (falls back to everyone); briefs and safety alerts go to everyone.
 
 ## Tent camera (v0.3.0): any Home Assistant camera entity (Wyze via Docker Wyze Bridge, Tapo, ...)
-Status gains `"camera": null | {"entity_id":"camera.wyze_cam_man_cave","name":"Wyze Cam Man cave","available":true,"snapshot_url":"/api/camera/snapshot","stream_url":"/api/camera/stream","last_frame_at":"..."|null,"frame_count":12,"error":null|"..."}`.
+Status gains `"camera": null | {"entity_id":"camera.tent_cam","name":"Wyze Cam Man cave","available":true,"snapshot_url":"/api/camera/snapshot","stream_url":"/api/camera/stream","last_frame_at":"..."|null,"frame_count":12,"error":null|"..."}`.
 - `GET /api/camera` → `{"camera": ..., "candidates":[{"entity_id","name","state","brand","model"}]}`; `PUT /api/camera {"entity_id": "camera.x" | null}` (null = off; auto-picks a camera named wyze/tent/grow when unset).
 - `GET /api/camera/snapshot` → fresh JPEG (auth header required; poll every 1–3 s for a live-ish view).
 - `GET /api/camera/stream` → MJPEG (`multipart/x-mixed-replace`) passthrough from Home Assistant.

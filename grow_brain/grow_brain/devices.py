@@ -131,6 +131,9 @@ def automap(entities: list[dict]) -> dict[str, str]:
         role = e.get("suggested_role")
         if not role:
             continue
+        domain = (e.get("entity_id") or "").split(".", 1)[0]
+        if domain in ("climate", "input_boolean", "automation", "script", "cover", "lock", "alarm_control_panel"):
+            continue   # never let a guess switch the house's thermostat, helpers or doors
         name = _norm(e.get("name") or "")
         spec = max((len(k) for k in ROLE_BY_NAME[role].keywords if k in name), default=0)
         if any(w in name for w in ("grow", "tent", "hygrometer")):

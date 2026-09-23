@@ -123,7 +123,7 @@ def test_safety_overheat_overrides_manual_and_pause():
 
 def test_manual_override_and_pause():
     d = decide(_ctx(29.5, 60.0, overrides={"exhaust_fan": "off"}))
-    assert d["exhaust_fan"].desired is False and "manual" in d["exhaust_fan"].reason
+    assert d["exhaust_fan"].desired is False and "by hand" in d["exhaust_fan"].reason
     d = decide(_ctx(29.5, 60.0, paused=True))
     assert d["exhaust_fan"].desired is None
 
@@ -154,11 +154,11 @@ def test_suggest_role_and_automap():
     assert suggest_role("sensor.tent_humidity", "Tent Humidity", "humidity", "%") == "humidity_sensor"
     assert suggest_role("sensor.grow_light_power", "Grow Light Power", "power", "W") is None
     # real-world false positives seen on Levi's HA
-    assert suggest_role("input_boolean.man_cave_overheat_active", "Overheat Active", None, None) is None
+    assert suggest_role("input_boolean.basement_overheat_active", "Overheat Active", None, None) is None
     assert suggest_role("switch.exhaust_led", "exhaust LED", None, None) is None
     assert suggest_role("switch.humidifier_auto_off_enabled", "humidifier Auto-off enabled", None, None) is None
     assert suggest_role("sensor.backup_last_attempted", "Backup Last attempted automatic backup", "timestamp", None) is None
-    assert suggest_role("sensor.man_cave_circadian_color_temp", "Man Cave Circadian Color Temp", None, "K") is None
+    assert suggest_role("sensor.basement_circadian_color_temp", "Basement Circadian Color Temp", None, "K") is None
     assert suggest_role("sensor.humidifier_auto_off_at", "humidifier Auto-off at", "timestamp", None) is None
     assert suggest_role("sensor.h5074_8081_temperature", "grow hygrometer Temperature", "temperature", "°C") == "temperature_sensor"
     assert suggest_role("switch.dehumidifer", "dehumidifer", None, None) == "dehumidifier"
@@ -310,3 +310,47 @@ def test_bad_stored_times_fall_back_instead_of_crashing():
     assert parse_hhmm("6pm") == (6, 0) and parse_hhmm("bad", "08:00") == (8, 0)
     on, _ = light_window(datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc), "garbage", 18)
     assert on is True
+
+
+def test_photoperiod_is_real_hours_across_dst():
+    from zoneinfo import ZoneInfo
+    ny = ZoneInfo("America/New_York")
+    # 2026-11-01: clocks go back at 02:00. Lights on 06:00 for 18 h → off at 00:00 local on 11-02 (still 18 real hours
+    # after 06:00 EST... the day before had 06:00 EDT). Check both sides of the change stay 18 real hours.
+    on, end = light_window(datetime(2026, 10, 31, 12, 0, tzinfo=ny), "06:00", 18)
+    start = datetime(2026, 10, 31, 6, 0, tzinfo=ny)
+    assert on and (end.astimezone(timezone.utc) - start.astimezone(timezone.utc)) == timedelta(hours=18)
+    # an on-time inside the repeated hour doesn't blink off
+    on, _ = light_window(datetime(2026, 11, 1, 1, 45, fold=1, tzinfo=ny), "01:30", 18)
+    assert on
+
+
+def test_pause_ends_a_running_pulse_and_manual_exhaust_blocks_mist():
+    ctx = _ctx(25.0, 50.0, paused=True, states={"humidifier": "on"}, on_tags={"humidifier": "humidifier"},
+               switched={"humidifier": NOW - timedelta(seconds=30)})
+    d = decide(ctx)
+    assert d["humidifier"].desired is False and "paused" in d["humidifier"].reason
+    # exhaust forced on by hand: the humidifier doesn't mist into it
+    d = decide(_ctx(25.0, 48.0, overrides={"exhaust_fan": "on"}))
+    assert d["humidifier"].desired is False and "waiting for the exhaust" in d["humidifier"].reason
+
+
+def test_frozen_sensor_blocks_the_next_pulse():
+    ctx = _ctx(25.0, 50.0, switched={"humidifier": NOW - timedelta(seconds=400)})
+    ctx.sensor.updated_at = NOW - timedelta(seconds=600)     # no reading since the last pulse ended
+    d = decide(ctx)
+    assert d["humidifier"].desired is False and "fresh sensor reading" in d["humidifier"].reason
+
+
+def test_humidity_run_does_not_latch_other_exhaust_runs_and_night_floor():
+    # a cooling run ends with RH 1 point over max: it isn't kept running for humidity
+    d = decide(_ctx(26.0, 66.0, states={"exhaust_fan": "on"}, on_tags={"exhaust_fan": "exhaust_cool"},
+                    switched={"exhaust_fan": NOW - timedelta(minutes=8)}))
+    assert d["exhaust_fan"].desired is False
+    assert stage_defaults("veg").for_night().temp_min_c == 18.0
+    dry = stage_defaults("drying")
+    assert dry.for_night().temp_max_c == dry.temp_max_c      # no +1 °C when there's no night drop
+
+
+def test_curing_leaves_the_humidifier_idle():
+    assert decide(_ctx(20.0, 40.0, stage="curing"))["humidifier"].desired is False

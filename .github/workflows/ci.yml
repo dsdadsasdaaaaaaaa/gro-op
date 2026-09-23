@@ -3,6 +3,8 @@ on:
   push:
     branches: [main]
   pull_request:
+permissions:
+  contents: read
 jobs:
   addon:
     name: Grow Brain tests + Docker build
@@ -16,5 +18,15 @@ jobs:
         run: pip install -r grow_brain/requirements.txt pytest pytest-asyncio
       - name: Tests
         run: cd grow_brain && python -m pytest -q
-      - name: Build the add-on image exactly as the Supervisor does
+      - name: The app starts and answers /api/health
+        run: |
+          cd grow_brain
+          DATA_DIR=$(mktemp -d) GROW_API_KEY=ci HA_URL=http://127.0.0.1:9 python -m grow_brain.main &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8099/api/health && exit 0; sleep 1; done
+          echo "the app never answered"; exit 1
+      - name: Build the add-on image (amd64, as the Supervisor does)
         run: docker build grow_brain
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the add-on image for arm64 (Raspberry Pi / HA Green)
+        run: docker buildx build --platform linux/arm64 grow_brain

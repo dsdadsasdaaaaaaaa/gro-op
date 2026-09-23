@@ -65,7 +65,8 @@ def load_boot_config() -> BootConfig:
         else:
             api_key = secrets.token_urlsafe(24)
             key_file.write_text(api_key)
-        log.warning("No api_key configured. Using generated key (also saved in %s): %s", key_file, api_key)
+        log.warning("No api_key configured. Using a generated key saved in %s (open the dashboard's "
+                    "'Set up a phone' QR to use it).", key_file)
 
     anthropic_key = opts.get("anthropic_api_key") or os.environ.get("ANTHROPIC_API_KEY") or None
     model = opts.get("model") or os.environ.get("GROW_MODEL") or "claude-opus-5"

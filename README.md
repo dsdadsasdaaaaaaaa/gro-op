@@ -78,7 +78,7 @@ The add-on serves its own dashboard (nothing to install): at home open `http://h
 
 ## Hosted dashboard (Vercel)
 
-`dashboard/` is the same web dashboard packaged for Vercel: static files plus one function (`api/index.js`) that proxies `/api/*` to the add-on through Home Assistant's remote link (add-on ingress via the WebSocket API). The site is protected by a dashboard password; the add-on's key and the HA token stay in Vercel environment variables (`HA_URL`, `HA_TOKEN`, `GROW_API_KEY`, `DASHBOARD_PASSWORD`). Deploy with `cd dashboard && ./sync-web.sh && vercel deploy --prod`. Live at https://growop.vercel.app.
+`dashboard/` is the same web dashboard packaged for Vercel: static files plus one function (`api/index.js`) that proxies `/api/*` to the add-on through Home Assistant's remote link (add-on ingress via the WebSocket API). The site is protected by a dashboard password; the add-on's key and the HA token stay in Vercel environment variables (`HA_URL`, `HA_TOKEN`, `GROW_API_KEY`, `DASHBOARD_PASSWORD`). Deploy with `cd dashboard && ./sync-web.sh && vercel deploy --prod`. Live at your Vercel URL
 
 ## Day to day
 

@@ -32,6 +32,7 @@ ENERGY_TOTAL_SUFFIXES = ("_energy", "_total_energy", "_energy_total", "_total_co
 LOW_POWER_W = {"light": 15.0, "exhaust_fan": 3.0, "intake_fan": 2.0, "circulation_fan": 2.0, "circulation_fan_2": 2.0,
                "humidifier": 3.0, "dehumidifier": 20.0, "heater": 20.0, "cooler": 30.0}
 POWER_GRACE_S = 180
+HUMIDIFIER_POWER_GRACE_S = 45   # pulses are 60-300 s, so check early
 
 TEMP_HYST = 1.0      # °C
 RH_HYST = 4.0        # % RH (dehumidifier)
@@ -144,19 +145,27 @@ def parse_hhmm(s, default: str = "06:00") -> tuple[int, int]:
 # ---------------------------------------------------------------- light schedule
 
 def light_window(now_local: datetime, on_time: str, hours: float) -> tuple[bool, datetime]:
-    """Return (should_be_on, next_change_local)."""
+    """Return (should_be_on, next_change_local). The photoperiod is counted in real hours, so a DST change
+    doesn't stretch or shrink a day to 17 or 19 h, and an on-time in the repeated November hour doesn't blink."""
     if hours <= 0:
         return False, now_local + timedelta(days=365)
     if hours >= 24:
         return True, now_local + timedelta(days=365)
     hh, mm = parse_hhmm(on_time)
-    today_on = now_local.replace(hour=hh, minute=mm, second=0, microsecond=0)
-    # Find the most recent "on" moment at or before now.
-    start = today_on if today_on <= now_local else today_on - timedelta(days=1)
+    tz = now_local.tzinfo or timezone.utc
+    now_utc = now_local.astimezone(timezone.utc)
+
+    def on_at(day) -> datetime:
+        return datetime(day.year, day.month, day.day, hh, mm, tzinfo=tz).astimezone(timezone.utc)
+
+    local_day = now_local.date()
+    start = on_at(local_day)
+    if start > now_utc:
+        start = on_at(local_day - timedelta(days=1))
     end = start + timedelta(hours=hours)
-    if now_local < end:
-        return True, end
-    return False, start + timedelta(days=1)
+    if now_utc < end:
+        return True, end.astimezone(tz)
+    return False, on_at(local_day + timedelta(days=1)).astimezone(tz) if on_at(local_day) <= now_utc else on_at(local_day).astimezone(tz)
 
 
 # ---------------------------------------------------------------- pure decision logic
@@ -238,7 +247,8 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
     too_humid = rh > t.humidity_max or (is_on("dehumidifier") and rh > t.humidity_max - RH_HYST)
 
     # --- exhaust: cooling pulses, humidity dump, plus a baseline air-exchange duty while lights on ---
-    exhaust_humid = rh > t.humidity_max + RH_EXHAUST_MARGIN or (is_on("exhaust_fan") and rh > t.humidity_max)
+    ex_tag = ctx.devices["exhaust_fan"].on_tag if "exhaust_fan" in ctx.devices else None
+    exhaust_humid = rh > t.humidity_max + RH_EXHAUST_MARGIN or (is_on("exhaust_fan") and ex_tag == "exhaust_humid" and rh > t.humidity_max)
     duty_on, duty_period = EXHAUST_DUTY_SEEDLING if ctx.stage == "seedling" else (EXHAUST_DUTY_ON_MIN, EXHAUST_DUTY_PERIOD_MIN)
     minute_of_period = (ctx.now_local.hour * 60 + ctx.now_local.minute) % duty_period
     growing = ctx.stage not in ("curing", "done")
@@ -246,7 +256,7 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
     # A cooling pulse already exchanged the air: don't dump the humidity a second time.
     recently_ran = ex is not None and ex.last_switched is not None and \
         (ctx.now_local - ex.last_switched).total_seconds() < DUTY_SKIP_S
-    duty_window = ctx.lights_on and minute_of_period < duty_on and growing
+    duty_window = (ctx.lights_on or ctx.stage == "drying") and minute_of_period < duty_on and growing
     duty = duty_window and ((is_on("exhaust_fan") and ex is not None and ex.on_tag == "exhaust_duty") or not recently_ran)
     ducted_note = "" if ctx.exhaust_ducted else " (not ducted outside yet: limited effect)"
     cooling = temp > t.temp_max_c or (is_on("exhaust_fan") and ex is not None and ex.on_tag == "exhaust_cool")
@@ -254,15 +264,15 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
     if cooling and ex is not None and temp < t.temp_max_c + WAY_TOO_HOT_C:
         start_temp = ex.on_reading if ex.on_reading is not None else temp
         cool = _pulse(ex, ctx.now_local, temp - t.temp_max_c + 0.5, start_temp - t.temp_max_c + 0.5,
-                      ctx.cool_gain, COOL_PULSE_S, "exhaust_cool")
+                      ctx.cool_gain, COOL_PULSE_S, "exhaust_cool", s.updated_at)
     if rh >= RH_CRITICAL:
         set_("exhaust_fan", True, f"RH {rh:.1f}% critical, exhaust on" + ducted_note, force=True)
     elif temp >= t.temp_max_c + WAY_TOO_HOT_C:
         set_("exhaust_fan", True, f"{temp:.1f}°C far above max {t.temp_max_c:g}°C, exhaust on" + ducted_note, tag="exhaust_cool")
     elif cool is not None and (cool[0] or not (exhaust_humid or duty)):
         set_("exhaust_fan", cool[0], f"{temp:.1f}°C vs max {t.temp_max_c:g}°C: " + cool[1] + ducted_note, tag=cool[2])
-    elif exhaust_humid:
-        set_("exhaust_fan", True, f"RH {rh:.1f}% above max {t.humidity_max:g}%" + ducted_note)
+    elif exhaust_humid and not (too_cold and rh < t.humidity_max + 5):
+        set_("exhaust_fan", True, f"RH {rh:.1f}% above max {t.humidity_max:g}%" + ducted_note, tag="exhaust_humid")
     elif too_cold and not too_humid:
         set_("exhaust_fan", False, f"{temp:.1f}°C below min {t.temp_min_c:g}°C, keeping heat in")
     elif duty:
@@ -284,7 +294,10 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
         set_("heater", False, f"{temp:.1f}°C within {t.temp_min_c:g}–{t.temp_max_c:g}°C")
 
     # --- humidity devices ---
-    if rh >= RH_CRITICAL:
+    if not growing:
+        set_("humidifier", False, f"{ctx.stage}: tent idle")
+        set_("dehumidifier", False, f"{ctx.stage}: tent idle")
+    elif rh >= RH_CRITICAL:
         set_("dehumidifier", True, f"RH {rh:.1f}% critical", force=True)
         set_("humidifier", False, "RH critical", force=True)
     elif too_humid:
@@ -296,7 +309,14 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
         # (No pre-loading before an air exchange: the exchange replaces the tent air, so that water goes straight out.)
         start_below, target, why = t.humidity_min + 1.0, t.humidity_min + 2.0, "below min"
         hum = ctx.devices.get("humidifier")
-        exhaust_now = d["exhaust_fan"].desired if "exhaust_fan" in d and d["exhaust_fan"].desired is not None else is_on("exhaust_fan")
+        ex_dec = d.get("exhaust_fan")
+        ex_dev = ctx.devices.get("exhaust_fan")
+        if ex_dev is not None and ex_dev.override_mode in ("on", "off") and not (ex_dec and ex_dec.force):
+            exhaust_now = ex_dev.override_mode == "on"
+        elif ctx.paused and not (ex_dec and ex_dec.force):
+            exhaust_now = is_on("exhaust_fan")
+        else:
+            exhaust_now = ex_dec.desired if ex_dec is not None and ex_dec.desired is not None else is_on("exhaust_fan")
         if hum is None or not hum.entity_id:
             pass
         elif is_on("humidifier") and rh >= target:
@@ -306,7 +326,8 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
             set_("humidifier", False, f"RH {rh:.1f}% {why}: waiting for the exhaust to finish")
         elif rh < start_below or is_on("humidifier"):
             start_rh = hum.on_reading if hum.on_reading is not None else rh
-            on, note, tag = _pulse(hum, ctx.now_local, target - rh, target - start_rh, ctx.hum_gain, HUM_PULSE_S, "humidifier")
+            on, note, tag = _pulse(hum, ctx.now_local, target - rh, target - start_rh, ctx.hum_gain, HUM_PULSE_S, "humidifier",
+                                   s.updated_at)
             set_("humidifier", on, f"RH {rh:.1f}% {why} ({note})", tag=tag)
         else:
             set_("humidifier", False, f"RH {rh:.1f}% within {t.humidity_min:g}–{t.humidity_max:g}%")
@@ -327,7 +348,7 @@ def _hot_safety(ctx: ControlContext, set_, temp: Optional[float]) -> None:
 
 
 def _pulse(dev: DeviceInput, now: datetime, deficit_now: float, deficit_at_start: float, gain_per_min: float,
-           bounds: tuple[int, int], what: str) -> tuple[bool, str, Optional[str]]:
+           bounds: tuple[int, int], what: str, reading_at: Optional[datetime] = None) -> tuple[bool, str, Optional[str]]:
     """Run a device for a pulse sized to the deficit, then rest LAG_S so the slow sensor can report the
     effect before deciding again. Returns (desired, note, tag)."""
     lo, hi = bounds
@@ -340,8 +361,12 @@ def _pulse(dev: DeviceInput, now: datetime, deficit_now: float, deficit_at_start
         if elapsed >= planned:
             return False, f"{planned:.0f} s pulse done, waiting for the sensor", f"{what}_done"
         return True, f"pulse {elapsed:.0f}/{planned:.0f} s", what
-    if dev.last_switched is not None and (now - dev.last_switched).total_seconds() < LAG_S:
-        return False, "resting until the sensor catches up", None
+    if dev.last_switched is not None:
+        since = (now - dev.last_switched).total_seconds()
+        if since < LAG_S:
+            return False, "resting until the sensor catches up", None
+        if reading_at is not None and reading_at <= dev.last_switched and since < 3 * LAG_S:
+            return False, "waiting for a fresh sensor reading", None
     planned = max(lo, min(hi, deficit_now / gain * 60.0))
     return True, f"{planned:.0f} s pulse", what
 
@@ -363,10 +388,17 @@ def _apply_overrides_and_pause(ctx: ControlContext, d: dict[str, Decision]) -> d
         if dec.force:
             continue  # safety wins over everything
         if dev.override_mode in ("on", "off"):
-            until = f" until {dev.override_until[11:16]} UTC" if dev.override_until else ""
-            d[role] = Decision(role, dev.override_mode == "on", f"manual override: {dev.override_mode}{until}")
+            until = ""
+            if dev.override_until:
+                u = parse_iso(dev.override_until)
+                if u is not None:
+                    until = " until " + u.astimezone(ctx.now_local.tzinfo or timezone.utc).strftime("%H:%M")
+            d[role] = Decision(role, dev.override_mode == "on", f"set by hand{until}")
         elif ctx.paused:
-            d[role] = Decision(role, None, "automation paused")
+            if dev.state == "on" and dev.on_tag in ("humidifier", "exhaust_cool", "exhaust_duty", "exhaust_humid"):
+                d[role] = Decision(role, False, "automation paused: ending the pulse that was running")
+            else:
+                d[role] = Decision(role, None, "automation paused")
     return d
 
 
@@ -406,6 +438,8 @@ class Controller:
         self._cmd: dict[str, dict] = {}          # role → {"desired": bool, "tries": n} while a command hasn't taken effect
         self._cmd_alerted: set[str] = set()
         self._safety_kind: Optional[str] = None
+        self._last_good: dict[str, tuple] = {}   # role → (value, unit, ts): rides out 'unavailable' blips
+        self._flags_loaded = False
         self.started_at = utcnow()
         self.last_attempt_at: Optional[datetime] = None
         self.consecutive_failures = 0
@@ -421,6 +455,7 @@ class Controller:
         s.setdefault("control_interval_s", 30)
         s.setdefault("min_switch_interval_s", 180)
         s.setdefault("humidifier_tank_hours", 4.0)   # hours of misting one tank lasts at the knob setting in use
+        s.setdefault("advisor_budget_usd", 40.0)     # monthly cap on Claude spend
         s.setdefault("auto_apply_advisor_targets", True)
         s.setdefault("units", "c")
         s.setdefault("brief_time", "08:00")
@@ -469,9 +504,21 @@ class Controller:
         day_total = days_between(start, today)
         override = await self.store.get_kv("targets_override", None)
         base = stage_defaults(profile["stage"], day_in_stage, valid_hhmm((override or {}).get("light_on_time")) or "06:00")
+        if override and override.get("source") == "advisor" and override.get("phase") \
+                and override["phase"] != _phase_of(profile["stage"], day_in_stage):
+            # the advisor tuned the previous phase; the new phase starts from its own defaults
+            override = {"values": {}, "source": "stage_default", "light_on_time": override.get("light_on_time", "06:00")}
+            await self.store.set_kv("targets_override", override)
+            await self.store.add_event("info", "system", "New phase: targets back to its defaults")
         if override:
             base = apply_overrides(base, override.get("values", {}), override.get("source", "manual"))
         return base, day_in_stage, day_total
+
+    async def phase_key(self) -> str:
+        profile = await self.profile()
+        settings = await self.settings()
+        _, day_in_stage, _ = await self.effective_targets(profile, settings)
+        return _phase_of(profile["stage"], day_in_stage)
 
     async def standby(self) -> bool:
         return bool(await self.store.get_kv("standby", False))
@@ -480,6 +527,9 @@ class Controller:
         p = await self.store.get_kv("control_paused_until", None)
         if p and (parse_iso(p) or utcnow()) > utcnow():
             return p
+        if p:
+            await self.store.del_kv("control_paused_until")
+            await self.store.resolve_alerts("system", "Automation paused")
         return None
 
     # ---- per-cycle ----
@@ -526,16 +576,26 @@ class Controller:
             nonlocal newest
             eid = dmap.get(role)
             st = self.states.get(eid) if eid else None
-            if not st or st["state"] in ("unavailable", "unknown", "", None):
-                return None, None
-            try:
-                v = float(st["state"])
-            except (TypeError, ValueError):
-                return None, None
-            ts = parse_iso(st.get("last_reported") or st.get("last_updated"))
+            v = None
+            if st and st["state"] not in ("unavailable", "unknown", "", None):
+                try:
+                    v = float(st["state"])
+                except (TypeError, ValueError):
+                    v = None
+            if v is None:
+                # Home Assistant restarting or a Bluetooth blip: ride it out on the last good value
+                # (its timestamp still ages, so a real outage still goes stale after STALE_AFTER_S)
+                lg = self._last_good.get(role)
+                if not lg:
+                    return None, None
+                v, unit, ts = lg
+            else:
+                unit = st.get("attributes", {}).get("unit_of_measurement")
+                ts = parse_iso(st.get("last_reported") or st.get("last_updated"))
+                self._last_good[role] = (v, unit, ts)
             if ts and (newest is None or ts > newest):
                 newest = ts
-            return v, st.get("attributes", {}).get("unit_of_measurement")
+            return v, unit
 
         t, unit = num("temperature_sensor")
         if t is not None and unit and "F" in unit:
@@ -574,6 +634,7 @@ class Controller:
             states = await self.ha.get_states()
         except Exception as e:
             self.ha_ok = False
+            self.sensor.stale = True   # we can't see the tent: don't show old numbers as live
             if not self._ha_fail_reported:
                 self._ha_fail_reported = True
                 await self._safe(self.notifier.send("ha_down", f"Grow Brain can't reach Home Assistant ({e}). The tent isn't being controlled.",
@@ -596,6 +657,10 @@ class Controller:
         if not self._restored:
             await self._restore_switch_times()
         await self._update_latch(_s, dmap)
+        if not self._flags_loaded:
+            await self._safe(self._load_flags(), "flags load")
+        flags_before = (self._safety_kind, self._stale_reported, self._climate_alert,
+                        tuple(sorted(self._unavail_alerted)), tuple(sorted(self._cmd_alerted)))
         ctx = await self.build_context()
 
         # 1. decide and switch before any bookkeeping, so a database problem can never stop a safety action
@@ -615,7 +680,19 @@ class Controller:
         await self._safe(self._update_energy_baselines(dmap, ctx.now_local), "energy")
         await self._safe(self._climate_check(ctx), "climate check")
         await self._safe(self._tank_tracker(ctx), "tank")
+        await self._safe(self.notifier.flush(), "push retry")
+        if flags_before != (self._safety_kind, self._stale_reported, self._climate_alert,
+                            tuple(sorted(self._unavail_alerted)), tuple(sorted(self._cmd_alerted))):
+            await self._save_flags()
+        await self._safe(self._daily_prune(ctx), "prune")
         self.last_cycle_at = utcnow()
+
+    async def _daily_prune(self, ctx: ControlContext) -> None:
+        today = ctx.now_local.date().isoformat()
+        if await self.store.get_kv("last_prune_date") == today:
+            return
+        await self.store.set_kv("last_prune_date", today)
+        await self.store.prune()
 
     async def _switch(self, ctx: ControlContext, decisions: dict[str, Decision], settings: dict) -> dict[str, str]:
         """Apply decisions. Returns role → 'switched' | 'already' | 'failed' | 'unavailable' | 'waiting' | 'unmapped'."""
@@ -639,6 +716,9 @@ class Controller:
             want = "on" if dec.desired else "off"
             if dev.state == want:
                 results[role] = "already"
+                if want == "off" and (role in self.on_tag or role in self.on_reading):
+                    self.on_tag.pop(role, None)
+                    self.on_reading.pop(role, None)
                 if self._cmd.pop(role, None) is not None and role in self._cmd_alerted:
                     self._cmd_alerted.discard(role)
                     await self._safe(self.store.resolve_alerts("device", f"{ROLE_BY_NAME[role].label} isn't responding"), "resolve")
@@ -674,8 +754,6 @@ class Controller:
                 # optimistic local state so the next cycle's hysteresis sees it
                 self.states.setdefault(dev.entity_id, {})["state"] = want
                 await self._safe(self.store.log_device(role, want, dec.reason), "device log")
-                await self._safe(self.store.add_event("info", "device",
-                                                      f"{ROLE_BY_NAME[role].label} → {want.upper()}: {dec.reason}"), "event")
         return results
 
     async def _update_latch(self, settings: dict, dmap: dict[str, str]) -> None:
@@ -708,13 +786,16 @@ class Controller:
             await self._safe(self.store.set_kv("safety_latch", self.safety_latch), "latch save")
 
     async def _report_stale(self, dmap: dict[str, str], standby: bool = False) -> None:
-        if self.sensor.stale and not self._stale_reported and dmap.get("temperature_sensor"):
-            self._stale_reported = True
+        if self.sensor.stale and dmap.get("temperature_sensor"):
             what = "" if standby else " Automation is in safe mode (exhaust on, humidifier off)."
+            # repeats every 6 h while it lasts (the notifier throttles it)
             await self.notifier.send("stale", "The tent sensor has stopped reporting." + what +
                                      " Check the Govee sensor's batteries and that it's in range of its hub.",
                                      hours=6, everyone=True)
-            await self.store.add_event("warn", "safety", "Tent sensor is stale or unavailable. Running in safe mode (exhaust on, climate devices off).")
+            if not self._stale_reported:
+                self._stale_reported = True
+                await self.store.add_event("warn", "safety", "Tent sensor is stale or unavailable." +
+                                           ("" if standby else " Running in safe mode (exhaust on, climate devices off)."))
         elif not self.sensor.stale and self._stale_reported:
             self._stale_reported = False
             await self.store.add_event("info", "safety", "Tent sensor is reporting again.")
@@ -782,10 +863,13 @@ class Controller:
             if (now - smp["ended"]).total_seconds() < LAG_S:
                 keep.append(smp)
                 continue
+            if self.sensor.updated_at is not None and self.sensor.updated_at <= smp["ended"]:
+                keep.append(smp)          # no reading since the pulse ended yet
+                continue
             if smp["role"] == "humidifier":
                 ex_last = self.last_switched.get("exhaust_fan")
-                if ex_last and ex_last > smp["on_at"] or self.sensor.humidity is None:
-                    continue  # the exhaust ran during the window: not a clean measurement
+                if (ex_last and ex_last > smp["on_at"]) or self.sensor.humidity is None or ctx.lights_on != smp["lights_on"]:
+                    continue  # the exhaust ran, or the lights changed, during the window: not a clean measurement
                 sample = (self.sensor.humidity - smp["start"]) / smp["minutes"]
                 key, lo, hi, label = "humidifier_pts_per_min", 0.2, 6.0, "humidifier raises humidity about %.1f points per minute"
             else:
@@ -793,7 +877,10 @@ class Controller:
                     continue
                 sample = (smp["start"] - self.sensor.temp_c) / smp["minutes"]
                 key, lo, hi, label = "exhaust_c_per_min", 0.05, 1.5, "exhaust cools the tent about %.2f °C per minute"
-            new = learn_gain(self.learned.get(key), sample, lo, hi)
+            default = HUM_GAIN_DEFAULT if key == "humidifier_pts_per_min" else COOL_GAIN_DEFAULT
+            new = learn_gain(self.learned.get(key, default), sample, lo, hi)
+            if (smp["ended"] - smp["on_at"]).total_seconds() > 30 * 60:
+                continue
             if new is not None and new != self.learned.get(key):
                 first = key not in self.learned
                 self.learned[key] = new
@@ -813,6 +900,9 @@ class Controller:
             return
         self._climate_checked_at = now
         if ctx.standby or ctx.sensor.stale or not ctx.lights_on:
+            if self._climate_alert and (ctx.standby or not ctx.lights_on):
+                await self.store.resolve_alerts("climate", "Can't hold the climate")
+                self._climate_alert = False
             return
         duty = await self.exhaust_duty(1.0)
         readings = [r for r in await self.store.readings_since(1.0) if r.get("temp_c") is not None]
@@ -869,14 +959,19 @@ class Controller:
                 refill_at = iso(utcnow())
                 await self.store.set_kv("humidifier_refill_at", refill_at)
             self._tank = {"run_s": float(await self.store.get_kv("humidifier_run_s", 0.0) or 0.0),
-                          "refill_at": refill_at, "task_id": await self.store.get_kv("humidifier_refill_task")}
+                          "refill_at": refill_at, "task_id": await self.store.get_kv("humidifier_refill_task"),
+                          "dry": bool(await self.store.get_kv("humidifier_dry", False)),
+                          "prev": await self.store.get_kv("humidifier_tank_prev", None)}
         return self._tank
 
     async def tank_status(self) -> Optional[dict]:
         tk = await self._tank_load()
         hours = float((await self.settings()).get("humidifier_tank_hours") or 4.0)
-        return {"run_hours_since_refill": round(tk["run_s"] / 3600.0, 2), "tank_hours": hours,
-                "refill_at": tk["refill_at"], "refill_task_id": tk["task_id"]}
+        used = tk["run_s"] / 3600.0
+        return {"run_hours_since_refill": round(used, 2), "tank_hours": hours,
+                "hours_left": 0.0 if tk["dry"] else round(max(0.0, hours - used), 1),
+                "percent_left": 0 if tk["dry"] else int(round(max(0.0, 1 - used / hours) * 100)),
+                "dry": tk["dry"], "refill_at": tk["refill_at"], "refill_task_id": tk["task_id"]}
 
     async def _tank_tracker(self, ctx: ControlContext) -> None:
         hum = ctx.devices.get("humidifier")
@@ -886,28 +981,53 @@ class Controller:
         if tk["task_id"]:
             task = await self.store.get_task(tk["task_id"])
             if not task or task["status"] != "open":
-                await self._tank_reset("Tank marked as refilled")
+                # ticked off: counter restarts, but keep what it was in case the tick was a slip
+                prev = {"task_id": tk["task_id"], "run_s": tk["run_s"], "dry": tk["dry"], "at": iso(utcnow())}
+                await self._tank_reset("Refill ticked off")
+                tk["prev"] = prev
+                await self.store.set_kv("humidifier_tank_prev", prev)
                 return
+        elif tk.get("prev"):
+            prev = tk["prev"]
+            at = parse_iso(prev.get("at"))
+            task = await self.store.get_task(prev["task_id"]) if prev.get("task_id") else None
+            if task and task["status"] == "open" and at and (utcnow() - at).total_seconds() < 6 * 3600:
+                # the refill task was reopened: it was ticked by mistake, so put the counter back
+                tk.update(run_s=prev["run_s"], dry=prev["dry"], task_id=prev["task_id"], prev=None)
+                await self.store.set_kv("humidifier_run_s", tk["run_s"])
+                await self.store.set_kv("humidifier_dry", tk["dry"])
+                await self.store.set_kv("humidifier_refill_task", tk["task_id"])
+                await self.store.set_kv("humidifier_tank_prev", None)
+                await self.store.add_event("info", "device", "Refill task reopened: humidifier water counter restored.")
+                return
+            if not at or (utcnow() - at).total_seconds() >= 6 * 3600:
+                tk["prev"] = None
+                await self.store.set_kv("humidifier_tank_prev", None)
         now = utcnow()
         if hum.state == "on" and self.last_cycle_at:
             tk["run_s"] += min(600.0, max(0.0, (now - self.last_cycle_at).total_seconds()))
             await self.store.set_kv("humidifier_run_s", tk["run_s"])
         hours = float((await self.settings()).get("humidifier_tank_hours") or 4.0)
         if tk["run_s"] >= 0.8 * hours * 3600.0 and not tk["task_id"]:
-            await self._tank_alert(f"about {tk['run_s'] / 3600.0:.1f} h of misting since the last fill")
+            await self._tank_alert(f"it has misted about {tk['run_s'] / 3600.0:.1f} h since the last fill", ctx.now_local)
 
-    async def _tank_alert(self, why: str) -> None:
+    async def _tank_alert(self, why: str, now_local: Optional[datetime] = None) -> None:
         tk = await self._tank_load()
         if tk["task_id"]:
             return
+        due = (now_local or datetime.now(timezone.utc)).date().isoformat()
         task = await self.store.add_task(
             "Refill the humidifier tank",
-            f"Humidifier: {why}. Tick this off once it's filled and the counter starts again.",
-            utcnow().date().isoformat(), "high", "system")
+            f"The humidifier is probably low ({why}). Unplug it or lift the tank off, fill it with room-temperature "
+            f"water away from the power strip, dry any spills, put it back, then tick this off.",
+            due, "high", "system")
         tk["task_id"] = task["id"]
         await self.store.set_kv("humidifier_refill_task", task["id"])
-        await self.store.add_event("warn", "device", f"Humidifier tank is probably low: {why}. Refill it.")
         await self.notifier.send("tank", f"Refill the humidifier tank: {why}.", hours=12, title="Grow tent", everyone=True)
+        await self.store.add_event("warn", "device", f"Humidifier tank is probably low: {why}. Refill it.")
+
+    async def refilled(self, why: str = "Marked as refilled") -> None:
+        await self._tank_reset(why)
 
     async def _tank_reset(self, why: str) -> None:
         tk = await self._tank_load()
@@ -916,12 +1036,32 @@ class Controller:
             task = await self.store.get_task(tk["task_id"])
             if task and task["status"] == "open":
                 await self.store.set_task_status(tk["task_id"], "done")
-        tk.update(run_s=0.0, refill_at=now, task_id=None)
+        tk.update(run_s=0.0, refill_at=now, task_id=None, dry=False)
         await self.store.set_kv("humidifier_run_s", 0.0)
         await self.store.set_kv("humidifier_refill_at", now)
         await self.store.set_kv("humidifier_refill_task", None)
+        await self.store.set_kv("humidifier_dry", False)
         await self.store.resolve_alerts("device", "Humidifier tank is probably low")
-        await self.store.add_event("info", "device", f"{why}: misting counter reset.")
+        await self.store.resolve_alerts("device", "Humidifier is switched on but drawing")
+        await self.store.add_event("info", "device", f"{why}: humidifier water counter reset.")
+
+    async def _save_flags(self) -> None:
+        await self._safe(self.store.set_kv("alert_flags", {
+            "safety": self._safety_kind, "stale": self._stale_reported, "climate": self._climate_alert,
+            "unavailable": sorted(self._unavail_alerted), "cmd": sorted(self._cmd_alerted)}), "flags")
+
+    async def _load_flags(self) -> None:
+        self._flags_loaded = True
+        f = await self.store.get_kv("alert_flags", {}) or {}
+        self._safety_kind = f.get("safety")
+        self._stale_reported = bool(f.get("stale"))
+        self._climate_alert = bool(f.get("climate"))
+        self._unavail_alerted = set(f.get("unavailable") or [])
+        self._cmd_alerted = set(f.get("cmd") or [])
+        # alerts left open by an old version that didn't remember its flags
+        if not self._safety_kind and not self.safety_latch:
+            for prefix in ("OVERHEATING", "TOO COLD", "HUMIDITY CRITICAL"):
+                await self.store.resolve_alerts("safety", prefix)
 
     async def _restore_switch_times(self) -> None:
         """After a restart, pick up when each device was last switched so pulses and rests carry on."""
@@ -1012,37 +1152,49 @@ class Controller:
             await self.store.set_kv("energy_baselines", stored)
 
     async def _power_watchdog(self, dmap: dict[str, str]) -> None:
-        """A device that is switched ON but draws no power is broken, unplugged, or (humidifier) out of water."""
+        """A device that is switched ON but draws no power is broken, unplugged, or (humidifier) out of water.
+        The humidifier only runs short pulses, so it gets a short grace period and a 'dry' flag that is only
+        cleared by a later pulse that does draw power (that's the refill)."""
         now = utcnow()
         for role in SWITCH_ROLES:
             eid = dmap.get(role)
             st = self.states.get(eid) if eid else None
             if not st or st.get("state") != "on":
                 self._on_since.pop(role, None)
-                if self._power_warned.pop(role, None):
+                if role != "humidifier" and self._power_warned.pop(role, None):
                     await self.store.resolve_alerts("device", f"{ROLE_BY_NAME[role].label} is switched on but drawing")
                 continue
             self._on_since.setdefault(role, now)
             w = self.power_w(role, dmap)
-            if w is None or (now - self._on_since[role]).total_seconds() < POWER_GRACE_S:
+            grace = HUMIDIFIER_POWER_GRACE_S if role == "humidifier" else POWER_GRACE_S
+            if w is None or (now - self._on_since[role]).total_seconds() < grace:
                 continue
-            if w < LOW_POWER_W.get(role, 3.0):
+            low = w < LOW_POWER_W.get(role, 3.0)
+            if role == "humidifier":
+                tk = await self._tank_load()
+                if low and not tk["dry"]:
+                    tk["dry"] = True
+                    await self.store.set_kv("humidifier_dry", True)
+                    msg = "Humidifier tank is probably empty: it is switched on but drawing no power. Refill it."
+                    await self.notifier.send("power:humidifier", msg, hours=12, title="Grow tent", everyone=True)
+                    await self.store.add_event("warn", "device", "Humidifier is switched on but drawing only "
+                                                                 f"{w:g} W: tank empty or unplugged?")
+                    await self._tank_alert("it stopped misting")
+                elif not low and tk["dry"]:
+                    await self._tank_reset("The humidifier is misting again, so the tank was refilled")
+                continue
+            if low:
                 last = self._power_warned.get(role)
                 if last and (now - last).total_seconds() < 3600:
                     continue
                 label = ROLE_BY_NAME[role].label
-                hint = {"humidifier": "tank empty or unplugged?", "light": "driver/bulb dead or unplugged?"}.get(role, "unplugged or broken?")
-                msg = f"{label} is switched on but drawing only {w:g} W — {hint}"
+                hint = {"light": "driver or light dead, or unplugged?"}.get(role, "unplugged or broken?")
+                msg = f"{label} is switched on but drawing only {w:g} W: {hint}"
+                await self.notifier.send(f"power:{role}", msg, hours=6, title="Grow tent", everyone=True)
                 await self.store.add_event("warn", "device", msg)
-                await self.notifier.send(f"power:{role}", msg, hours=1, title="Grow tent", everyone=True)
                 self._power_warned[role] = now
-                if role == "humidifier":
-                    await self._tank_alert("it has run dry")
-            else:
-                if self._power_warned.pop(role, None):
-                    await self.store.resolve_alerts("device", f"{ROLE_BY_NAME[role].label} is switched on but drawing")
-                    if role == "humidifier":
-                        await self._tank_reset("Humidifier is drawing power again, so the tank was refilled")
+            elif self._power_warned.pop(role, None):
+                await self.store.resolve_alerts("device", f"{ROLE_BY_NAME[role].label} is switched on but drawing")
 
     async def _report_safety(self, ctx: ControlContext, decisions: dict[str, Decision], results: dict[str, str]) -> None:
         s = ctx.sensor
@@ -1081,7 +1233,6 @@ class Controller:
 
     async def run(self) -> None:
         await self._safe(self.store.add_event("info", "system", "Grow Brain started"), "event")
-        n = 0
         while True:
             interval = 30
             try:
@@ -1092,9 +1243,6 @@ class Controller:
                     await self._safe(self.store.add_event("info", "system", "Tent automation is running normally again."), "event")
                 self.consecutive_failures = 0
                 self._loop_alerted = False
-                n += 1
-                if n % 2880 == 0:  # roughly daily at 30 s
-                    await self._safe(self.store.prune(), "prune")
                 settings = await self.settings()
                 interval = int(settings.get("control_interval_s") or 30)
             except asyncio.CancelledError:
@@ -1140,6 +1288,18 @@ class Controller:
     async def stop(self) -> None:
         if self._task:
             self._task.cancel()
+        dmap = {}
+        try:
+            dmap = await asyncio.wait_for(self.store.get_device_map(), 2)
+        except Exception:
+            pass
+        for role in ("humidifier",) + tuple(r for r, tag in self.on_tag.items() if tag and r != "humidifier"):
+            eid = dmap.get(role)
+            if eid and self.states.get(eid, {}).get("state") == "on" and (role == "humidifier" or self.on_tag.get(role)):
+                try:
+                    await asyncio.wait_for(self.ha.turn(eid, False), 3)
+                except Exception:
+                    pass
 
     # ---- status for the API ----
     async def device_statuses(self) -> list[dict]:
@@ -1168,6 +1328,12 @@ class Controller:
                 "available": bool(st) and st["state"] not in ("unavailable", "unknown"),
             })
         return out
+
+
+def _phase_of(stage: str, day_in_stage: int) -> str:
+    if stage == "flower":
+        return "flower:stretch" if day_in_stage < 21 else "flower:bulk" if day_in_stage < 49 else "flower:ripen"
+    return stage
 
 
 def _pdate(s: str | None):

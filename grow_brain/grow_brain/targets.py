@@ -58,10 +58,14 @@ class Targets:
 
     def for_night(self) -> "Targets":
         """Targets to enforce while lights are off (cooler band, same humidity band)."""
+        drop = self.night_temp_drop_c
+        if not drop:
+            return replace(self, note=(self.note + " " if self.note else "") + "(night band)")
         return replace(
             self,
-            temp_min_c=round(self.temp_min_c - self.night_temp_drop_c, 1),
-            temp_max_c=round(self.temp_max_c - self.night_temp_drop_c + 1.0, 1),
+            # a basement tent with no heater sits near 18-20 °C at night, which plants handle fine
+            temp_min_c=round(min(self.temp_min_c - drop, 18.0), 1),
+            temp_max_c=round(self.temp_max_c - drop + 1.0, 1),
             note=(self.note + " " if self.note else "") + "(night band)",
         )
 
@@ -77,7 +81,8 @@ BOUNDS = {
     "light_hours": (0.0, 24.0),
 }
 
-ADJUSTABLE_BY_ADVISOR = {"temp_min_c", "temp_max_c", "humidity_min", "humidity_max", "vpd_min", "vpd_max"}
+# VPD is shown to the growers but the controller doesn't act on it, so the advisor can't "fix" it by moving a number.
+ADJUSTABLE_BY_ADVISOR = {"temp_min_c", "temp_max_c", "humidity_min", "humidity_max"}
 
 
 def stage_defaults(stage: str, day_in_stage: int = 0, light_on_time: str = "06:00") -> Targets:

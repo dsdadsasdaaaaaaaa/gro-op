@@ -57,7 +57,10 @@ async def env(tmp_path: Path):
     await store.add_plant(name="Dad's plant", owner="Dad", start_date="2026-09-19", notify_service="notify.dad")
     adv = Advisor(store, controller, "sk-test", "claude-opus-5", notifier, tmp_path)
     fake = FakeParse()
-    adv.client = SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(parse=fake)))
+    client = SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(parse=fake)))
+    client.with_options = lambda **k: (fake.options.append(k), client)[1]
+    fake.options = []
+    adv.client = client
     yield store, adv, fake
     await store.close()
     await ha.close()
@@ -148,3 +151,62 @@ def test_task_dedupe_catches_rewordings_but_not_different_jobs():
     assert _similar(_words("Put a clear dome over Levi's cup"), _words("Dome over the cup"))
     assert not _similar(_words("Check the towel"), _words("Check the cup"))
     assert not _similar(_words("Refill the humidifier tank"), _words("Level the LED panel"))
+
+
+
+async def test_second_nudge_the_same_day_is_capped(env):
+    store, adv, fake = env
+    await adv.daily_brief()                   # humidity_max 65 → 60 (the full 5-point daily budget)
+    await adv.daily_brief()                   # asks for 40 again: nothing left today
+    t, _, _ = await adv.controller.effective_targets()
+    assert t.humidity_max == 60.0
+
+
+async def test_fahrenheit_slip_and_system_tasks_and_budget(env):
+    store, adv, fake = env
+    await store.set_kv("settings", {"units": "f"})
+    fake.next = BriefOut.model_validate({**DEFAULTS[BriefOut], "target_changes": [{"field": "temp_max_c", "to": 80.0, "reason": "°F slip"}]})
+    brief = await adv.daily_brief()
+    ch = brief["target_changes"][0]
+    assert ch["to"] < ch["from"] + 0.01 or abs(ch["to"] - 26.7) < 1.5     # 80 °F read as 26.7 °C, never "raise to 32 °C"
+    # the advisor can't tick off the app's own refill task
+    task = await store.add_task("Refill the humidifier tank", "x", None, "high", "system")
+    fake.next = LogAdviceOut.model_validate({**DEFAULTS[LogAdviceOut], "tasks_done": [task["id"]]})
+    await adv.advise_on_log(await store.add_log_entry("note", None, None, None, "hi", 1))
+    assert (await store.get_task(task["id"]))["status"] == "open"
+    # a spent budget stops calls with a plain message
+    await store.set_kv("settings", {"advisor_budget_usd": 0.01})
+    await store.add_usage("brief", "claude-opus-5", 1, 0, 0, 1, 1.0)
+    fake.next = None
+    with pytest.raises(AdvisorError, match="budget"):
+        await adv.daily_brief()
+
+
+async def test_interactive_calls_fail_fast_and_cost_is_recorded_on_cutoff(env):
+    store, adv, fake = env
+    await adv.chat("hello", 1)
+    assert fake.options and fake.options[-1]["max_retries"] == 0
+    orig = fake.__call__
+
+    async def cut(**kwargs):
+        fake.calls.append(kwargs)
+        return SimpleNamespace(stop_reason="max_tokens", parsed_output=None, content=[], model="claude-opus-5",
+                               usage=SimpleNamespace(input_tokens=100, output_tokens=16000, cache_read_input_tokens=0))
+    adv.client.beta.messages.parse = cut
+    before = (await store.usage_summary("2000-01-01"))["calls"]
+    with pytest.raises(AdvisorError, match="cut off"):
+        await adv.chat("long question", 1)
+    assert (await store.usage_summary("2000-01-01"))["calls"] == before + 1
+
+
+def test_sdk_accepts_the_arguments_the_advisor_sends():
+    """Catch a renamed SDK argument in CI instead of in the growers' tent."""
+    import inspect
+    import anthropic
+    client = anthropic.AsyncAnthropic(api_key="x")
+    sig = inspect.signature(client.beta.messages.parse)
+    params = sig.parameters
+    for name in ("model", "max_tokens", "system", "messages", "output_format", "output_config", "betas"):
+        assert name in params, name
+    assert "fallbacks" in params or any(p.kind == p.VAR_KEYWORD for p in params.values())
+    assert hasattr(client, "with_options")

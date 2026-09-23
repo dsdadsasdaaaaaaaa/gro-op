@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import hmac
 import io
 import logging
+import re
 import mimetypes
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -33,10 +36,37 @@ def deps(request: Request):
     return request.app.state
 
 
+_calls: dict[str, list[float]] = {}
+
+
+def check_rate(name: str, per: int, seconds: float) -> None:
+    import time
+    now = time.monotonic()
+    recent = [t for t in _calls.get(name, []) if now - t < seconds]
+    if len(recent) >= per:
+        raise HTTPException(429, "That's a lot of requests in a short time. Give it a little while and try again.")
+    recent.append(now)
+    _calls[name] = recent
+
+
+def rate_limit(name: str, per: int, seconds: float):
+    """A dependency that refuses more than `per` calls in `seconds` (paid Claude calls, mostly)."""
+    async def dep():
+        check_rate(name, per, seconds)
+    return Depends(dep)
+
+
+def via_ingress(request: Request) -> bool:
+    """Requests through Home Assistant's ingress were already authenticated by Home Assistant."""
+    return bool(request.headers.get("x-ingress-path")) and (request.client is not None and request.client.host == "172.30.32.2")
+
+
 async def require_key(request: Request):
     st = request.app.state
-    key = request.headers.get("x-api-key") or request.query_params.get("api_key")
-    if key != st.boot.api_key:
+    if via_ingress(request):
+        return
+    key = request.headers.get("x-api-key") or request.query_params.get("api_key") or ""
+    if not hmac.compare_digest(key.encode(), (st.boot.api_key or "").encode()):
         raise HTTPException(401, "Invalid or missing X-API-Key")
 
 
@@ -101,7 +131,7 @@ async def delete_plant(pid: int, request: Request):
     if not p:
         raise HTTPException(404, "No such plant")
     await st.store.archive_plant(pid)
-    await st.store.add_event("info", "system", f"Plant removed: {p['name']}")
+    await st.store.add_event("info", "system", f"Plant removed: {p['name']} (its journal and photos are kept)")
     return {"ok": True}
 
 
@@ -160,9 +190,9 @@ async def status(request: Request):
     devices = await c.device_statuses()
     light_dev = next((d for d in devices if d["role"] == "light"), None)
     light_is_on = light_dev["state"] == "on" if light_dev and light_dev["state"] in ("on", "off") else scheduled_on
-    active_targets = day_targets if light_is_on else day_targets.for_night()
     paused = await c.paused_until()
     standby = await c.standby()
+    active_targets = day_targets if (light_is_on or standby) else day_targets.for_night()
     harvest = None
     if profile.get("flower_start_date"):
         try:
@@ -190,14 +220,15 @@ async def status(request: Request):
         "ha_connected": c.ha_ok,
         "sensor": c.sensor.to_api(),
         "grow": {**profile, "day_in_stage": day_in_stage, "day_total": day_total, "expected_harvest_date": harvest},
-        "targets": active_targets.to_api(),
+        "targets": {**active_targets.to_api(), "band": "day" if (light_is_on or standby) else "night"},
+        "day_targets": day_targets.to_api(),
         "light": {"is_on": light_is_on, "next_change_at": iso(next_change), "schedule": _sched(day_targets.light_hours)},
         "devices": devices,
         "assessment": await _assessment(c, active_targets, c.sensor, paused, settings.get("units", "c"), standby),
         "standby": standby,
         "open_tasks": len(await st.store.tasks("open")),
         "open_photo_requests": len(await st.store.photo_requests("open")),
-        "unread_brief": await st.store.unread_brief(),
+        "unread_brief": await st.store.unread_brief(request.headers.get("x-device-id")),
         "alerts": alerts,
         "control_paused_until": paused,
         "learned": dict(c.learned),
@@ -223,11 +254,29 @@ async def plan(request: Request, plant_id: Optional[int] = None):
         except ValueError:
             pass
     entries = await st.store.log_entries(300)
-    planted = any((e["kind"] == "transplant" or (e.get("context") or "").lower() in ("planted", "planting"))
-                  and (plant is None or e.get("plant_id") in (None, plant["id"]))
-                  for e in entries if e["created_at"][:10] >= (profile.get("stage_started") or "0000"))
-    out = build_plan(profile, today, day_in_stage, day_total, planted)
+    tz = c.tz(settings)
+    planted_on = None
+    for e in sorted(entries, key=lambda e: e["created_at"]):
+        if (e["kind"] in ("planted", "transplant") or (e.get("context") or "").lower() in ("planted", "planting")) \
+                and (plant is None or e.get("plant_id") in (None, plant["id"])):
+            ts = parse_iso(e["created_at"])
+            planted_on = ts.astimezone(tz).date() if ts else None
+            break
+    planted = planted_on is not None
+    out = build_plan(profile, today, day_in_stage, day_total, planted, planted_on)
     out["plant_id"] = plant["id"] if plant else None
+    out["planted_on"] = planted_on.isoformat() if planted_on else None
+    # the current phase shows the targets the tent is really running, and nothing about ducting it already has
+    live, _, _ = await c.effective_targets(profile, settings)
+    for ph in out["phases"]:
+        if ph["status"] == "current" and live.light_hours > 0:
+            unit = settings.get("units", "c")
+            f = (lambda v: f"{v * 9 / 5 + 32:.0f}") if unit == "f" else (lambda v: f"{v:g}")
+            ph["environment"] = (f"{f(live.temp_min_c)}–{f(live.temp_max_c)} °{unit.upper()} day, "
+                                 f"{live.humidity_min:g}–{live.humidity_max:g} % RH, {live.light_hours:g} h light")
+        # a date that has already passed while the phase hasn't started reads as "when ready"
+        if ph["status"] == "upcoming" and ph.get("start_date") and ph["start_date"] < today.isoformat():
+            ph["start_date"] = today.isoformat()
     return out
 
 
@@ -291,25 +340,35 @@ async def energy(request: Request):
 async def backup(request: Request):
     """Zip of the database plus photos (camera timelapse frames are excluded; they regenerate)."""
     import zipfile
-    st = request.app.state
-    buf = io.BytesIO()
-    db_path = Path(st.store.path)
-    # a consistent copy of the live SQLite file
     import sqlite3
-    tmp = db_path.with_suffix(".backup.sqlite")
-    src = sqlite3.connect(db_path)
-    dst = sqlite3.connect(tmp)
-    with dst:
-        src.backup(dst)
-    src.close(); dst.close()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        z.write(tmp, "grow_brain.sqlite")
-        for p in sorted(Path(st.photo_dir).glob("*.jpg")):
-            z.write(p, f"photos/{p.name}")
-    tmp.unlink(missing_ok=True)
-    buf.seek(0)
+    import tempfile
+    st = request.app.state
+    db_path = Path(st.store.path)
+    photo_dir = Path(st.photo_dir)
+
+    def build() -> str:
+        # runs in a worker thread so the control loop keeps running while a big backup is zipped
+        tmp_db = db_path.with_suffix(".backup.sqlite")
+        src = sqlite3.connect(db_path)
+        dst = sqlite3.connect(tmp_db)
+        with dst:
+            src.backup(dst)
+        src.close(); dst.close()
+        fd, zpath = tempfile.mkstemp(suffix=".zip", dir=str(db_path.parent))
+        import os
+        os.close(fd)
+        with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
+            z.write(tmp_db, "grow_brain.sqlite")
+            for p in sorted(photo_dir.glob("*.jpg")):
+                z.write(p, f"photos/{p.name}")
+        tmp_db.unlink(missing_ok=True)
+        return zpath
+
+    zpath = await asyncio.to_thread(build)
     name = f"growop-backup-{datetime.now().strftime('%Y-%m-%d')}.zip"
-    return StreamingResponse(buf, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{name}"'})
+    from starlette.background import BackgroundTask
+    return FileResponse(zpath, media_type="application/zip", filename=name,
+                        background=BackgroundTask(lambda: Path(zpath).unlink(missing_ok=True)))
 
 
 # ------------------------------------------------------------------ devices
@@ -328,6 +387,12 @@ async def map_device(role: str, body: DeviceMapUpdate, request: Request):
     st = request.app.state
     if role not in ROLE_BY_NAME:
         raise HTTPException(404, f"Unknown role {role}")
+    if body.entity_id:
+        domain = body.entity_id.split(".", 1)[0]
+        allowed = ({"switch", "fan", "humidifier", "light"} if role == "light" else {"switch", "fan", "humidifier"}) \
+            if ROLE_BY_NAME[role].kind == "switch" else {"sensor"}
+        if domain not in allowed or not re.fullmatch(r"[a-z_]+\.[a-z0-9_]+", body.entity_id):
+            raise HTTPException(422, f"{ROLE_BY_NAME[role].label} can't be a {domain} entity.")
     await st.store.set_device(role, body.entity_id)
     st.controller.last_reasons.pop(role, None)
     await st.store.add_event("info", "system", f"{ROLE_BY_NAME[role].label} mapped to {body.entity_id or 'nothing'}")
@@ -345,9 +410,13 @@ async def override(role: str, body: OverrideRequest, request: Request):
     if body.mode in ("on", "off"):
         dmap = await st.store.get_device_map()
         if dmap.get(role):
-            await st.controller.ha.turn(dmap[role], body.mode == "on")
+            if not await st.controller.ha.turn(dmap[role], body.mode == "on"):
+                raise HTTPException(502, f"Home Assistant couldn't switch the {ROLE_BY_NAME[role].label.lower()}. Check its plug.")
             st.controller.states.setdefault(dmap[role], {})["state"] = body.mode
             st.controller.last_switched[role] = utcnow()
+            st.controller.on_tag.pop(role, None)
+            st.controller.on_reading.pop(role, None)
+            await st.store.log_device(role, body.mode, "set by hand")
     return next(d for d in await st.controller.device_statuses() if d["role"] == role)
 
 
@@ -366,7 +435,8 @@ async def ha_automap(request: Request):
         ents = await st.controller.ha.list_candidates()
     except Exception as e:
         raise HTTPException(502, f"Home Assistant not reachable: {e}")
-    mapping = automap(ents)
+    current = await st.store.get_device_map()
+    mapping = {r: e for r, e in automap(ents).items() if not current.get(r)}   # only fill empty roles
     for role, eid in mapping.items():
         await st.store.set_device(role, eid)
     await st.store.add_event("info", "system", "Auto-mapped devices: " + ", ".join(f"{ROLE_BY_NAME[r].label}={e}" for r, e in mapping.items()))
@@ -404,9 +474,7 @@ async def set_stage(body: StageChange, request: Request):
         profile.start_date = today
     await st.store.set_kv("grow_profile", profile.model_dump())
     old = await st.store.get_kv("targets_override", None) or {}
-    await st.store.del_kv("targets_override")
-    if old.get("light_on_time"):
-        await st.store.set_kv("targets_override", {"values": {}, "source": "stage_default", "light_on_time": old["light_on_time"]})
+    await st.store.set_kv("targets_override", {"values": {}, "source": "stage_default", "light_on_time": old.get("light_on_time", "06:00")})
     await st.store.add_event("info", "system", f"Stage changed to {body.stage}; targets reset to stage defaults")
     return profile.model_dump()
 
@@ -439,9 +507,8 @@ async def put_targets(body: TargetsUpdate, request: Request):
 async def reset_targets(request: Request):
     st = request.app.state
     old = await st.store.get_kv("targets_override", None) or {}
-    await st.store.del_kv("targets_override")
-    if old.get("light_on_time"):
-        await st.store.set_kv("targets_override", {"values": {}, "source": "stage_default", "light_on_time": old["light_on_time"]})
+    await st.store.set_kv("targets_override", {"values": {}, "source": "stage_default", "light_on_time": old.get("light_on_time", "06:00")})
+    await st.store.add_event("info", "system", "Targets reset to the stage defaults")
     t, _, _ = await st.controller.effective_targets()
     return t.to_api()
 
@@ -472,6 +539,12 @@ async def put_settings(body: SettingsUpdate, request: Request):
     st = request.app.state
     current = await st.store.get_kv("settings", {}) or {}
     upd = body.model_dump(exclude_unset=True)
+    if upd.get("model"):
+        from .advisor import MODELS
+        if upd["model"] not in MODELS:
+            raise HTTPException(422, "Pick one of: " + ", ".join(MODELS))
+    if "advisor_budget_usd" in upd and upd["advisor_budget_usd"] is not None and not (1 <= float(upd["advisor_budget_usd"]) <= 500):
+        raise HTTPException(422, "The monthly advisor budget must be between $1 and $500.")
     if "brief_time" in upd and upd["brief_time"] is not None:
         norm = valid_hhmm(upd["brief_time"])
         if norm is None:
@@ -500,7 +573,7 @@ async def pause(body: PauseRequest, request: Request):
     st = request.app.state
     until = iso(utcnow() + timedelta(minutes=max(1, min(body.minutes, 720))))
     await st.store.set_kv("control_paused_until", until)
-    await st.store.add_event("warn", "system", f"Automation paused for {body.minutes} min (safety limits still active)")
+    await st.store.add_event("info", "system", f"Automation paused for {body.minutes} min (safety limits still active)")
     return {"control_paused_until": until}
 
 
@@ -530,7 +603,10 @@ async def standby(request: Request):
                 st.controller.states.setdefault(eid, {})["state"] = "off"
                 st.controller.last_switched[role] = utcnow()
                 st.controller.last_reasons[role] = "tent in standby"
-    await st.store.add_event("warn", "system", "Tent put in standby: all devices off until you start it")
+                st.controller.on_tag.pop(role, None)
+                st.controller.on_reading.pop(role, None)
+                await st.store.log_device(role, "off", "tent in standby")
+    await st.store.add_event("info", "system", "Tent put in standby: all devices off until you start it")
     return {"standby": True}
 
 
@@ -542,10 +618,19 @@ async def start(request: Request):
     await st.store.del_kv("control_paused_until")
     for role in SWITCH_ROLES:
         await st.store.set_override(role, "auto", None)
+    ov = await st.store.get_kv("targets_override", None) or {}
+    if ov.get("source") == "advisor":   # nudges made for an empty tent don't carry over into the real grow
+        await st.store.set_kv("targets_override", {"values": {}, "source": "stage_default", "light_on_time": ov.get("light_on_time", "06:00")})
     await st.store.add_event("info", "system", "Tent started: automation fully on, manual overrides cleared")
     await st.store.resolve_alerts("system", "Automation paused")
     await st.store.resolve_alerts("system", "Tent put in standby")
     return {"standby": False, "control_paused_until": None}
+
+
+@router.post("/humidifier/refilled", dependencies=auth)
+async def humidifier_refilled(request: Request):
+    await request.app.state.controller.refilled("Humidifier refilled")
+    return await request.app.state.controller.tank_status()
 
 
 # ------------------------------------------------------------------ log
@@ -558,7 +643,12 @@ async def create_log(body: LogCreate, request: Request):
         plants = await st.store.plants()
         plant_id = plants[0]["id"] if len(plants) == 1 else None
     entry = await st.store.add_log_entry(body.kind, body.value, body.unit, body.context, body.note, plant_id)
-    advice = None
+    await _after_log(st, body.kind, plant_id)
+    if body.advise:
+        check_rate("log_advice", 40, 86400)
+    if not body.advise:
+        return {"entry": entry, "advice": {"summary": "Saved. The advisor reads it in the next daily brief.", "steps": [],
+                                           "urgency": "info", "photo_requests": [], "tasks": []}}
     if st.advisor.enabled:
         try:
             advice = await st.advisor.advise_on_log(entry)
@@ -566,9 +656,22 @@ async def create_log(body: LogCreate, request: Request):
         except AdvisorError as e:
             advice = {"summary": str(e), "steps": [], "urgency": "info", "photo_requests": [], "tasks": []}
     else:
-        advice = {"summary": "Logged. (Advisor is off: add an Anthropic API key to get advice.)", "steps": [],
+        advice = {"summary": "Saved. (The advisor is off: add an Anthropic API key to get advice.)", "steps": [],
                   "urgency": "info", "photo_requests": [], "tasks": []}
     return {"entry": entry, "advice": advice}
+
+
+async def _after_log(st, kind: str, plant_id: Optional[int]) -> None:
+    """Follow-ups the app handles itself, so nobody has to remember them."""
+    if kind == "transplant":
+        profile = await st.controller.profile()
+        if profile.get("stage") == "seedling":
+            open_titles = {t["title"] for t in await st.store.tasks("open")}
+            title = "Switch the stage to Veg"
+            if title not in open_titles:
+                await st.store.add_task(title, "The plants are in their big pots. Settings → Change stage → Veg, so the tent "
+                                               "switches to veg temperature, humidity and air exchange. Plug the two small lights "
+                                               "back in and turn the big one up first.", None, "high", "system", None)
 
 
 @router.get("/log", dependencies=auth)
@@ -590,9 +693,25 @@ async def create_task(body: TaskCreate, request: Request):
 
 @router.post("/tasks/{tid}/complete", dependencies=auth)
 async def complete_task(tid: int, request: Request):
-    t = await request.app.state.store.set_task_status(tid, "done")
+    st = request.app.state
+    before = await st.store.get_task(tid)
+    t = await st.store.set_task_status(tid, "done")
     if not t:
         raise HTTPException(404, "No such task")
+    if before and before["status"] == "open":
+        title = t["title"]
+        low = title.lower()
+        kind = "planted" if re.match(r"plant .*seed", low) else "transplant" if low.startswith("transplant") else "note"
+        await st.store.add_log_entry(kind, None, None, "task", f"Done: {title}", t.get("plant_id"))
+        await _after_log(st, kind, t.get("plant_id"))
+        if "dome" in low and "off" not in low:
+            tz = st.controller.tz(await st.controller.settings())
+            due = (datetime.now(tz).date() + timedelta(days=4)).isoformat()
+            plant = await st.store.get_plant(t["plant_id"]) if t.get("plant_id") else None
+            whose = f"{plant['name']}" if plant else "the seedlings"
+            await st.store.add_task(f"Take the dome off {whose}", "Lift the clear cup or bag off once the first true leaves "
+                                    "(the first jagged pair, not the round starter leaves) are open. Leaving it on longer "
+                                    "invites mould at the soil line.", due, "normal", "system", t.get("plant_id"))
     return t
 
 
@@ -621,7 +740,7 @@ async def skip_photo_request(rid: int, request: Request):
     return await st.store.get_photo_request(rid)
 
 
-@router.post("/photos", dependencies=auth)
+@router.post("/photos", dependencies=auth + [rate_limit("photos", 60, 86400)])
 async def upload_photo(request: Request, image: UploadFile = File(...), request_id: Optional[int] = Form(None),
                        note: Optional[str] = Form(None), plant_id: Optional[int] = Form(None)):
     st = request.app.state
@@ -644,10 +763,14 @@ async def upload_photo(request: Request, image: UploadFile = File(...), request_
     pid = await st.store.add_photo(request_id, note, "", plant_id)
     photo_dir: Path = st.photo_dir
     path = photo_dir / f"{pid}.jpg"
-    im.save(path, "JPEG", quality=88)
-    thumb = im.copy()
-    thumb.thumbnail((400, 400))
-    thumb.save(photo_dir / f"{pid}_thumb.jpg", "JPEG", quality=80)
+    try:
+        im.save(path, "JPEG", quality=88)
+        thumb = im.copy()
+        thumb.thumbnail((400, 400))
+        thumb.save(photo_dir / f"{pid}_thumb.jpg", "JPEG", quality=80)
+    except Exception as e:
+        await st.store.delete_photo_row(pid)
+        raise HTTPException(500, f"Couldn't save the photo on the grow brain ({e}). Is its disk full?")
     await st.store.db.execute("UPDATE photos SET path=? WHERE id=?", (str(path), pid))
     await st.store.db.commit()
 
@@ -679,7 +802,7 @@ async def list_photos(request: Request, limit: int = 30):
 @router.get("/photos/{pid}/image", dependencies=auth)
 async def photo_image(pid: int, request: Request):
     p = await request.app.state.store.get_photo(pid)
-    if not p or not Path(p["path"]).exists():
+    if not p or not p.get("path") or not Path(p["path"]).is_file():
         raise HTTPException(404, "No such photo")
     return FileResponse(p["path"], media_type="image/jpeg")
 
@@ -687,7 +810,7 @@ async def photo_image(pid: int, request: Request):
 @router.get("/photos/{pid}/thumb", dependencies=auth)
 async def photo_thumb(pid: int, request: Request):
     p = await request.app.state.store.get_photo(pid)
-    if not p:
+    if not p or not p.get("path"):
         raise HTTPException(404, "No such photo")
     t = Path(p["path"]).with_name(f"{pid}_thumb.jpg")
     if not t.exists():
@@ -702,7 +825,7 @@ async def get_brief(request: Request):
     return await request.app.state.store.latest_brief()
 
 
-@router.post("/brief/run", dependencies=auth)
+@router.post("/brief/run", dependencies=auth + [rate_limit("brief", 4, 86400)])
 async def run_brief(request: Request):
     st = request.app.state
     if not st.advisor.enabled:
@@ -715,11 +838,11 @@ async def run_brief(request: Request):
 
 @router.post("/brief/{bid}/read", dependencies=auth)
 async def read_brief(bid: int, request: Request):
-    await request.app.state.store.mark_brief_read(bid)
+    await request.app.state.store.mark_brief_read(bid, request.headers.get("x-device-id"))
     return {"ok": True}
 
 
-@router.post("/chat", dependencies=auth)
+@router.post("/chat", dependencies=auth + [rate_limit("chat", 40, 3600)])
 async def chat(body: ChatRequest, request: Request):
     st = request.app.state
     if not st.advisor.enabled:
@@ -735,7 +858,16 @@ async def chat(body: ChatRequest, request: Request):
 @router.get("/chat", dependencies=auth)
 async def chat_history(request: Request, limit: int = 50):
     rows = await request.app.state.store.chat_history(min(limit, 200))
-    return {"messages": [{"id": r["id"], "role": r["role"], "content": r["content"], "created_at": r["created_at"]} for r in rows]}
+    out = []
+    for r in rows:
+        content, author = r["content"], r.get("author")
+        m = re.match(r"^\[([^\]]{1,40})\] ", content) if r["role"] == "user" else None
+        if m:   # older rows kept the author inside the text
+            author = author or m.group(1)
+            content = content[m.end():]
+        out.append({"id": r["id"], "role": r["role"], "content": content, "created_at": r["created_at"],
+                    "author": author if r["role"] == "user" else "Advisor", "plant_id": r.get("plant_id")})
+    return {"messages": out}
 
 
 @router.delete("/chat", dependencies=auth)
@@ -755,6 +887,8 @@ async def camera_info(request: Request):
 @router.put("/camera", dependencies=auth)
 async def camera_select(body: CameraSelect, request: Request):
     st = request.app.state
+    if body.entity_id and not re.fullmatch(r"camera\.[a-z0-9_]+", body.entity_id):
+        raise HTTPException(422, "Pick a camera entity (camera.something).")
     cur = await st.store.get_kv("settings", {}) or {}
     cur["camera_entity"] = body.entity_id or ""
     await st.store.set_kv("settings", cur)
@@ -810,7 +944,7 @@ async def camera_frame(fid: int, request: Request):
     return FileResponse(fr["path"], media_type="image/jpeg")
 
 
-@router.post("/camera/analyse", dependencies=auth)
+@router.post("/camera/analyse", dependencies=auth + [rate_limit("look", 12, 86400)])
 async def camera_analyse(body: CameraAnalyse, request: Request):
     """Take a fresh snapshot and run it through the advisor like an uploaded photo."""
     st = request.app.state

@@ -39,16 +39,26 @@ async def brief_scheduler(app: FastAPI) -> None:
             now = datetime.now(tz)
             hh, mm = parse_hhmm(settings.get("brief_time"), "08:00")
             last = await st.store.get_kv("last_brief_date")
-            if st.advisor.enabled and (now.hour, now.minute) >= (hh, mm) and last != now.date().isoformat():
+            today = now.date().isoformat()
+            if st.advisor.enabled and (now.hour, now.minute) >= (hh, mm) and last != today and not await st.controller.standby():
                 dmap = await st.store.get_device_map()
-                if dmap.get("temperature_sensor"):
-                    await st.store.set_kv("last_brief_date", now.date().isoformat())
-                    log.info("Running daily brief")
+                att = await st.store.get_kv("brief_attempts", {}) or {}
+                tries, last_try = (att.get("n", 0), att.get("at")) if att.get("date") == today else (0, None)
+                due_retry = not last_try or (datetime.now(timezone.utc) - datetime.fromisoformat(last_try)).total_seconds() >= 20 * 60
+                if dmap.get("temperature_sensor") and tries < 3 and due_retry:
+                    await st.store.set_kv("brief_attempts", {"date": today, "n": tries + 1, "at": datetime.now(timezone.utc).isoformat()})
+                    log.info("Running daily brief (attempt %d)", tries + 1)
                     try:
                         await st.advisor.daily_brief()
+                        await st.store.set_kv("last_brief_date", today)
                     except Exception as e:
                         log.warning("daily brief failed: %s", e)
-                        await st.store.add_event("warn", "advisor", f"Daily brief failed: {e}")
+                        if tries + 1 >= 3:
+                            await st.store.set_kv("last_brief_date", today)
+                            await st.store.add_event("warn", "advisor", f"The morning brief couldn't be written today ({e}).")
+                            await st.notifier.send("brief_failed", "The morning brief couldn't be written today. The tent is "
+                                                   "still being controlled; ask the advisor in the app if you need anything.",
+                                                   hours=20, everyone=True)
         except Exception:
             log.exception("brief scheduler error")
         for tick in (_camera_check_tick, _nudge_tick, _update_check_tick):
@@ -64,6 +74,32 @@ REPO_CONFIG_URL = "https://raw.githubusercontent.com/dsdadsasdaaaaaaaa/gro-op/ma
 
 def _vtuple(v: str) -> tuple:
     return tuple(int(x) for x in re.findall(r"\d+", v))
+
+
+class _RedactKey(logging.Filter):
+    """Access-log lines include the query string; hide ?api_key=... there."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if record.args and isinstance(record.args, tuple):
+                record.args = tuple(re.sub(r"(api_key=)[^&\s\"]+", r"\1***", a) if isinstance(a, str) else a for a in record.args)
+        except Exception:
+            pass
+        return True
+
+
+async def _ci_passed() -> bool:
+    """True unless GitHub says the latest build of main failed (no answer counts as passed)."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get("https://api.github.com/repos/dsdadsasdaaaaaaaa/gro-op/commits/main/check-runs",
+                                 headers={"Accept": "application/vnd.github+json"})
+            if r.status_code != 200:
+                return True
+            runs = r.json().get("check_runs", [])
+        return not any(run.get("conclusion") in ("failure", "cancelled", "timed_out") for run in runs) and \
+            all(run.get("status") == "completed" for run in runs)
+    except Exception:
+        return True
 
 
 async def _update_check_tick(st) -> None:
@@ -97,10 +133,17 @@ async def _update_check_tick(st) -> None:
     if not latest:
         return
     if _vtuple(latest) > _vtuple(__version__):
+        if not await _ci_passed():
+            return          # a broken build would fail to install: wait for a good one
         if await st.store.get_kv("update_notified") != latest:
             await st.store.set_kv("update_notified", latest)
+            settings = await st.controller.settings()
+            admin = settings.get("admin_notify_service") or next(
+                (p.get("notify_service") for p in await st.store.plants() if p.get("notify_service")), None)
+            await st.notifier.send("update", f"Grow Brain {latest} is ready. Home Assistant → Settings → Add-ons → Grow Brain → Update.",
+                                   hours=24, service=admin, everyone=admin is None)
             await st.store.add_event("warn", "system",
-                                     f"Grow Brain {latest} is available (running {__version__}). Levi: Home Assistant → Settings → "
+                                     f"Grow Brain {latest} is available (running {__version__}). Home Assistant → Settings → "
                                      f"Add-ons → Grow Brain → Update.")
     else:
         await st.store.resolve_alerts("system", "Grow Brain ")
@@ -118,13 +161,25 @@ async def _camera_check_tick(st) -> None:
         return
     hh, mm = parse_hhmm(targets.light_on_time)
     minutes_since_on = ((now.hour * 60 + now.minute) - (hh * 60 + mm)) % (24 * 60)
-    if not (60 <= minutes_since_on < 62):
+    if not (60 <= minutes_since_on < 120):
         return
-    if await st.store.get_kv("last_camera_check_date") == now.date().isoformat():
+    today = now.date().isoformat()
+    if await st.store.get_kv("last_camera_check_date") == today:
         return
-    await st.store.set_kv("last_camera_check_date", now.date().isoformat())
-    log.info("Running daily camera check")
-    await st.advisor.camera_check()
+    att = await st.store.get_kv("camera_check_attempts", {}) or {}
+    tries = att.get("n", 0) if att.get("date") == today else 0
+    if tries >= 3 or (att.get("date") == today and att.get("minute", -99) > minutes_since_on - 15):
+        return
+    await st.store.set_kv("camera_check_attempts", {"date": today, "n": tries + 1, "minute": minutes_since_on})
+    log.info("Running daily camera check (attempt %d)", tries + 1)
+    try:
+        await st.advisor.camera_check()
+        await st.store.set_kv("last_camera_check_date", today)
+    except Exception as e:
+        log.warning("camera check failed: %s", e)
+        if tries + 1 >= 3:
+            await st.store.set_kv("last_camera_check_date", today)
+            await st.store.add_event("info", "advisor", f"The daily camera check couldn't run today ({e}).")
 
 
 async def _nudge_tick(st) -> None:
@@ -134,14 +189,33 @@ async def _nudge_tick(st) -> None:
     if last == hour_key:
         return
     await st.store.set_kv("last_nudge_hour", hour_key)
+    await st.store.expire_photo_requests(days=7)
     plants = {p["id"]: p for p in await st.store.plants()}
     for pr in await st.store.photo_requests_to_nudge(older_than_hours=48, nudge_gap_hours=24):
         plant = plants.get(pr.get("plant_id"))
         who = f" for {plant['name']}" if plant else ""
         svc = plant.get("notify_service") if plant else None
+        url = f"growop://photos?plant={plant['id']}" if plant else "growop://photos"
         await st.notifier.send(f"nudge:{pr['id']}", f"Still waiting for a photo{who}: {pr['title']}", title="Photo request",
-                               url="growop://photos", service=svc, everyone=svc is None)
+                               url=url, service=svc, everyone=svc is None)
         await st.store.mark_nudged(pr["id"])
+    await _stage_backstop(st)
+
+
+async def _stage_backstop(st) -> None:
+    """Three and a half weeks as seedlings: remind them to transplant and switch the stage, once."""
+    profile = await st.controller.profile()
+    if profile.get("stage") != "seedling" or await st.controller.standby():
+        return
+    _, day_in_stage, _ = await st.controller.effective_targets(profile)
+    if day_in_stage < 24 or await st.store.get_kv("veg_backstop_sent"):
+        return
+    await st.store.set_kv("veg_backstop_sent", True)
+    open_titles = {t["title"] for t in await st.store.tasks("open")}
+    if "Switch the stage to Veg" not in open_titles:
+        await st.store.add_task("Switch the stage to Veg", "The seedlings are over three weeks old. Once they're in their 11 L "
+                                "pots: plug the two small lights back in, turn the big one up, then Settings → Change stage → Veg.",
+                                None, "normal", "system", None)
 
 
 @asynccontextmanager
@@ -150,6 +224,7 @@ async def lifespan(app: FastAPI):
     logging.basicConfig(level=getattr(logging, boot.log_level, logging.INFO),
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.access").addFilter(_RedactKey())
     log.info("Grow Brain %s starting (add-on=%s, HA=%s, model=%s, data=%s)", __version__, boot.in_addon, boot.ha_url, boot.model, boot.data_dir)
     if not boot.anthropic_api_key:
         log.warning("No Anthropic API key set: the advisor (briefs, photo analysis, chat, log advice) is OFF.")

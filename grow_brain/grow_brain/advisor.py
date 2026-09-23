@@ -30,18 +30,26 @@ T = TypeVar("T", bound=BaseModel)
 
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
-# USD per million tokens: (input, output, cache read, cache write). Unknown models fall back to Opus 5 pricing.
+# USD per million tokens: (input, output, cache read, cache write 5 min). Anthropic first-party list prices.
 PRICES = {
+    "claude-fable-5-1": (10.0, 50.0, 0.25, 12.5),
+    "claude-fable-5": (10.0, 50.0, 1.0, 12.5),
+    "claude-opus-5-5": (4.0, 20.0, 0.2, 5.0),
     "claude-opus-5": (5.0, 25.0, 0.5, 6.25),
     "claude-opus-4-8": (5.0, 25.0, 0.5, 6.25),
+    "claude-opus-4-7": (5.0, 25.0, 0.5, 6.25),
+    "claude-opus-4-6": (5.0, 25.0, 0.5, 6.25),
     "claude-sonnet-5": (2.0, 10.0, 0.2, 2.5),
+    "claude-sonnet-4-6": (3.0, 15.0, 0.3, 3.75),
     "claude-haiku-4-5": (1.0, 5.0, 0.1, 1.25),
-    "claude-fable-5-1": (10.0, 50.0, 1.0, 12.5),
 }
+MODELS = list(PRICES)
+NO_EFFORT = {"claude-haiku-4-5"}          # this model rejects output_config.effort
+INTERACTIVE = {"chat", "log", "photo", "look_now"}   # a person is waiting on a phone (app timeout 90 s)
 
 
 def _cost(model: str, inp: int, out: int, cache_read: int, cache_write: int) -> float:
-    p = PRICES.get(model) or PRICES["claude-opus-5"]
+    p = PRICES.get(model) or next((v for k, v in PRICES.items() if model.startswith(k)), PRICES["claude-opus-5"])
     return (inp * p[0] + out * p[1] + cache_read * p[2] + cache_write * p[3]) / 1_000_000
 
 
@@ -88,6 +96,8 @@ class Advisor:
         today = now_local.date()
         lines.append("## Tent")
         lines.append(f"- Stage: {profile['stage']} (day {day_in_stage} of stage, since {profile.get('stage_started') or 'unknown'})")
+        from .plan import PHASES, current_phase_key
+        entries_all = await self.store.log_entries(300)
         lines += ["", "## Plants (use these ids in plant_id)"]
         for p in plants:
             from datetime import date as _date
@@ -95,7 +105,17 @@ class Advisor:
                 dt = (today - _date.fromisoformat(p["start_date"])).days if p.get("start_date") else None
             except ValueError:
                 dt = None
-            lines.append(f"- plant_id={p['id']}: \"{p['name']}\" owned by {p['owner'] or 'unknown'}; {p['strain']} ({p['breeder']}), {p['seed_type']}, {p['medium']}, {p['pot_size_l']:g} L; started {p.get('start_date') or 'unknown'}" + (f" → day {dt}" if dt is not None else "") + (f"; notes: {p['notes']}" if p.get("notes") else ""))
+            mine = [e for e in entries_all if e.get("plant_id") in (p["id"], None)]
+            planted = next((e["created_at"][:10] for e in reversed(mine) if e["kind"] == "planted"
+                            or (e.get("context") or "").lower() in ("planted", "planting")), None)
+            moved = next((e["created_at"][:10] for e in reversed(mine) if e["kind"] == "transplant"), None)
+            where = (f"in its {p['pot_size_l']:g} L pot since {moved}" if moved else
+                     f"planted in a 0.5 L cup on {planted}" if planted else "not planted yet (seed germinating)")
+            phase_key = current_phase_key(profile["stage"], day_in_stage, bool(planted or moved))
+            phase = next((ph.title for ph in PHASES if ph.key == phase_key), profile["stage"])
+            lines.append(f"- plant_id={p['id']}: \"{p['name']}\" owned by {p['owner'] or 'unknown'}; {p['strain']} ({p['breeder']}), "
+                         f"{p['seed_type']}, {p['medium']}; {where}; plan phase: {phase}; started {p.get('start_date') or 'unknown'}"
+                         + (f" → day {dt}" if dt is not None else "") + (f"; notes: {p['notes']}" if p.get("notes") else ""))
         if not plants:
             lines.append("- none registered yet")
         if profile.get("flower_start_date"):
@@ -180,36 +200,71 @@ class Advisor:
 
     # ------------------------------------------------------------------ Claude calls
 
+    async def month_spend(self, settings: dict) -> float:
+        tz = self.controller.tz(settings)
+        month_start = datetime.now(tz).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        from .store import iso
+        return (await self.store.usage_summary(iso(month_start)))["usd"]
+
+    def model_for(self, settings: dict) -> str:
+        model = settings.get("model") or self.default_model
+        if model not in PRICES:
+            if not getattr(self, "_model_warned", None) == model:
+                self._model_warned = model
+                log.warning("Unknown model %r in settings: using %s", model, self.default_model)
+            model = self.default_model if self.default_model in PRICES else "claude-opus-5"
+        return model
+
     async def _parse(self, output_model: type[T], user_content: Any, settings: dict, history: list[dict] | None = None,
                      effort: str = "high", max_tokens: int = 16000, kind: str = "other") -> T:
         if not self.client:
             raise AdvisorError("Advisor is off: add your Anthropic API key in the add-on configuration.")
-        model = settings.get("model") or self.default_model
+        budget = float(settings.get("advisor_budget_usd") or 40.0)
+        spent = await self.month_spend(settings)
+        if spent >= budget:
+            raise AdvisorError(f"This month's advisor budget (${budget:.0f}) is used up (${spent:.2f} spent). "
+                               f"The tent keeps running on its own; raise the budget in Settings if you need more.")
+        model = self.model_for(settings)
         system = [
             {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
             {"type": "text", "text": units_instruction(settings.get("units", "c"))},
         ]
         messages = list(history or []) + [{"role": "user", "content": user_content}]
-        kwargs: dict[str, Any] = dict(
-            model=model, max_tokens=max_tokens, system=system, messages=messages,
-            output_format=output_model, output_config={"effort": effort},
-        )
+        kwargs: dict[str, Any] = dict(model=model, max_tokens=max_tokens, system=system, messages=messages,
+                                      output_format=output_model)
+        if model not in NO_EFFORT:
+            kwargs["output_config"] = {"effort": effort}
+        # someone is waiting on a phone: fail fast instead of outliving the app's 90 s timeout
+        client = self.client.with_options(timeout=85.0, max_retries=0) if kind in INTERACTIVE else self.client
         try:
             try:
-                resp = await self.client.beta.messages.parse(betas=[FALLBACK_BETA], fallbacks="default", **kwargs)
+                resp = await client.beta.messages.parse(betas=[FALLBACK_BETA], fallbacks="default", **kwargs)
             except anthropic.BadRequestError as e:
                 if "fallback" not in str(e).lower():
                     raise
                 log.info("Server-side fallbacks not accepted here; retrying without them")
-                resp = await self.client.beta.messages.parse(**kwargs)
+                resp = await client.beta.messages.parse(**kwargs)
         except anthropic.AuthenticationError:
             raise AdvisorError("Anthropic API key was rejected. Check it in the add-on configuration.")
         except anthropic.RateLimitError:
             raise AdvisorError("Claude is rate-limited right now. Try again in a minute.")
+        except anthropic.APITimeoutError:
+            raise AdvisorError("Claude took too long to answer. Try again; a shorter question helps.")
         except anthropic.APIStatusError as e:
             raise AdvisorError(f"Claude API error ({e.status_code}): {e.message}")
         except anthropic.APIConnectionError:
             raise AdvisorError("Could not reach the Claude API. Is the Home Assistant box online?")
+        except Exception as e:   # the SDK validating a malformed reply, or anything else unexpected
+            log.exception("advisor call failed")
+            raise AdvisorError(f"Could not understand Claude's reply ({type(e).__name__}). Try again.")
+        # pay for what was used even when the answer is unusable
+        u = resp.usage
+        cr = getattr(u, "cache_read_input_tokens", 0) or 0
+        cw = getattr(u, "cache_creation_input_tokens", 0) or 0
+        served = getattr(resp, "model", model) or model
+        usd = _cost(served, u.input_tokens, u.output_tokens, cr, cw)
+        await self.store.add_usage(kind, served, u.input_tokens, cr, cw, u.output_tokens, usd)
+        log.info("advisor %s: in=%s cached=%s out=%s ≈$%.3f", output_model.__name__, u.input_tokens, cr, u.output_tokens, usd)
         if resp.stop_reason == "refusal":
             raise AdvisorError("Claude declined to answer this one. Try rephrasing.")
         if resp.stop_reason == "max_tokens":
@@ -221,12 +276,6 @@ class Advisor:
                 parsed = output_model.model_validate_json(text)
             except Exception as e:
                 raise AdvisorError(f"Could not understand Claude's reply: {e}")
-        u = resp.usage
-        cr = getattr(u, "cache_read_input_tokens", 0) or 0
-        cw = getattr(u, "cache_creation_input_tokens", 0) or 0
-        usd = _cost(getattr(resp, "model", model) or model, u.input_tokens, u.output_tokens, cr, cw)
-        await self.store.add_usage(kind, getattr(resp, "model", model) or model, u.input_tokens, cr, cw, u.output_tokens, usd)
-        log.info("advisor %s: in=%s cached=%s out=%s ≈$%.3f", output_model.__name__, u.input_tokens, cr, u.output_tokens, usd)
         return parsed
 
     # ------------------------------------------------------------------ applying what Claude asked for
@@ -244,8 +293,9 @@ class Advisor:
         open_tasks = await self.store.tasks("open")
         open_ids = {t["id"] for t in open_tasks}
         closed = []
+        system_ids = {t["id"] for t in open_tasks if t.get("created_by") == "system"}
         for tid in getattr(out, "tasks_done", []) or []:
-            if tid in open_ids:
+            if tid in open_ids and tid not in system_ids:
                 await self.store.set_task_status(tid, "done")
                 closed.append(tid)
         if closed:
@@ -264,6 +314,12 @@ class Advisor:
             if key in open_pr_titles:
                 continue
             created_prs.append(await self.store.add_photo_request(pd.title, pd.instructions, pd.reason, key[0]))
+        for pn in getattr(out, "plant_notes", []) or []:
+            plant = plants.get(pn.plant_id)
+            note = (pn.note or "").strip()
+            if plant and note and note.lower() not in (plant.get("notes") or "").lower():
+                merged = ((plant.get("notes") or "").rstrip(". ") + ". " if plant.get("notes") else "") + note
+                await self.store.update_plant(pn.plant_id, notes=merged[-1500:])
         changes: list[TargetChange] = getattr(out, "target_changes", []) or []
         if changes:
             applied_changes = await self._apply_target_changes(changes, settings, source)
@@ -275,8 +331,9 @@ class Advisor:
                 plant = plants.get(pid)
                 svc = plant.get("notify_service") if plant else None
                 who = f" for {plant['name']}" if plant else ""
+                url = f"growop://photos?plant={pid}" if pid else "growop://photos"
                 await self.notifier.send(f"photo_request:{pid}", f"The advisor would like {len(titles)} photo(s){who}: " + "; ".join(titles),
-                                         title="Photo request", url="growop://photos", service=svc, everyone=svc is None)
+                                         title="Photo request", url=url, service=svc, everyone=svc is None)
         return {"tasks": created_tasks, "photo_requests": created_prs, "target_changes": applied_changes, "tasks_done": closed}
 
     async def _apply_target_changes(self, changes: list[TargetChange], settings: dict, source: str) -> list[dict]:
@@ -285,22 +342,35 @@ class Advisor:
         values = dict(override.get("values", {}))
         out = []
         auto = bool(settings.get("auto_apply_advisor_targets", True))
+        today = datetime.now(self.controller.tz(settings)).date().isoformat()
+        used = await self.store.get_kv("advisor_nudges", {}) or {}
+        if used.get("date") != today:
+            used = {"date": today, "delta": {}}
         for ch in changes:
             if ch.field not in ADJUSTABLE_BY_ADVISOR:
                 continue
             lo, hi = BOUNDS[ch.field]
             current = getattr(targets, ch.field)
-            new = float(min(max(ch.to, lo), hi))
-            # clamp the size of a single nudge
-            limit = 2.0 if "temp" in ch.field else 5.0 if "humidity" in ch.field else 0.2
-            new = max(current - limit, min(current + limit, new))
-            new = round(new, 2 if "vpd" in ch.field else 1)
+            to = float(ch.to)
+            if "temp" in ch.field and to > 45:     # written in °F by mistake
+                to = (to - 32) * 5 / 9
+            new = float(min(max(to, lo), hi))
+            # at most 2 °C / 5 % RH of movement per field per day, however many replies ask for it
+            limit = 2.0 if "temp" in ch.field else 5.0
+            already = float(used["delta"].get(ch.field, 0.0))
+            new = max(current - (limit + already), min(current + (limit - already), new))
+            new = round(new, 1)
+            if new == current:
+                continue
+            used["delta"][ch.field] = round(already + (new - current), 2)
             rec = {"field": ch.field, "from": current, "to": new, "reason": ch.reason, "applied": auto}
             out.append(rec)
             if auto:
                 values[ch.field] = new
         if auto and out:
+            await self.store.set_kv("advisor_nudges", used)
             await self.store.set_kv("targets_override", {"values": values, "source": "advisor",
+                                                         "phase": await self.controller.phase_key(),
                                                          "light_on_time": override.get("light_on_time", targets.light_on_time)})
             for rec in out:
                 await self.store.add_event("info", "advisor", f"Advisor set {rec['field']} {rec['from']} → {rec['to']}: {rec['reason']}")
@@ -384,12 +454,15 @@ class Advisor:
             return None
         data = await self.camera.snapshot(max_age_s=0)
         if not data:
-            return None
+            raise AdvisorError("The tent camera didn't send a picture")
         import io
         from PIL import Image
-        im = Image.open(io.BytesIO(data)).convert("RGB")
+        try:
+            im = Image.open(io.BytesIO(data)).convert("RGB")
+        except Exception as e:
+            raise AdvisorError(f"The camera sent an image that couldn't be read ({e})")
         im.thumbnail((2000, 2000))
-        pid = await self.store.add_photo(None, "Tent camera daily check", "", None)
+        pid = await self.store.add_photo(None, None, "", None, source="camera")
         path = self.photo_dir / f"{pid}.jpg"
         im.save(path, "JPEG", quality=88)
         thumb = im.copy(); thumb.thumbnail((400, 400)); thumb.save(self.photo_dir / f"{pid}_thumb.jpg", "JPEG", quality=80)
@@ -408,10 +481,13 @@ class Advisor:
         analysis = out.model_dump(); analysis.update(applied)
         await self.store.set_photo_analysis(pid, analysis)
         serious = [f for f in out.findings if f.severity in ("warn", "alert")]
+        urgent = [f for f in out.findings if f.severity == "alert"]
         if serious or out.health_score < 6:
             msg = "; ".join(f.title for f in serious) or out.summary
             await self.store.add_event("warn", "advisor", f"Camera check: {msg}")
-            await self.notifier.send("camera_check", f"Camera check: {msg}", title="Grow tent", url="growop://photos", everyone=True)
+            if urgent or out.health_score < 5:   # a phone buzz only for something that can't wait for the morning brief
+                await self.notifier.send("camera_check", "Camera check: " + "; ".join(f.title for f in (urgent or serious)),
+                                         title="Grow tent", url="growop://photos", everyone=True)
         else:
             await self.store.add_event("info", "advisor", f"Camera check: {out.summary[:120]}")
         return analysis
@@ -419,12 +495,19 @@ class Advisor:
     async def chat(self, message: str, plant_id: int | None = None) -> dict:
         ctx, settings = await self._context()
         history_rows = await self.store.chat_history(20)
-        history = [{"role": r["role"], "content": r["content"]} for r in history_rows]
+        while history_rows and history_rows[0]["role"] != "user":
+            history_rows = history_rows[1:]          # the API wants the history to open with a user turn
+        history = []
+        for r in history_rows:
+            content = r["content"]
+            if r["role"] == "user" and r.get("author") and not content.startswith("["):
+                content = f"[{r['author']}] {content}"
+            history.append({"role": r["role"], "content": content})
         plant = await self.store.get_plant(plant_id) if plant_id else None
         who = f"{plant['owner'] or 'Grower'} (about plant_id={plant['id']}, \"{plant['name']}\") says" if plant else "Grower says"
         # Fresh context goes into the latest user turn so the cached system prompt stays stable.
         user = f"<current_state>\n{ctx}\n</current_state>\n\n{who}: {message}"
-        await self.store.add_chat("user", (f"[{plant['owner'] or plant['name']}] " if plant else "") + message)
+        await self.store.add_chat("user", message, author=(plant["owner"] or plant["name"]) if plant else None, plant_id=plant_id)
         out = await self._parse(ChatOut, user, settings, history=history, effort="medium", kind="chat")
         applied = await self._apply(out, settings, "chat", default_plant_id=plant_id)
         reply = out.reply
@@ -434,7 +517,11 @@ class Advisor:
         if applied["photo_requests"]:
             extras.append("Photo request(s) added in the Photos tab: " + "; ".join(p["title"] for p in applied["photo_requests"]))
         if applied["target_changes"]:
-            extras.append("Targets adjusted: " + "; ".join(f"{c['field']} → {c['to']}" for c in applied["target_changes"] if c["applied"]))
+            names = {"temp_min_c": "lowest temperature", "temp_max_c": "highest temperature",
+                     "humidity_min": "lowest humidity", "humidity_max": "highest humidity"}
+            unit = lambda f: " °C" if "temp" in f else " %"
+            extras.append("Changed the tent settings: " + "; ".join(f"{names.get(c['field'], c['field'])} now {c['to']:g}{unit(c['field'])}"
+                                                                   for c in applied["target_changes"] if c["applied"]))
         if extras:
             reply += "\n\n" + "\n".join(extras)
         mid = await self.store.add_chat("assistant", reply)

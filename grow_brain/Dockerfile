@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY grow_brain ./grow_brain
 COPY run.sh /run.sh
+COPY backup_pre.py /backup_pre.py
 RUN chmod a+x /run.sh
 
 EXPOSE 8099

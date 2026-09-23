@@ -8,3 +8,10 @@ ios/build/
 ios/DerivedData/
 *.xcuserstate
 xcuserdata/
+
+# local runs of the add-on keep its database, key and photos here: never commit them
+grow_brain/data/
+data/grow_brain.sqlite*
+*.backup.sqlite
+**/.DS_Store
+.DS_Store

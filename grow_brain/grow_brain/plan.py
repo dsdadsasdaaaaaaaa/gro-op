@@ -39,24 +39,26 @@ PHASES: list[Phase] = [
            "Optional: a clear cup with two small air holes over each seedling for the first 3–5 days to hold humidity; take it off once the first true leaves (the first jagged pair, not the round starter leaves) open."],
           ["Stretching, thin, leaning stem → not enough light: lower the light 5 cm or turn the dimmer up a little.",
            "Drooping with wet soil → overwatered; let it dry out.",
-           "Roots showing at the drainage holes or 4–5 sets of leaves (about 3 weeks) → transplant to the 11 L pot."],
+           "Roots showing at the drainage holes or 4–5 sets of leaves (about 3 weeks) → transplant to the 11 L pot.",
+           "Before the transplant, have ready: two 11 L pots with holes, about 25 L of light potting soil, and two saucers."],
           "21–27 °C day, 60–75 % RH, 18 h light"),
     Phase("veg", "Veg in the final pot", "Build the frame that will carry the buds", 21, 49,
           ["Transplant: water the cup first, fill the 11 L pot, drop the root ball in, water it in gently (about 1 L). Then plug the two small lights back in, turn the big one up, and set Settings → Change stage → Veg.",
-           "Water to 10–20 % runoff, then let the pot get light before watering again (lift it: heavy = wait).",
-           "Start feeding 2–3 weeks after transplant at ¼–½ strength, pH 6.3–6.5. More is not better.",
+           "Light: from the transplant, all three lights on. Turn the big one up about 10 % a week toward full; if the app says it can't hold the climate, step back 10 %.",
+           "Water to 10–20 % runoff, then let the pot get light before watering again (lift it: heavy = wait). About 1 L at first, 2–3 L later; empty the saucer after 15 min.",
+           "Start feeding 2–3 weeks after transplant at ¼–½ strength. Buy a cheap pH drop-test kit before the first feed and bring the feed to pH 6.3–6.5. More is not better.",
            "Top the plant above the 5th–6th node to get several main colas, then tie branches down (LST) to spread the canopy flat.",
            "Take a photo when asked: the advisor watches for pale leaves, tip burn and stretch.",
            "Flip to 12/12 when the plant is about 40–50 % of the height you can afford: it will roughly double in flower."],
           ["Lower leaves going pale yellow → start or increase feed.",
            "Leaf tips brown and curled → too much feed; water plain for a round.",
-           "Plant is ~30–40 cm tall and bushy after 4–6 weeks of veg → flip to flower in Settings → Grow → Change stage."],
+           "Plant is ~30–40 cm tall and bushy after 4–6 weeks of veg → flip to flower: Settings → Change stage → Flower (the light switches to 12 h by itself)."],
           "23–28 °C day, 55–65 % RH, 18 h light"),
     Phase("flower_stretch", "Flower: the stretch", "Weeks 1–3 of 12/12: it grows 1.5–2× taller", 49, 70,
           ["Change the stage to Flower in the app: the light goes to 12/12 and humidity targets drop.",
            "Keep tying branches down; keep the light distance right as the plant rises.",
            "Switch to a bloom feed over two weeks; still pH 6.3–6.5 and let the pot dry between waterings.",
-           "Get the exhaust ducted OUT of the tent now: smell starts around week 3.",
+           "Smell starts around week 3: the exhaust must stay ducted out of the tent. A carbon filter on it (about CA$60) stops the smell if that matters where you live.",
            "Never turn the light on during the 12 dark hours."],
           ["Pistils (white hairs) at the nodes by day 10–14 → normal, it's flowering.",
            "Plant hitting the light → raise the light or bend the tops down.",
@@ -77,10 +79,10 @@ PHASES: list[Phase] = [
            "Take the photos the advisor asks for: pistils and a trichome shot help it time the harvest.",
            "Reduce feed to half strength."],
           ["Most pistils orange and curled in + cloudy trichomes → start the flush.",
-           "Sudden strong smell → make sure the exhaust is ducted and the carbon filter is on."],
+           "Sudden strong smell → check the exhaust duct is still attached; a carbon filter is the only thing that removes smell."],
           "20–25 °C day, 38–48 % RH, 12 h light"),
     Phase("flush", "Flush", "The last 7 days: plain water only", 107, 114,
-          ["Water with plain pH 6.3–6.5 water only, to good runoff.",
+          ["Water with plain water only (pH 6.3–6.5 if you have a kit by then), to good runoff.",
            "Let the leaves yellow: that's the plant using its reserves.",
            "Some growers give 24–48 h of darkness before the chop; optional."],
           ["Trichomes hit ~10–15 % amber → harvest day. Cut in the morning before lights-on if you can."],
@@ -88,14 +90,14 @@ PHASES: list[Phase] = [
     Phase("dry", "Drying", "Slow and cool, 7–14 days", 114, 124,
           ["Cut the whole plant or big branches, trim the large fan leaves, hang in the dark tent.",
            "Set the stage to Drying in the app: lights stay off, fans keep air moving gently (not blowing on the buds).",
-           "Aim for 18–21 °C and 55–62 % RH. Slow drying = better smell."],
+           "Aim for 16–21 °C and 55–62 % RH. Slow drying = better smell."],
           ["Small stems snap instead of bending → done drying, trim and jar it.",
            "Any sign of mould → more airflow, lower RH, cut out the affected part."],
           "16–21 °C, 55–62 % RH, dark"),
     Phase("cure", "Curing", "Jars for 2–4+ weeks", 124, 152,
           ["Trim, put in glass jars ¾ full with a 62 % humidity pack, in a dark cupboard.",
            "Week 1: open the jars for 10 minutes every day. Week 2+: every few days.",
-           "Set the stage to Curing in the app; tent control goes idle."],
+           "Set the stage to Curing in the app: lights, humidifier and exhaust go idle."],
           ["Buds smell like hay or ammonia when opened → too wet; leave the jar open for an hour.",
            "After 3–4 weeks the smell is deep and clean → ready. It keeps improving for months."],
           "18–22 °C, 62 % RH, dark"),
@@ -106,7 +108,7 @@ _KEYS = [p.key for p in PHASES]
 
 def current_phase_key(stage: str, day_in_stage: int, planted: bool) -> str | None:
     if stage == "seedling":
-        return "seedling" if (planted or day_in_stage >= 5) else "germination"
+        return "seedling" if (planted or day_in_stage >= 10) else "germination"
     if stage == "veg":
         return "veg"
     if stage == "flower":
@@ -120,7 +122,8 @@ def current_phase_key(stage: str, day_in_stage: int, planted: bool) -> str | Non
     return None  # done
 
 
-def build_plan(profile: dict, today: date, day_in_stage: int, day_total: int, planted: bool) -> dict:
+def build_plan(profile: dict, today: date, day_in_stage: int, day_total: int, planted: bool,
+               planted_on: date | None = None) -> dict:
     stage = profile.get("stage", "seedling")
     cur = current_phase_key(stage, day_in_stage, planted)
     cur_idx = _KEYS.index(cur) if cur else len(_KEYS)
@@ -140,6 +143,18 @@ def build_plan(profile: dict, today: date, day_in_stage: int, day_total: int, pl
             for k in _KEYS[_KEYS.index(anchor_key):]:
                 starts[k] += delta
                 ends[k] += delta
+        # Seedling and veg count from the day it was planted, not the day it went into the towel.
+        if stage in ("seedling", "veg") and not flower_start:
+            shift = 0
+            if planted_on:
+                shift = (planted_on - start).days - starts["seedling"]
+            elif cur == "germination" and day_total >= ends["germination"]:
+                shift = day_total + 1 - ends["germination"]     # still waiting for the root: "next" is tomorrow at the earliest
+            if shift and not (stage == "veg" and stage_started):
+                ends["germination"] += shift
+                for k in ("seedling", "veg", "flower_stretch", "flower_bulk", "flower_ripen", "flush", "dry", "cure"):
+                    starts[k] += shift
+                    ends[k] += shift
         if flower_start:
             f0 = (flower_start - start).days
             harvest = f0 + expected_flower

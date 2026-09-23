@@ -120,6 +120,8 @@ class SettingsUpdate(BaseModel):
     control_interval_s: Optional[int] = None
     min_switch_interval_s: Optional[int] = None
     humidifier_tank_hours: Optional[float] = None  # hours of misting one tank lasts
+    advisor_budget_usd: Optional[float] = None     # monthly cap on Claude spend
+    admin_notify_service: Optional[str] = None     # the phone that gets 'update the add-on' notices
     camera_entity: Optional[str] = None
     camera_capture_minutes: Optional[int] = None
     temp_offset_c: Optional[float] = None
@@ -155,7 +157,7 @@ class PauseRequest(BaseModel):
 # ---------- Log / tasks / photos / chat ----------
 
 LogKind = Literal["ph", "ec", "ppm", "water", "feed", "height", "note", "observation",
-                  "defoliation", "training", "transplant", "other"]
+                  "defoliation", "training", "planted", "transplant", "other"]
 
 
 class LogCreate(BaseModel):
@@ -164,7 +166,8 @@ class LogCreate(BaseModel):
     value: Optional[float] = None
     unit: Optional[str] = None
     context: Optional[str] = None
-    note: Optional[str] = None
+    note: Optional[str] = Field(None, max_length=2000)
+    advise: bool = False   # True: ask the advisor now (paid, 10-40 s); False: save instantly, the daily brief reads it
 
 
 class TaskCreate(BaseModel):
@@ -176,7 +179,7 @@ class TaskCreate(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(..., max_length=2000)
     plant_id: Optional[int] = None
 
 
@@ -200,8 +203,13 @@ class PhotoRequestDraft(BaseModel):
 
 class TargetChange(BaseModel):
     field: Literal["temp_min_c", "temp_max_c", "humidity_min", "humidity_max", "vpd_min", "vpd_max"]
-    to: float
+    to: float = Field(description="New value. Temperatures are ALWAYS in °C here, even if the grower uses °F.")
     reason: str
+
+
+class PlantNote(BaseModel):
+    plant_id: int
+    note: str = Field(description="A lasting fact worth remembering about this plant, e.g. 'left side of the tent' or 'planted 2026-09-25'")
 
 
 class PlantBrief(BaseModel):
@@ -212,6 +220,7 @@ class PlantBrief(BaseModel):
 
 class BriefOut(BaseModel):
     per_plant: list[PlantBrief] = Field(default_factory=list, description="One entry per active plant")
+    plant_notes: list[PlantNote] = Field(default_factory=list, description="Facts to remember about a plant from now on")
     tasks_done: list[int] = Field(default_factory=list, description="Ids of OPEN tasks that are now finished or obsolete (the grower did them, or the plan changed). Close them here instead of asking the grower to.")
     headline: str = Field(description="One line, e.g. 'Day 26 – healthy, humidity creeping up'")
     summary: str = Field(description="3–6 plain-language sentences for a beginner")
@@ -252,6 +261,7 @@ class PhotoAnalysisOut(BaseModel):
 class ChatOut(BaseModel):
     tasks_done: list[int] = Field(default_factory=list, description="Ids of OPEN tasks that are now finished or obsolete (the grower did them, or the plan changed). Close them here instead of asking the grower to.")
     reply: str = Field(description="The conversational answer, markdown-light plain text")
+    plant_notes: list[PlantNote] = Field(default_factory=list, description="Facts to remember about a plant from now on")
     target_changes: list[TargetChange] = Field(default_factory=list)
     photo_requests: list[PhotoRequestDraft] = Field(default_factory=list)
     tasks: list[TaskDraft] = Field(default_factory=list)

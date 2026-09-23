@@ -36,7 +36,7 @@ class FakeHA:
     async def get_states(self):
         out = [{"entity_id": e, "state": s, "attributes": {"friendly_name": e}, "last_updated": self._now, "last_reported": self._now}
                for e, s in self.state.items()]
-        out.append({"entity_id": "camera.wyze_cam_man_cave", "state": "idle", "attributes": {"friendly_name": "Wyze Cam Man cave"},
+        out.append({"entity_id": "camera.tent_cam", "state": "idle", "attributes": {"friendly_name": "Tent cam"},
                     "last_updated": self._now, "last_reported": self._now})
         for base, w in (("grow_light", self.light_w), ("grow_humidifier", self.humid_w)):
             out.append({"entity_id": f"sensor.{base}_current_consumption", "state": str(w), "attributes": {"unit_of_measurement": "W"},
@@ -191,8 +191,8 @@ async def test_plants_crud_and_per_plant_data(client):
 async def test_camera_auto_select_snapshot_frames_and_analyse(client):
     c, ha, store, controller = client
     info = (await c.get("/api/camera")).json()
-    assert info["camera"]["entity_id"] == "camera.wyze_cam_man_cave" and info["camera"]["name"] == "Wyze Cam Man cave"
-    assert (await c.get("/api/status")).json()["camera"]["entity_id"] == "camera.wyze_cam_man_cave"
+    assert info["camera"]["entity_id"] == "camera.tent_cam" and info["camera"]["name"] == "Tent cam"
+    assert (await c.get("/api/status")).json()["camera"]["entity_id"] == "camera.tent_cam"
     r = await c.get("/api/camera/snapshot")
     assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg" and r.content[:2] == b"\xff\xd8"
     cam = c._transport.app.state.camera
@@ -264,9 +264,10 @@ async def test_alerts_resolve_on_recovery(client):
     evs = (await c.get("/api/events", params={"limit": 5})).json()["events"]
     assert any(e["message"] == "Home Assistant connection restored" for e in evs)
     await c.post("/api/control/pause", json={"minutes": 5})
-    assert any("paused" in a["message"] for a in (await c.get("/api/status")).json()["alerts"])
+    st = (await c.get("/api/status")).json()
+    assert st["control_paused_until"] and not any("paused" in a["message"] for a in st["alerts"])   # a choice, not a problem
     await c.post("/api/control/resume")
-    assert not any("paused" in a["message"] for a in (await c.get("/api/status")).json()["alerts"])
+    assert (await c.get("/api/status")).json()["control_paused_until"] is None
 
 
 async def test_stale_ha_alert_clears_on_first_good_cycle(client):
@@ -283,12 +284,15 @@ async def test_usage_qr_and_nudges(client):
     u = (await c.get("/api/usage")).json()
     assert u["month"]["calls"] == 1 and u["month"]["usd"] == 0.06 and "brief" in u["month"]["by_kind"]
     assert (await c.get("/api/settings")).json()["advisor_month_usd"] == 0.06
-    r = await c.get("/api/setup-qr.png", params={"url": "http://192.168.2.67:8099"})
+    r = await c.get("/api/setup-qr.png", params={"url": "http://192.168.1.50:8099"})
     assert r.status_code == 200 and r.headers["content-type"] == "image/png" and r.content[:4] == b"\x89PNG"
     # a photo request open for 3 days gets one nudge to the plant owner, and not again within a day
     p = await store.add_plant(name="Levi's plant", owner="Levi", notify_service="notify.levi")
     pr = await store.add_photo_request("Top of canopy", "From above", "check", p["id"])
-    await store.db.execute("UPDATE photo_requests SET created_at=? WHERE id=?", ("2026-01-01T00:00:00Z", pr["id"]))
+    from datetime import timedelta
+    from grow_brain.store import iso
+    three_days_ago = iso(datetime.now(timezone.utc) - timedelta(days=3))
+    await store.db.execute("UPDATE photo_requests SET created_at=? WHERE id=?", (three_days_ago, pr["id"]))
     await store.db.commit()
     from grow_brain.main import _nudge_tick
     app_state = c._transport.app.state
@@ -495,3 +499,86 @@ async def test_health_reports_a_dead_control_loop(client):
         pass
     r = await c.get("/api/health")
     assert r.status_code == 503 and r.json()["ok"] is False
+
+
+
+async def test_quick_log_task_followups_chat_authors_and_refill(client):
+    c, ha, store, controller = client
+    await _plants_with_phones(c)
+    ps = (await c.get("/api/plants")).json()["plants"]
+    # logging is instant and free unless the advisor is asked
+    r = (await c.post("/api/log", json={"kind": "water", "value": 0.05, "unit": "L", "plant_id": ps[0]["id"]})).json()
+    assert "next daily brief" in r["advice"]["summary"]
+    # ticking "Plant ... seed" records the planting; ticking a dome task schedules taking it off
+    t = (await c.post("/api/tasks", json={"title": "Plant Levi's seed when its root shows", "plant_id": ps[0]["id"]})).json()
+    await c.post(f"/api/tasks/{t['id']}/complete")
+    assert any(e["kind"] == "planted" for e in (await c.get("/api/log")).json()["entries"])
+    d = (await c.post("/api/tasks", json={"title": "Put a clear dome over Levi's cup", "plant_id": ps[0]["id"]})).json()
+    await c.post(f"/api/tasks/{d['id']}/complete")
+    assert any(x["title"].startswith("Take the dome off") for x in (await c.get("/api/tasks")).json()["tasks"])
+    # transplanting while still a seedling asks for the stage change
+    await c.post("/api/log", json={"kind": "transplant", "plant_id": ps[0]["id"]})
+    assert any(x["title"] == "Switch the stage to Veg" for x in (await c.get("/api/tasks")).json()["tasks"])
+    # chat rows carry their author even from the old "[Name] " format
+    await store.add_chat("user", "[Dad] how's my plant?")
+    msgs = (await c.get("/api/chat")).json()["messages"]
+    assert msgs[-1]["author"] == "Dad" and msgs[-1]["content"] == "how's my plant?"
+    # refill button
+    controller._tank["run_s"] = 3 * 3600
+    tank = (await c.post("/api/humidifier/refilled")).json()
+    assert tank["run_hours_since_refill"] == 0 and tank["hours_left"] == 4.0
+
+
+async def test_device_mapping_and_camera_are_restricted(client):
+    c, ha, store, controller = client
+    assert (await c.put("/api/devices/humidifier", json={"entity_id": "cover.garage_door"})).status_code == 422
+    assert (await c.put("/api/devices/temperature_sensor", json={"entity_id": "switch.x"})).status_code == 422
+    assert (await c.put("/api/camera", json={"entity_id": "switch.x"})).status_code == 422
+
+
+async def test_brief_read_flags_are_per_phone(client):
+    c, ha, store, controller = client
+    await store.db.execute("INSERT INTO briefs(created_at, json) VALUES('2026-09-23T12:00:00Z', '{}')")
+    await store.db.commit()
+    bid = (await (await store.db.execute("SELECT MAX(id) AS i FROM briefs")).fetchone())["i"]
+    await c.post(f"/api/brief/{bid}/read", headers={"X-Device-Id": "levi-phone"})
+    assert (await c.get("/api/status", headers={"X-Device-Id": "levi-phone"})).json()["unread_brief"] is False
+    assert (await c.get("/api/status", headers={"X-Device-Id": "dad-phone"})).json()["unread_brief"] is True
+
+
+async def test_failed_push_is_retried(client):
+    c, ha, store, controller = client
+    await _plants_with_phones(c)
+    real = ha.notify
+    calls = {"n": 0}
+
+    async def flaky(service, message, **k):
+        calls["n"] += 1
+        return False
+    ha.notify = flaky
+    await controller.notifier.send("safety:test", "test alert", hours=1, everyone=True)
+    assert "safety:test" in controller.notifier.pending
+    ha.notify = real
+    await controller.notifier.flush()
+    assert "safety:test" not in controller.notifier.pending and any("test alert" in n for n in ha.notifications)
+
+
+
+async def test_week_old_photo_requests_expire_and_nudges_stop_after_three(client):
+    c, ha, store, controller = client
+    from datetime import timedelta
+    from grow_brain.store import iso
+    from grow_brain.main import _nudge_tick
+    p = await store.add_plant(name="Dad's plant", owner="Dad", notify_service="notify.dad")
+    old = await store.add_photo_request("Old one", "x", "y", p["id"])
+    await store.db.execute("UPDATE photo_requests SET created_at=? WHERE id=?", (iso(datetime.now(timezone.utc) - timedelta(days=8)), old["id"]))
+    live = await store.add_photo_request("Newer", "x", "y", p["id"])
+    await store.db.execute("UPDATE photo_requests SET created_at=?, nudge_count=3 WHERE id=?",
+                           (iso(datetime.now(timezone.utc) - timedelta(days=4)), live["id"]))
+    await store.db.commit()
+    st = c._transport.app.state
+    st.notifier = controller.notifier
+    ha.notifications.clear()
+    await _nudge_tick(st)
+    assert (await store.get_photo_request(old["id"]))["status"] == "expired"
+    assert not any("Newer" in n for n in ha.notifications)
