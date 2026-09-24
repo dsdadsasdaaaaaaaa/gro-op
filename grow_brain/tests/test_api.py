@@ -613,6 +613,46 @@ async def test_failed_push_is_retried(client):
 
 
 
+async def test_home_assistant_outage_is_not_blamed_on_the_phones(client):
+    c, ha, store, controller = client
+    await _plants_with_phones(c)
+    real = ha.notify
+    n = controller.notifier
+
+    async def ha_down(service, message, **k):
+        ha.last_status = 502          # the Supervisor answering for a Core that is restarting
+        return False
+    ha.notify = ha_down
+    await n.send("sprouted:1", "Levi's plant has sprouted!", everyone=True)      # unthrottled, still kept for later
+    warns = [e["message"] for e in await store.events(50, min_level="warn")]
+    assert not any(m.startswith("Couldn't send a notification") for m in warns)
+    assert "sprouted:1" in n.pending
+    ha.connected = False
+    await n.flush()                    # nothing to send through while Home Assistant is away
+    assert n.pending["sprouted:1"]["tries"] == 0
+    ha.connected, ha.notify = True, real
+    await n.flush()
+    assert "sprouted:1" not in n.pending and any("sprouted" in m for m in ha.notifications)
+
+
+async def test_a_phone_warning_clears_once_that_phone_gets_a_message(client):
+    c, ha, store, controller = client
+    ps = await _plants_with_phones(c)
+    real = ha.notify
+    n = controller.notifier
+
+    async def gone(service, message, **k):
+        ha.last_status = 400          # Home Assistant answered: that phone's notify service is gone
+        return False
+    ha.notify = gone
+    await n.send("x", "hello", service="notify.levi_phone")
+    open_ = lambda evs: [e for e in evs if e["message"].startswith("Couldn't send a notification to notify.levi_phone")]
+    assert open_(await store.events(50, min_level="warn"))
+    ha.notify = real
+    await n.send("y", "hello again", service="notify.levi_phone")
+    assert not open_(await store.events(50, min_level="warn"))
+
+
 async def test_week_old_photo_requests_expire_and_nudges_stop_after_three(client):
     c, ha, store, controller = client
     from datetime import timedelta

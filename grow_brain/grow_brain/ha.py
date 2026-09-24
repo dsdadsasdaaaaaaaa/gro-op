@@ -22,6 +22,7 @@ class HAClient:
         )
         self.connected = False
         self.last_error: str | None = None
+        self.last_status: int | None = None   # HTTP status of the last failed service call; None = HA didn't answer
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -62,9 +63,13 @@ class HAClient:
             r = await self._client.post(f"/services/{domain}/{service}", json=data)
             r.raise_for_status()
             return True
+        except httpx.HTTPStatusError as e:
+            log.warning("HA service %s.%s failed: %s", domain, service, e)
+            self.last_error, self.last_status = str(e), e.response.status_code
+            return False
         except httpx.HTTPError as e:
             log.warning("HA service %s.%s failed: %s", domain, service, e)
-            self.last_error = str(e)
+            self.last_error, self.last_status = str(e), None
             return False
 
     async def turn(self, entity_id: str, on: bool) -> bool:

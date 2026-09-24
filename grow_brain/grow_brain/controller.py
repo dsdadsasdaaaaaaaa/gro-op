@@ -710,6 +710,8 @@ class Controller:
         if self._ha_fail_reported:
             await self._safe(self.store.add_event("info", "system", "Home Assistant connection restored"), "event")
             self._ha_fail_reported = False
+            # it could only have gone out through Home Assistant: arriving now it would be news that's already over
+            self.notifier.pending.pop("ha_down", None)
         if not self.ha_ok:
             # first good cycle since startup (or since an outage): any older "cannot reach" alert is over
             await self._safe(self.store.resolve_alerts("system", "Cannot reach Home Assistant"), "resolve")

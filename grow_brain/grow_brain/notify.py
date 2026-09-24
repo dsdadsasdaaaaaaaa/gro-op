@@ -19,6 +19,8 @@ class Notifier:
         self._loaded = False
         self.pending: dict[str, dict] = {}     # key → message that no phone accepted yet (retried every cycle)
         self._failed_service_at: dict[str, datetime] = {}
+        self._cleared: set[str] = set()        # phones whose "couldn't send" warning is known to be closed
+        self._ha_trouble = False               # the last failure was Home Assistant itself, not a phone
 
     async def _load(self) -> None:
         if self._loaded:
@@ -43,7 +45,12 @@ class Notifier:
 
     async def flush(self) -> None:
         """Retry pushes that no phone accepted (Home Assistant restarting, phone app logged out...)."""
+        if self.pending and not getattr(self.ha, "connected", True):
+            return    # Home Assistant is the way out to the phones: wait for it instead of burning the retries
         for key, p in list(self.pending.items()):
+            if utcnow() - p.get("at", utcnow()) > timedelta(hours=12):
+                self.pending.pop(key, None)   # too old to still matter
+                continue
             p["tries"] += 1
             ok = await self._deliver(p["targets"], p["message"], p["title"], p["data"])
             if ok:
@@ -59,10 +66,27 @@ class Notifier:
 
     async def _deliver(self, targets: set[str], message: str, title: str, data: dict | None) -> bool:
         ok = False
+        self._ha_trouble = False
         for svc in sorted(targets):
             sent = await self.ha.notify(svc, message, title=title, data=data)
             ok = sent or ok
+            if sent:
+                if svc not in self._cleared or svc in self._failed_service_at:
+                    # it reaches that phone again: an earlier "couldn't send" warning is over
+                    self._failed_service_at.pop(svc, None)
+                    self._cleared.add(svc)
+                    try:
+                        await self.store.resolve_alerts("system", f"Couldn't send a notification to {svc}")
+                    except Exception:
+                        pass
+                continue
+            status = getattr(self.ha, "last_status", None)
+            if status is None or status >= 500 or status in (401, 403):
+                # Home Assistant itself didn't answer (restarting, down, token): not the phone's fault
+                self._ha_trouble = True
+                continue
             if not sent:
+                self._cleared.discard(svc)
                 last = self._failed_service_at.get(svc)
                 if not last or utcnow() - last > timedelta(hours=24):
                     self._failed_service_at[svc] = utcnow()
@@ -121,6 +145,6 @@ class Notifier:
             self._last[key] = now
             self.pending.pop(key, None)
             await self._save()
-        elif hours:   # important, throttled messages get retried until a phone takes them
-            self.pending[key] = {"targets": targets, "message": message, "title": title, "data": data, "tries": 0}
+        elif hours or self._ha_trouble:   # important messages, and anything Home Assistant couldn't pass on, get retried
+            self.pending[key] = {"targets": targets, "message": message, "title": title, "data": data, "tries": 0, "at": now}
         return ok

@@ -1,3 +1,3 @@
 """Grow Brain: automated grow-tent controller + Claude-powered grow advisor for Home Assistant."""
 
-__version__ = "0.8.9"
+__version__ = "0.9.0"
