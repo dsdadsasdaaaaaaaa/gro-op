@@ -251,3 +251,48 @@ async def test_a_new_camera_check_replaces_the_old_warning(env):
     await adv.camera_check()
     open_warns = [e["message"] for e in await store.events(50, min_level="warn") if e["message"].startswith("Camera check")]
     assert open_warns == ["Camera check: Soil looks dry"]
+
+
+async def test_chat_records_a_planting_and_corrects_its_date(env):
+    store, adv, fake = env
+    from datetime import date, timedelta
+    today = date.today().isoformat()
+    fake.next = ChatOut.model_validate({**DEFAULTS[ChatOut], "tasks": [], "plantings": [{"plant_id": 1, "kind": "planted", "date": today}]})
+    r = await adv.chat("I just planted mine", 1)
+    planted = [e for e in await store.log_entries(50) if e["kind"] == "planted"]
+    assert len(planted) == 1 and planted[0]["plant_id"] == 1 and "Recorded in the log" in r["reply"]
+    assert any(t["title"] == "Take the dome off Levi's plant" for t in await store.tasks("open"))
+    # told a different day later: the record is corrected, not doubled
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    fake.next = ChatOut.model_validate({**DEFAULTS[ChatOut], "tasks": [], "plantings": [{"plant_id": 1, "kind": "planted", "date": yesterday}]})
+    await adv.chat("actually that was yesterday", 1)
+    planted = [e for e in await store.log_entries(50) if e["kind"] == "planted"]
+    assert len(planted) == 1 and planted[0]["created_at"].startswith(yesterday)
+    # a future date or an unknown plant is ignored
+    fake.next = ChatOut.model_validate({**DEFAULTS[ChatOut], "tasks": [], "plantings": [
+        {"plant_id": 2, "kind": "planted", "date": (date.today() + timedelta(days=2)).isoformat()},
+        {"plant_id": 99, "kind": "planted", "date": today}]})
+    await adv.chat("hm", 2)
+    assert len([e for e in await store.log_entries(50) if e["kind"] == "planted"]) == 1
+
+
+def test_differently_worded_duplicates_are_caught_but_opposites_are_not():
+    from grow_brain.advisor import _similar, _words
+    assert _similar(_words("Re-aim the tent camera at the cups"), _words("Point the camera down at both cups"))
+    assert not _similar(_words("Turn the light down"), _words("Turn the light up"))
+    assert not _similar(_words("Lift the power strip off the tent floor"), _words("Sweep loose soil and the clip off the tent floor"))
+    assert not _similar(_words("Take the dome off Levi's plant"), _words("Put a clear dome over Levi's cup"))
+
+
+def test_the_climate_summary_says_when_the_extremes_happened():
+    from zoneinfo import ZoneInfo
+    from grow_brain.advisor import _summarise_readings
+    rows = [{"t": "2026-09-23T19:58:00Z", "temp_c": 17.9, "humidity": 61, "vpd_kpa": 0.8, "light_on": 0},  # 15:58, tent off
+            {"t": "2026-09-24T07:00:00Z", "temp_c": 20.3, "humidity": 62, "vpd_kpa": 0.9, "light_on": 0},  # 03:00, night
+            {"t": "2026-09-24T17:00:00Z", "temp_c": 25.1, "humidity": 62, "vpd_kpa": 1.0, "light_on": 1}]
+    s = _summarise_readings(rows, "c", tz=ZoneInfo("America/Toronto"), schedule=("06:00", 18))
+    assert "coldest 17.9°C (Wed 15:58, light off during its scheduled hours" in s
+    assert "warmest 25.1°C (Thu 13:00, lights on)" in s
+    night_only = _summarise_readings(rows[1:], "c", tz=ZoneInfo("America/Toronto"), schedule=("06:00", 18))
+    assert "coldest 20.3°C (Thu 03:00, lights off, night)" in night_only
+

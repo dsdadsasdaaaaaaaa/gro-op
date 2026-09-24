@@ -355,8 +355,8 @@ class Store:
             return [dict(r) for r in await cur.fetchall()]
 
     # ---- log entries ----
-    async def add_log_entry(self, kind, value, unit, context, note, plant_id: int | None = None) -> dict:
-        now = iso(utcnow())
+    async def add_log_entry(self, kind, value, unit, context, note, plant_id: int | None = None, at: str | None = None) -> dict:
+        now = at or iso(utcnow())
         cur = await self.db.execute(
             "INSERT INTO log_entries(created_at, kind, value, unit, context, note, plant_id) VALUES(?,?,?,?,?,?,?)",
             (now, kind, value, unit, context, note, plant_id))
@@ -365,6 +365,10 @@ class Store:
 
     async def set_log_advice(self, entry_id: int, advice: dict) -> None:
         await self.db.execute("UPDATE log_entries SET advice_json=? WHERE id=?", (json.dumps(advice), entry_id))
+        await self.db.commit()
+
+    async def redate_log_entry(self, entry_id: int, created_at: str, note: str | None) -> None:
+        await self.db.execute("UPDATE log_entries SET created_at=?, note=? WHERE id=?", (created_at, note, entry_id))
         await self.db.commit()
 
     async def delete_log_entry(self, entry_id: int) -> None:

@@ -16,7 +16,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 
-from . import __version__
+from . import __version__, followups
 from .advisor import Advisor, AdvisorError
 from .controller import Controller, light_window, valid_hhmm
 from .devices import ROLE_BY_NAME, ROLES, SWITCH_ROLES, automap
@@ -693,41 +693,13 @@ async def create_log(body: LogCreate, request: Request):
     return {"entry": entry, "advice": advice}
 
 
-DOME_OFF_DETAIL = ("Lift the clear cup or bag off once the first true leaves (the first jagged pair, not the round starter "
-                   "leaves) are open. Leaving it on longer invites mould at the soil line. No dome on this cup? Just tick this off.")
-
-
 async def _dome_reminder(st, plant_id: Optional[int]) -> Optional[int]:
-    """'Take the dome off …' four days out, once per plant (never a second copy while one is open)."""
-    plant = await st.store.get_plant(plant_id) if plant_id else None
-    title = f"Take the dome off {plant['name'] if plant else 'the seedlings'}"
-    if title in {x["title"] for x in await st.store.tasks("open")}:
-        return None
-    tz = st.controller.tz(await st.controller.settings())
-    due = (datetime.now(tz).date() + timedelta(days=4)).isoformat()
-    t = await st.store.add_task(title, DOME_OFF_DETAIL, due, "normal", "system", plant_id)
-    return t["id"]
+    return await followups.dome_reminder(st.store, st.controller, plant_id)
 
 
 async def _after_log(st, kind: str, plant_id: Optional[int]) -> list[int]:
     """Follow-ups the app handles itself, so nobody has to remember them. Returns the ids of tasks it added."""
-    added: list[int] = []
-    if kind == "planted" and plant_id:
-        # every seedling starts under a dome here, so every planting gets the reminder to take it off
-        tid = await _dome_reminder(st, plant_id)
-        if tid:
-            added.append(tid)
-    if kind == "transplant":
-        profile = await st.controller.profile()
-        if profile.get("stage") == "seedling":
-            open_titles = {t["title"] for t in await st.store.tasks("open")}
-            title = "Switch the stage to Veg"
-            if title not in open_titles:
-                t = await st.store.add_task(title, "The plants are in their big pots. Settings → Change stage → Veg, so the tent "
-                                                   "switches to veg temperature, humidity and air exchange. Plug the two small lights "
-                                                   "back in and turn the big one up first.", None, "high", "system", None)
-                added.append(t["id"])
-    return added
+    return await followups.after_log(st.store, st.controller, kind, plant_id)
 
 
 # A tick that is undone within this long also takes back what the tick added (its log line and follow-up tasks).

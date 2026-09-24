@@ -217,6 +217,12 @@ class PlantNote(BaseModel):
     note: str = Field(description="A lasting fact worth remembering about this plant, e.g. 'left side of the tent' or 'planted 2026-09-25'")
 
 
+class Planting(BaseModel):
+    plant_id: int
+    kind: Literal["planted", "transplant"] = Field(description="planted = the seed went into its first cup of soil; transplant = moved into its final pot")
+    date: str = Field(description="The local date it happened, YYYY-MM-DD")
+
+
 class PlantBrief(BaseModel):
     plant_id: int
     headline: str = Field(description="One line for this plant")
@@ -226,6 +232,7 @@ class PlantBrief(BaseModel):
 class BriefOut(BaseModel):
     per_plant: list[PlantBrief] = Field(default_factory=list, description="One entry per active plant")
     plant_notes: list[PlantNote] = Field(default_factory=list, description="Facts to remember about a plant from now on")
+    plantings: list[Planting] = Field(default_factory=list, description="A planting or transplant the grower reported that the log doesn't show yet (the plan counts days from these)")
     tasks_done: list[int] = Field(default_factory=list, description="Ids of OPEN tasks that are now finished or obsolete (the grower did them, or the plan changed). Close them here instead of asking the grower to.")
     headline: str = Field(description="One line, e.g. 'Day 26 – healthy, humidity creeping up'")
     summary: str = Field(description="3–6 plain-language sentences for a beginner")
@@ -267,6 +274,7 @@ class ChatOut(BaseModel):
     tasks_done: list[int] = Field(default_factory=list, description="Ids of OPEN tasks that are now finished or obsolete (the grower did them, or the plan changed). Close them here instead of asking the grower to.")
     reply: str = Field(description="The conversational answer, markdown-light plain text")
     plant_notes: list[PlantNote] = Field(default_factory=list, description="Facts to remember about a plant from now on")
+    plantings: list[Planting] = Field(default_factory=list, description="A planting or transplant the grower just told you about (the plan counts days from these)")
     target_changes: list[TargetChange] = Field(default_factory=list)
     photo_requests: list[PhotoRequestDraft] = Field(default_factory=list)
     tasks: list[TaskDraft] = Field(default_factory=list)

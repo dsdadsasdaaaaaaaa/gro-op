@@ -9,7 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from statistics import mean
 from typing import Any, Optional, TypeVar
@@ -18,11 +18,12 @@ from zoneinfo import ZoneInfo
 import anthropic
 from pydantic import BaseModel
 
-from .controller import Controller
+from . import followups
+from .controller import Controller, light_window
 from .devices import ROLE_BY_NAME
 from .models import BriefOut, ChatOut, LogAdviceOut, PhotoAnalysisOut, TargetChange
 from .prompts import SYSTEM_PROMPT, units_instruction
-from .store import Store, parse_iso, utcnow
+from .store import Store, iso, parse_iso, utcnow
 from .targets import ADJUSTABLE_BY_ADVISOR, BOUNDS, c_to_f
 
 log = logging.getLogger(__name__)
@@ -150,7 +151,8 @@ class Advisor:
             lines.append("- TENT IN STANDBY: every device is off on purpose (nothing planted in it yet). Don't flag the environment as a problem; say what to prepare and when to start the tent.")
 
         lines += ["", "## Last 24 h"]
-        lines.append(_summarise_readings(await self.store.readings_since(24), units))
+        lines.append(_summarise_readings(await self.store.readings_since(24), units, tz=tz,
+                                         schedule=(targets.light_on_time, targets.light_hours)))
         lines.append(_summarise_device_log(await self.store.device_log_since(24)))
         lines += ["", "## Last 7 days (daily)"]
         readings7 = await self.store.readings_since(24 * 7)
@@ -320,6 +322,7 @@ class Advisor:
             if plant and note and note.lower() not in (plant.get("notes") or "").lower():
                 merged = ((plant.get("notes") or "").rstrip(". ") + ". " if plant.get("notes") else "") + note
                 await self.store.update_plant(pn.plant_id, notes=merged[-1500:])
+        recorded = await self._apply_plantings(getattr(out, "plantings", []) or [], plants, settings)
         changes: list[TargetChange] = getattr(out, "target_changes", []) or []
         if changes:
             applied_changes = await self._apply_target_changes(changes, settings, source)
@@ -334,7 +337,45 @@ class Advisor:
                 url = f"growop://photos?plant={pid}" if pid else "growop://photos"
                 await self.notifier.send(f"photo_request:{pid}", f"The advisor would like {len(titles)} photo(s){who}: " + "; ".join(titles),
                                          title="Photo request", url=url, service=svc, everyone=svc is None)
-        return {"tasks": created_tasks, "photo_requests": created_prs, "target_changes": applied_changes, "tasks_done": closed}
+        return {"tasks": created_tasks, "photo_requests": created_prs, "target_changes": applied_changes, "tasks_done": closed,
+                "plantings": recorded}
+
+    async def _apply_plantings(self, plantings: list, plants: dict, settings: dict) -> list[dict]:
+        """Record a planting or transplant the grower reported, dated the day it happened, so the plan counts from it.
+        A record of the same kind on another day is corrected rather than doubled."""
+        if not plantings:
+            return []
+        tz = self.controller.tz(settings)
+        today = datetime.now(tz).date()
+        entries = await self.store.log_entries(500)
+        done = []
+        for pl in plantings:
+            if pl.plant_id not in plants:
+                continue
+            try:
+                day = date.fromisoformat((pl.date or "").strip()[:10])
+            except ValueError:
+                continue
+            if day > today or day < today - timedelta(days=60):
+                continue
+            at = datetime.now(timezone.utc) if day == today else datetime(day.year, day.month, day.day, 12, tzinfo=tz)
+            at_iso = iso(at.astimezone(timezone.utc))
+            what = "Planted" if pl.kind == "planted" else "Moved to the big pot"
+            same = sorted((e for e in entries if e["kind"] == pl.kind and e.get("plant_id") == pl.plant_id), key=lambda e: e["created_at"])
+            if same:
+                first = same[0]
+                ts = parse_iso(first["created_at"])
+                if ts and ts.astimezone(tz).date() == day:
+                    continue
+                await self.store.redate_log_entry(first["id"], at_iso, f"{what} on {day} (date corrected by the advisor)")
+            else:
+                await self.store.add_log_entry(pl.kind, None, None, "advisor", f"{what} on {day} (recorded by the advisor)", pl.plant_id, at=at_iso)
+                await followups.after_log(self.store, self.controller, pl.kind, pl.plant_id)
+            done.append({"plant_id": pl.plant_id, "kind": pl.kind, "date": day.isoformat()})
+        if done:
+            await self.store.add_event("info", "advisor", "Advisor recorded: " + "; ".join(
+                f"{plants[d['plant_id']]['name']} {d['kind']} {d['date']}" for d in done))
+        return done
 
     async def _apply_target_changes(self, changes: list[TargetChange], settings: dict, source: str) -> list[dict]:
         targets, _, _ = await self.controller.effective_targets()
@@ -522,6 +563,11 @@ class Advisor:
             extras.append("Added task(s): " + "; ".join(t["title"] for t in applied["tasks"]))
         if applied["photo_requests"]:
             extras.append("Photo request(s) added in the Photos tab: " + "; ".join(p["title"] for p in applied["photo_requests"]))
+        if applied.get("plantings"):
+            pname = {p["id"]: p["name"] for p in await self.store.plants()}
+            extras.append("Recorded in the log: " + "; ".join(
+                f"{pname.get(d['plant_id'], 'plant')} {'planted' if d['kind'] == 'planted' else 'moved to its big pot'} on {d['date']}"
+                for d in applied["plantings"]))
         if applied["target_changes"]:
             names = {"temp_min_c": "lowest temperature", "temp_max_c": "highest temperature",
                      "humidity_min": "lowest humidity", "humidity_max": "highest humidity"}
@@ -536,7 +582,7 @@ class Advisor:
 
 # ---------------------------------------------------------------------- helpers
 
-def _summarise_readings(rows: list[dict], units: str, short: bool = False) -> str:
+def _summarise_readings(rows: list[dict], units: str, short: bool = False, tz=None, schedule=None) -> str:
     if not rows:
         return "- no sensor data"
     temps = [r["temp_c"] for r in rows if r["temp_c"] is not None]
@@ -560,6 +606,21 @@ def _summarise_readings(rows: list[dict], units: str, short: bool = False) -> st
         night_t = [r["temp_c"] for r in night if r["temp_c"] is not None]
         if day_t and night_t:
             parts.append(f"lights-on avg {t(mean(day_t))} / lights-off avg {t(mean(night_t))}")
+    timed = [r for r in rows if r.get("temp_c") is not None and parse_iso(r.get("t"))]
+    if timed and tz is not None and not short:
+        # when the extremes happened, so a cold afternoon with the tent off isn't read as a cold night
+        def when(r):
+            at = parse_iso(r["t"]).astimezone(tz)
+            if r.get("light_on"):
+                state = "lights on"
+            elif schedule and light_window(at, schedule[0], schedule[1])[0]:
+                state = "light off during its scheduled hours: tent off or light switched off"
+            else:
+                state = "lights off, night"
+            return f"{at:%a %H:%M}, {state}"
+        lo = min(timed, key=lambda r: r["temp_c"])
+        hi = max(timed, key=lambda r: r["temp_c"])
+        parts.append(f"coldest {t(lo['temp_c'])} ({when(lo)}), warmest {t(hi['temp_c'])} ({when(hi)})")
     prefix = "" if short else "- "
     return prefix + ", ".join(parts) + ("" if short else f" ({len(rows)} readings)")
 
@@ -586,15 +647,30 @@ def _group_by_day(rows: list[dict], tz: ZoneInfo) -> dict[str, list[dict]]:
 
 
 _STOP = {"the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "it", "its", "your", "with", "at", "levi's", "dad's",
-         "levi", "dad", "plant", "seedling", "seed", "both", "each", "s", "about", "around", "new"}
+         "levi", "dad", "plant", "seedling", "seed", "both", "each", "s", "about", "around", "new", "re", "tent"}
+# different words for the same job ("Re-aim the camera" / "Point the camera down")
+_SAME = {"point": "aim", "tilt": "aim", "angle": "aim", "lamp": "light", "led": "light", "panel": "light"}
 
 
 def _words(title: str) -> set[str]:
     import re as _re
-    return {w for w in _re.findall(r"[a-z0-9']+", title.lower()) if w not in _STOP and not w.isdigit()}
+    out = set()
+    for w in _re.findall(r"[a-z0-9']+", title.lower()):
+        if w in _STOP or w.isdigit():
+            continue
+        if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+            w = w[:-1]                     # cups → cup
+        out.add(_SAME.get(w, w))
+    return out
+
+
+_OPPOSITES = (("up", "down"), ("off", "on"), ("raise", "lower"), ("more", "less"), ("increase", "decrease"),
+              ("open", "close"), ("add", "remove"), ("higher", "lower"), ("warmer", "cooler"))
 
 
 def _similar(a: set[str], b: set[str]) -> bool:
     if not a or not b:
         return a == b
+    if any((x in a and y in b) or (y in a and x in b) for x, y in _OPPOSITES):
+        return False                       # "turn the light down" is not the same job as "turn the light up"
     return len(a & b) / len(a | b) >= 0.5
