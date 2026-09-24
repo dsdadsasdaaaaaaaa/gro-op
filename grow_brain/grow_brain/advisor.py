@@ -492,7 +492,7 @@ class Advisor:
             await self.store.add_event("info", "advisor", f"Camera check: {out.summary[:120]}")
         return analysis
 
-    async def chat(self, message: str, plant_id: int | None = None) -> dict:
+    async def chat(self, message: str, plant_id: int | None = None, author: str | None = None) -> dict:
         ctx, settings = await self._context()
         history_rows = await self.store.chat_history(20)
         while history_rows and history_rows[0]["role"] != "user":
@@ -504,10 +504,15 @@ class Advisor:
                 content = f"[{r['author']}] {content}"
             history.append({"role": r["role"], "content": content})
         plant = await self.store.get_plant(plant_id) if plant_id else None
-        who = f"{plant['owner'] or 'Grower'} (about plant_id={plant['id']}, \"{plant['name']}\") says" if plant else "Grower says"
+        # The asker is whoever holds the phone; without that, assume the plant's owner is asking.
+        asker = (author or "").strip() or (plant["owner"] if plant else None)
+        if plant:
+            who = f"{asker or 'Grower'} (asking about plant_id={plant['id']}, \"{plant['name']}\") says"
+        else:
+            who = f"{asker or 'Grower'} (asking about the whole tent) says"
         # Fresh context goes into the latest user turn so the cached system prompt stays stable.
         user = f"<current_state>\n{ctx}\n</current_state>\n\n{who}: {message}"
-        await self.store.add_chat("user", message, author=(plant["owner"] or plant["name"]) if plant else None, plant_id=plant_id)
+        await self.store.add_chat("user", message, author=asker or (plant["name"] if plant else None), plant_id=plant_id)
         out = await self._parse(ChatOut, user, settings, history=history, effort="medium", kind="chat")
         applied = await self._apply(out, settings, "chat", default_plant_id=plant_id)
         reply = out.reply

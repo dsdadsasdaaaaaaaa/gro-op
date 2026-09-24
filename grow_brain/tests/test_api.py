@@ -519,6 +519,15 @@ async def test_quick_log_task_followups_chat_authors_and_refill(client):
     d = (await c.post("/api/tasks", json={"title": "Put a clear dome over Levi's cup", "plant_id": ps[0]["id"]})).json()
     await c.post(f"/api/tasks/{d['id']}/complete")
     assert any(x["title"].startswith("Take the dome off") for x in (await c.get("/api/tasks")).json()["tasks"])
+    # an Undo right after the tick takes back its "Done:" log line and the follow-up it made
+    await c.post(f"/api/tasks/{d['id']}/reopen")
+    titles = [x["title"] for x in (await c.get("/api/tasks")).json()["tasks"]]
+    assert d["title"] in titles and not any(x.startswith("Take the dome off") for x in titles)
+    assert not any((e.get("note") or "") == f"Done: {d['title']}" for e in (await c.get("/api/log")).json()["entries"])
+    # checking on the dome is not putting one on
+    k = (await c.post("/api/tasks", json={"title": "Check the dome for condensation"})).json()
+    await c.post(f"/api/tasks/{k['id']}/complete")
+    assert not any(x["title"].startswith("Take the dome off") for x in (await c.get("/api/tasks")).json()["tasks"])
     # transplanting while still a seedling asks for the stage change
     await c.post("/api/log", json={"kind": "transplant", "plant_id": ps[0]["id"]})
     assert any(x["title"] == "Switch the stage to Veg" for x in (await c.get("/api/tasks")).json()["tasks"])
@@ -585,3 +594,11 @@ async def test_week_old_photo_requests_expire_and_nudges_stop_after_three(client
     await _nudge_tick(st)
     assert (await store.get_photo_request(old["id"]))["status"] == "expired"
     assert not any("Newer" in n for n in ha.notifications)
+
+
+async def test_settings_reply_includes_budget_and_models(client):
+    c, ha, store, controller = client
+    s = (await c.get("/api/settings")).json()
+    assert s["advisor_budget_usd"] == 40.0 and s["humidifier_tank_hours"] == 4.0 and "claude-opus-5" in s["models_available"]
+    s = (await c.put("/api/settings", json={"advisor_budget_usd": 25})).json()
+    assert s["advisor_budget_usd"] == 25

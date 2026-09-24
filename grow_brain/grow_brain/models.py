@@ -106,6 +106,10 @@ class SettingsModel(BaseModel):
     price_per_kwh: Optional[float] = None
     currency: str = "CAD"
     advisor_month_usd: float = 0.0
+    advisor_budget_usd: float = 40.0
+    humidifier_tank_hours: float = 4.0
+    admin_notify_service: Optional[str] = None
+    models_available: list[str] = Field(default_factory=list)
 
 
 class SettingsUpdate(BaseModel):
@@ -181,6 +185,7 @@ class TaskCreate(BaseModel):
 class ChatRequest(BaseModel):
     message: str = Field(..., max_length=2000)
     plant_id: Optional[int] = None
+    author: Optional[str] = Field(None, max_length=40)   # who is asking (the phone's owner), not whose plant
 
 
 # ---------- Claude structured outputs ----------

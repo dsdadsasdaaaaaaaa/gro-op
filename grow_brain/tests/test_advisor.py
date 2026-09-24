@@ -125,6 +125,17 @@ async def test_chat_keeps_history_and_adds_task(env):
     assert len(await store.chat_history()) == 4
 
 
+async def test_chat_records_who_asked_not_whose_plant(env):
+    store, adv, fake = env
+    dad = await store.add_plant(name="Dad's plant", owner="Dad")
+    await adv.chat("how is Dad's plant doing?", dad["id"], author="Levi")
+    rows = await store.chat_history()
+    assert rows[-2]["author"] == "Levi" and rows[-2]["plant_id"] == dad["id"]
+    assert "Levi (asking about plant_id=" in fake.calls[-1]["messages"][-1]["content"]
+    await adv.chat("and mine?", dad["id"])          # no author sent: assume the plant's owner is asking
+    assert (await store.chat_history())[-2]["author"] == "Dad"
+
+
 async def test_refusal_surfaces_cleanly(env):
     store, adv, fake = env
 

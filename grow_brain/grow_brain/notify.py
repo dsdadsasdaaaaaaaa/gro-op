@@ -108,8 +108,10 @@ class Notifier:
                 self._last["_nobody"] = now
                 log.warning("notification %r not delivered: no phone is linked to any plant", key)
                 try:
-                    await self.store.add_event("warn", "system", "An alert couldn't be sent to any phone: link each person's "
-                                                                 "phone to their plant in Settings → Plants → Notifications.")
+                    msg = ("An alert couldn't be sent to any phone: link each person's phone to their plant in "
+                           "Settings → Plants → Phone for alerts.")
+                    await self.store.resolve_alerts("system", "An alert couldn't be sent to any phone")
+                    await self.store.add_event("warn", "system", msg)
                 except Exception:
                     pass
             return False

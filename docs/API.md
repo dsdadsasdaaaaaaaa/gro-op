@@ -1,4 +1,4 @@
-# Grow Brain HTTP API (contract for the iOS app)
+# Grow Brain HTTP API (contract for the iOS and Android apps and the web dashboard)
 
 Base URL: `http://<home-assistant-host>:8099` (configurable in the app).
 Every request except `GET /api/health` must carry the header `X-API-Key: <key>`.
@@ -7,7 +7,7 @@ All timestamps are ISO-8601 UTC strings. All temperatures are returned in BOTH �
 Errors: non-2xx with JSON `{"detail": "human readable message"}`.
 
 ## GET /api/health   (no auth)
-`{"ok": true, "version": "0.7.0", "ha_connected": true, "advisor_enabled": true, "control": "ok", "last_cycle_at": "...", "consecutive_failures": 0}`.
+`{"ok": true, "version": "0.8.2", "ha_connected": true, "advisor_enabled": true, "control": "ok", "last_cycle_at": "...", "consecutive_failures": 0}`.
 Returns **503** with `ok:false` when the control loop has stopped or is stuck (used by the Supervisor watchdog; turn the add-on's Watchdog toggle on).
 
 ## GET /api/status
@@ -249,3 +249,36 @@ Status gains `"camera": null | {"entity_id":"camera.tent_cam","name":"Wyze Cam M
 - Power watchdog: a device that is ON for 3+ minutes but draws (almost) no power raises a warn event + notification ("Humidifier is on but not drawing power — tank empty or unplugged?"). Same for a light that should be on.
 - `GET /api/backup` → `application/zip` of the database + photos (auth header).
 - `GET /` serves the web dashboard (static files under `/assets/`). The dashboard sends `X-API-Key` on every call and loads images with fetch()+blob URLs (no key in URLs).
+
+## Additions in 0.8.x
+Every request may carry `X-Device-Id: <random id per phone/browser>`; it keeps the "unread brief" flag per phone.
+
+**Status**
+- `targets.band`: `"day"` or `"night"` (which band the numbers are right now); `day_targets`: the daytime band when it is night.
+- `humidifier_tank`: `{"run_hours_since_refill","tank_hours","hours_left","percent_left","dry","refill_at","refill_task_id"}` (misting time since the last refill vs. `settings.humidifier_tank_hours`; `dry` once the plug stops drawing power while on).
+- `exhaust_duty_1h`: share of the last hour the exhaust ran (0–1).
+- `learned`: see 0.6.0 above. `alerts[]` are de-duplicated and self-clearing kinds drop after 7 days.
+- DeviceStatus `mode` `"on"`/`"off"` means *set by hand*; `override_until` is when it returns to auto (null = until changed).
+
+**Logging**
+- `POST /api/log` gains `"advise": false` (default): the entry is saved instantly and free, and the reply says the next brief will read it. `"advise": true` asks the advisor now (10–40 s, paid). Kinds add `planted` (counts seedling days from here) and `transplant` (while still a seedling, adds the task "Switch the stage to Veg").
+- LogEntry gains `advice_steps` and `urgency`. Ticking a task writes a `note` entry with `context: "task"` and `note: "Done: <title>"`.
+
+**Tasks**
+- `POST /api/tasks/{id}/complete` may add follow-ups (a "put the dome on" task schedules "Take the dome off …" four days later).
+- `POST /api/tasks/{id}/reopen` within 10 minutes of the tick (the apps' Undo) also removes that tick's "Done:" log line and any follow-up task it created that is still open.
+
+**Chat**
+- `POST /api/chat {"message","plant_id": int|null,"author": "Levi"|null}`: `author` is who is asking (the phone's owner); without it the plant's owner is assumed. `GET /api/chat` messages gain `author` (the asker, or "Advisor") and `plant_id`.
+
+**Plants and notifications**
+- `GET /api/plants?include_archived=true`; `POST /api/plants/{id}/restore` un-archives.
+- `POST /api/notify/test?service=notify.mobile_app_x` sends a test push to that phone.
+- `POST /api/humidifier/refilled` resets the tank estimate → the `humidifier_tank` object.
+
+**Settings** (GET returns them all; PUT accepts any subset)
+- `advisor_budget_usd` (default 40, 1–500): monthly cap on Claude spend; calls stop with a clear message when reached. `advisor_month_usd` is this month's spend.
+- `models_available`: the models `model` may be set to.
+- `humidifier_tank_hours` (default 4): hours of misting one tank lasts.
+- `admin_notify_service`: the phone that gets "update the add-on" notices (default: the first plant's phone).
+

@@ -8,6 +8,7 @@ import io
 import logging
 import re
 import mimetypes
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
@@ -235,6 +236,8 @@ async def status(request: Request):
             continue
         if e["kind"] not in ("safety", "device", "climate", "system") and age_h > 24:
             continue
+        if any(x["message"] == e["message"] for x in alerts):
+            continue   # the same problem reported again (e.g. after a restart): show it once
         alerts.append({"id": e["id"], "level": e["level"], "kind": e["kind"], "message": e["message"], "at": e["at"]})
     alerts = alerts[:6]
     plants = await _plants_api(request)
@@ -690,17 +693,25 @@ async def create_log(body: LogCreate, request: Request):
     return {"entry": entry, "advice": advice}
 
 
-async def _after_log(st, kind: str, plant_id: Optional[int]) -> None:
-    """Follow-ups the app handles itself, so nobody has to remember them."""
+async def _after_log(st, kind: str, plant_id: Optional[int]) -> list[int]:
+    """Follow-ups the app handles itself, so nobody has to remember them. Returns the ids of tasks it added."""
+    added: list[int] = []
     if kind == "transplant":
         profile = await st.controller.profile()
         if profile.get("stage") == "seedling":
             open_titles = {t["title"] for t in await st.store.tasks("open")}
             title = "Switch the stage to Veg"
             if title not in open_titles:
-                await st.store.add_task(title, "The plants are in their big pots. Settings → Change stage → Veg, so the tent "
-                                               "switches to veg temperature, humidity and air exchange. Plug the two small lights "
-                                               "back in and turn the big one up first.", None, "high", "system", None)
+                t = await st.store.add_task(title, "The plants are in their big pots. Settings → Change stage → Veg, so the tent "
+                                                   "switches to veg temperature, humidity and air exchange. Plug the two small lights "
+                                                   "back in and turn the big one up first.", None, "high", "system", None)
+                added.append(t["id"])
+    return added
+
+
+# A tick that is undone within this long also takes back what the tick added (its log line and follow-up tasks).
+UNDO_WINDOW_S = 600
+_DOME_ON = re.compile(r"\b(put|place|cover|dome on)\b.*\bdome\b|\bdome\b.*\b(on|over)\b")
 
 
 @router.get("/log", dependencies=auth)
@@ -731,24 +742,46 @@ async def complete_task(tid: int, request: Request):
         title = t["title"]
         low = title.lower()
         kind = "planted" if re.match(r"plant .*seed", low) else "transplant" if low.startswith("transplant") else "note"
-        await st.store.add_log_entry(kind, None, None, "task", f"Done: {title}", t.get("plant_id"))
-        await _after_log(st, kind, t.get("plant_id"))
-        if "dome" in low and "off" not in low:
-            tz = st.controller.tz(await st.controller.settings())
-            due = (datetime.now(tz).date() + timedelta(days=4)).isoformat()
+        entry = await st.store.add_log_entry(kind, None, None, "task", f"Done: {title}", t.get("plant_id"))
+        added = await _after_log(st, kind, t.get("plant_id"))
+        # Only "put the dome on" jobs get the reminder to take it off again (not "check the dome for condensation").
+        if _DOME_ON.search(low) and "off" not in low:
             plant = await st.store.get_plant(t["plant_id"]) if t.get("plant_id") else None
             whose = f"{plant['name']}" if plant else "the seedlings"
-            await st.store.add_task(f"Take the dome off {whose}", "Lift the clear cup or bag off once the first true leaves "
-                                    "(the first jagged pair, not the round starter leaves) are open. Leaving it on longer "
-                                    "invites mould at the soil line.", due, "normal", "system", t.get("plant_id"))
+            follow = f"Take the dome off {whose}"
+            if follow not in {x["title"] for x in await st.store.tasks("open")}:
+                tz = st.controller.tz(await st.controller.settings())
+                due = (datetime.now(tz).date() + timedelta(days=4)).isoformat()
+                ft = await st.store.add_task(follow, "Lift the clear cup or bag off once the first true leaves "
+                                             "(the first jagged pair, not the round starter leaves) are open. Leaving it on longer "
+                                             "invites mould at the soil line.", due, "normal", "system", t.get("plant_id"))
+                added.append(ft["id"])
+        # Remembered briefly so an Undo can take these back; older entries are dropped as new ones arrive.
+        effects = {k: v for k, v in (await st.store.get_kv("task_done_effects", {}) or {}).items()
+                   if time.time() - float(v.get("at") or 0) <= UNDO_WINDOW_S}
+        effects[str(tid)] = {"at": time.time(), "log_id": entry.get("id"), "tasks": added}
+        await st.store.set_kv("task_done_effects", effects)
     return t
 
 
 @router.post("/tasks/{tid}/reopen", dependencies=auth)
 async def reopen_task(tid: int, request: Request):
-    t = await request.app.state.store.set_task_status(tid, "open")
+    store = request.app.state.store
+    t = await store.set_task_status(tid, "open")
     if not t:
         raise HTTPException(404, "No such task")
+    # An "Undo" right after the tick: take back the "Done:" log line and any follow-up task it created.
+    effects = await store.get_kv("task_done_effects", {}) or {}
+    eff = effects.pop(str(tid), None)
+    if eff:
+        await store.set_kv("task_done_effects", effects)
+        if time.time() - float(eff.get("at") or 0) <= UNDO_WINDOW_S:
+            if eff.get("log_id"):
+                await store.delete_log_entry(int(eff["log_id"]))
+            for fid in eff.get("tasks") or []:
+                ft = await store.get_task(int(fid))
+                if ft and ft["status"] == "open":
+                    await store.delete_task(int(fid))
     return t
 
 
@@ -879,7 +912,7 @@ async def chat(body: ChatRequest, request: Request):
     if not body.message.strip():
         raise HTTPException(400, "Say something first")
     try:
-        return await st.advisor.chat(body.message.strip(), body.plant_id)
+        return await st.advisor.chat(body.message.strip(), body.plant_id, author=body.author)
     except AdvisorError as e:
         raise HTTPException(502, str(e))
 

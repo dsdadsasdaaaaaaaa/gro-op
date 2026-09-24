@@ -367,6 +367,10 @@ class Store:
         await self.db.execute("UPDATE log_entries SET advice_json=? WHERE id=?", (json.dumps(advice), entry_id))
         await self.db.commit()
 
+    async def delete_log_entry(self, entry_id: int) -> None:
+        await self.db.execute("DELETE FROM log_entries WHERE id=?", (entry_id,))
+        await self.db.commit()
+
     async def get_log_entry(self, entry_id: int) -> dict:
         async with self.db.execute("SELECT * FROM log_entries WHERE id=?", (entry_id,)) as cur:
             return self._log_row(await cur.fetchone())
@@ -455,6 +459,10 @@ class Store:
             (title, detail, due, priority, created_by, iso(utcnow()), plant_id))
         await self.db.commit()
         return await self.get_task(cur.lastrowid)
+
+    async def delete_task(self, tid: int) -> None:
+        await self.db.execute("DELETE FROM tasks WHERE id=?", (tid,))
+        await self.db.commit()
 
     async def get_task(self, tid: int) -> dict | None:
         async with self.db.execute("SELECT * FROM tasks WHERE id=?", (tid,)) as cur:
