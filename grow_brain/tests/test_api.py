@@ -329,6 +329,27 @@ async def test_climate_diagnosis_when_the_light_is_too_hot(client):
     assert (await c.get("/api/status")).json()["exhaust_duty_1h"] >= 0.45
 
 
+async def test_climate_warning_left_by_an_older_version_is_cleared(client):
+    c, ha, store, controller = client
+    from datetime import timedelta
+    from grow_brain.store import iso, utcnow
+    # raised before the add-on remembered its warnings across restarts: no flag says it's open
+    await store.add_event("warn", "climate", "Can't hold the climate: the exhaust ran 45% of the last hour")
+    now = utcnow()
+    await store.db.execute("INSERT INTO device_log(t, role, state, reason) VALUES(?,?,?,?)",
+                           (iso(now - timedelta(minutes=50)), "exhaust_fan", "off", "test"))
+    for k in range(40):
+        await store.db.execute("INSERT INTO readings(t, temp_c, humidity, vpd_kpa, co2, light_on) VALUES(?,?,?,?,?,?)",
+                               (iso(now - timedelta(minutes=40 - k)), 24.5, 63.0, 1.1, None, 1))
+    await store.db.commit()
+    await c.put("/api/targets", json={"light_hours": 24})
+    ha.state["switch.grow_light"] = "on"
+    controller._climate_checked_at = None
+    await controller.cycle()
+    alerts = (await c.get("/api/status")).json()["alerts"]
+    assert not any(a["message"].startswith("Can't hold the climate") for a in alerts)
+
+
 async def test_humidifier_tank_tracking(client):
     c, ha, store, controller = client
     from datetime import timedelta

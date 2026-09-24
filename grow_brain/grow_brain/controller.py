@@ -430,6 +430,7 @@ class Controller:
         self._restored = False
         self._climate_checked_at: Optional[datetime] = None
         self._climate_alert = False
+        self._climate_swept = False   # the first good check after a start also clears warnings left by older versions
         self._tank: Optional[dict] = None   # humidifier water: run seconds since the last refill, open task id
         self.safety_latch: Optional[dict] = None   # {"kind": "hot"|"cold", "since": iso}
         self._unavail_since: dict[str, datetime] = {}
@@ -900,9 +901,10 @@ class Controller:
             return
         self._climate_checked_at = now
         if ctx.standby or ctx.sensor.stale or not ctx.lights_on:
-            if self._climate_alert and (ctx.standby or not ctx.lights_on):
+            if (self._climate_alert or not self._climate_swept) and (ctx.standby or not ctx.lights_on):
                 await self.store.resolve_alerts("climate", "Can't hold the climate")
                 self._climate_alert = False
+                self._climate_swept = True
             return
         duty = await self.exhaust_duty(1.0)
         readings = [r for r in await self.store.readings_since(1.0) if r.get("temp_c") is not None]
@@ -923,10 +925,12 @@ class Controller:
             await self.notifier.send("climate", msg, hours=6, title="Grow tent", everyone=True)
             await self.store.add_event("warn", "climate", msg)
             self._climate_alert = True
-        elif self._climate_alert and (duty < CLIMATE_DUTY_LIMIT - 0.1 or temp < t.temp_max_c - 1.0):
-            await self.store.resolve_alerts("climate", "Can't hold the climate")
-            await self.store.add_event("info", "climate", f"Climate is holding again: exhaust {duty * 100:.0f}% of the last hour, {temp:.1f}°C.")
+        elif (self._climate_alert or not self._climate_swept) and (duty < CLIMATE_DUTY_LIMIT - 0.1 or temp < t.temp_max_c - 1.0):
+            cleared = await self.store.resolve_alerts("climate", "Can't hold the climate")
+            if self._climate_alert or cleared:
+                await self.store.add_event("info", "climate", f"Climate is holding again: exhaust {duty * 100:.0f}% of the last hour, {temp:.1f}°C.")
             self._climate_alert = False
+        self._climate_swept = True
 
     async def exhaust_duty(self, hours: float) -> Optional[float]:
         """Share of the last `hours` the exhaust was on, from the device log. None if it never switched."""
