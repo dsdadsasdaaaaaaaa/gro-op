@@ -921,7 +921,7 @@ class Controller:
             self._pending_samples.append({
                 "role": "exchange", "aim": humidity_aim(ctx.targets, ctx.exchange_drop * swap_s / 60.0, ctx.stage),
                 "swap_min": self._last_swap_min or swap_s / 60.0, "on_at": on_at, "ended": now,
-                "lights_on": ctx.lights_on,
+                "lights_on": ctx.lights_on, "dry": bool((self._tank or {}).get("dry")),
             })
             return
         if dec.tag in ("humidifier_done", "exhaust_cool_done") and start is not None and on_at is not None \
@@ -930,7 +930,7 @@ class Controller:
             if minutes >= 0.5:
                 self._pending_samples.append({
                     "role": role, "start": start, "minutes": minutes, "on_at": on_at, "ended": now,
-                    "lights_on": ctx.lights_on,
+                    "lights_on": ctx.lights_on, "dry": role == "humidifier" and bool((self._tank or {}).get("dry")),
                 })
 
     async def _learn(self, ctx: ControlContext) -> None:
@@ -952,7 +952,7 @@ class Controller:
                 ex_last = self.last_switched.get("exhaust_fan")
                 if (ex_last and ex_last > smp["on_at"]) or self.sensor.humidity is None or ctx.lights_on != smp["lights_on"]:
                     continue
-                if (self._tank or {}).get("dry"):
+                if smp.get("dry") or (self._tank or {}).get("dry"):
                     # an empty tank can't refill anything: learning from it would make every swap look huge,
                     # and the refills would overshoot for hours after the tank is filled again
                     continue
@@ -971,6 +971,8 @@ class Controller:
                 ex_last = self.last_switched.get("exhaust_fan")
                 if (ex_last and ex_last > smp["on_at"]) or self.sensor.humidity is None or ctx.lights_on != smp["lights_on"]:
                     continue  # the exhaust ran, or the lights changed, during the window: not a clean measurement
+                if smp.get("dry") or (self._tank or {}).get("dry"):
+                    continue  # a pulse from an empty tank adds nothing: it says nothing about the humidifier's strength
                 sample = (self.sensor.humidity - smp["start"]) / smp["minutes"]
                 key, lo, hi, label = "humidifier_pts_per_min", 0.2, 6.0, "humidifier raises humidity about %.1f points per minute"
             else:

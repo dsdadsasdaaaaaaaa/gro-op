@@ -679,3 +679,37 @@ async def test_refill_after_a_swap_teaches_the_swap_drop(client):
     controller.sensor = SensorSnapshot(24.5, 55.0, 1.0, None, utcnow(), False)
     await controller._learn(ctx)
     assert controller.learned["exchange_rh_drop_per_min"] == 2.17
+
+
+async def test_an_empty_tank_teaches_the_humidifier_nothing(client):
+    c, ha, store, controller = client
+    from datetime import timedelta
+    from grow_brain.controller import LAG_S, ControlContext, SensorSnapshot
+    from grow_brain.store import utcnow
+    from grow_brain.targets import stage_defaults
+    t = stage_defaults("seedling")
+    now = utcnow()
+    ctx = ControlContext(now_local=now, stage="seedling", targets=t, day_targets=t, light_scheduled_on=True, lights_on=True,
+                         sensor=SensorSnapshot(24.5, 60.0, 1.0, None, now, False), safety_temp_max_c=35.0,
+                         safety_temp_min_c=12.0, exhaust_ducted=True, paused=False)
+    controller.learned["humidifier_pts_per_min"] = 2.0
+
+    def pulse(**kw):
+        return {"role": "humidifier", "start": 60.0, "minutes": 1.0, "on_at": utcnow() - timedelta(seconds=LAG_S + 70),
+                "ended": utcnow() - timedelta(seconds=LAG_S + 10), "lights_on": True, **kw}
+    # a 1-minute pulse while the tank is empty moves humidity 0.3 points (noise): not a real 0.3 pts/min humidifier
+    controller._tank = {**(controller._tank or {}), "dry": True}
+    controller._pending_samples.append(pulse())
+    controller.sensor = SensorSnapshot(24.5, 60.3, 1.0, None, utcnow(), False)
+    await controller._learn(ctx)
+    assert controller.learned["humidifier_pts_per_min"] == 2.0
+    # a pulse that ran dry is ignored even when the tank was refilled before it could be measured
+    controller._tank["dry"] = False
+    controller._pending_samples.append(pulse(dry=True))
+    await controller._learn(ctx)
+    assert controller.learned["humidifier_pts_per_min"] == 2.0
+    # a normal pulse still teaches: +2.2 points in a minute → 0.7 × 2.0 + 0.3 × 2.2
+    controller._pending_samples.append(pulse())
+    controller.sensor = SensorSnapshot(24.5, 62.2, 1.0, None, utcnow(), False)
+    await controller._learn(ctx)
+    assert controller.learned["humidifier_pts_per_min"] == 2.06
