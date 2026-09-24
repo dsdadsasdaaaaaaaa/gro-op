@@ -1,6 +1,19 @@
 // API client: X-API-Key on every call, blobs for images, 401 -> connect card.
 const KEY_STORE = 'growop.apiKey';
 const SERVER_STORE = 'growop.server';
+const DEVICE_STORE = 'growop.device';
+
+/** Where this page is running: 'addon' (the add-on's own port on home Wi-Fi), 'ingress' (Home Assistant's sidebar,
+ *  already signed in to Home Assistant) or 'hosted' (the password-protected copy on the internet). */
+export const MODE = location.port === '8099' ? 'addon' : /\/api\/hassio_ingress\//.test(location.pathname) ? 'ingress' : 'hosted';
+
+function deviceId() {
+  try {
+    let id = localStorage.getItem(DEVICE_STORE);
+    if (!id) { id = 'web-' + Math.random().toString(36).slice(2, 12); localStorage.setItem(DEVICE_STORE, id); }
+    return id;
+  } catch { return 'web'; }
+}
 
 export class ApiError extends Error {
   constructor(status, detail) { super(detail || `HTTP ${status}`); this.status = status; this.detail = detail; }
@@ -19,23 +32,32 @@ export function setConn({ key, server }) {
 export function clearConn() { try { localStorage.removeItem(KEY_STORE); } catch { /* ignore */ } }
 
 function defaultBase() { return new URL('.', location.href).href.replace(/\/$/, ''); }
-function base() { return getConn().server || defaultBase(); }
+// Only the add-on's own page may point at another server: the hosted copy must never send its password elsewhere.
+function base() { return (MODE === 'addon' && getConn().server) || defaultBase(); }
+
+/** A plain sentence out of an error body (FastAPI sends a string, or a list of field errors). */
+function detailText(d) {
+  if (!d) return '';
+  if (typeof d === 'string') return d;
+  if (Array.isArray(d)) return d.map((x) => (x && x.msg ? String(x.msg).replace(/^Value error, /, '') : String(x))).join('; ');
+  return String(d.message || d.detail || '');
+}
 
 async function request(method, path, { body, form, signal, raw } = {}) {
-  const headers = { 'X-API-Key': getConn().key };
+  const headers = { 'X-API-Key': getConn().key, 'X-Device-Id': deviceId() };
   const init = { method, headers, signal };
   if (form) init.body = form;
   else if (body !== undefined) { headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body); }
   let res;
   try { res = await fetch(base() + path, init); }
-  catch (e) { if (e.name === 'AbortError') throw e; throw new ApiError(0, `Can't reach the grow brain (${e.message})`); }
+  catch (e) { if (e.name === 'AbortError') throw e; throw new ApiError(0, `Can't reach GrowOp at home (${e.message})`); }
   if (res.status === 401) {
     window.dispatchEvent(new CustomEvent('growop:unauthorized'));
-    throw new ApiError(401, 'Not authorised — check the API key');
+    throw new ApiError(401, MODE === 'hosted' ? 'Wrong dashboard password' : 'Not authorised: check the API key');
   }
   if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try { const j = await res.json(); if (j && j.detail) detail = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail); } catch { /* not json */ }
+    let detail = `Something went wrong (${res.status})`;
+    try { const j = await res.json(); const t = detailText(j && j.detail); if (t) detail = t; } catch { /* not json */ }
     throw new ApiError(res.status, detail);
   }
   if (raw) return res;

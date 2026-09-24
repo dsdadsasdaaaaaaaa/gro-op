@@ -43,8 +43,8 @@
         <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20c0-8 4-14 16-16 0 10-4 15-12 16"/><path d="M4 20c3-5 6-8 11-11"/></svg>
         GrowOp
       </a>
-      <h1 style="font-size:22px">Connect to your grow brain</h1>
-      <p class="muted small">The API key is in the Grow Brain add-on settings in Home Assistant.</p>
+      <h1 style="font-size:22px">Connect to GrowOp</h1>
+      <p id="connect-hint" class="muted small">The API key is in the Grow Brain add-on settings in Home Assistant.</p>
       <div class="field">
         <label for="connect-key">API key</label>
         <div class="row" style="flex-wrap:nowrap">
@@ -52,7 +52,7 @@
           <button id="connect-show" class="btn quiet icon" type="button" aria-label="Show key" aria-pressed="false"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></button>
         </div>
       </div>
-      <div class="field">
+      <div id="connect-server-field" class="field">
         <label for="connect-server">Server address <span class="faint">(optional)</span></label>
         <input id="connect-server" class="input" type="url" placeholder="Same as this page" autocomplete="off" autocapitalize="off" spellcheck="false">
       </div>

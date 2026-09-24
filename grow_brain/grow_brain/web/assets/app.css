@@ -515,3 +515,16 @@ details.exp[open] > summary::after { transform: rotate(-90deg); }
 .compare-col h3 { margin: 0 0 4px; }
 .compare-col .timeline { margin-top: 8px; }
 @media (max-width: 800px) { .compare { grid-template-columns: 1fr; } }
+
+/* humidifier water meter */
+.meter { height: 8px; border-radius: 999px; background: var(--track, rgba(127,127,127,.18)); overflow: hidden; }
+.meter .fill { height: 100%; border-radius: 999px; background: var(--good); transition: width .4s ease; }
+.meter .fill.lvl-warn { background: var(--warn); }
+.meter .fill.lvl-alert { background: var(--alert); }
+/* start-tent checklist */
+ul.checklist { text-align: left; margin: 4px auto 8px; max-width: 360px; }
+ul.checklist li { display: flex; gap: 8px; align-items: flex-start; padding: 4px 0; }
+ul.checklist li .ic { flex: none; color: var(--primary); margin-top: 2px; }
+/* chat: the other person's messages */
+.msg .who { font-size: 11px; opacity: .7; margin-bottom: 2px; }
+.event.resolved { opacity: .6; }

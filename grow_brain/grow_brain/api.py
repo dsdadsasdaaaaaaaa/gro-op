@@ -103,8 +103,35 @@ async def _plants_api(request: Request) -> list[dict]:
 
 
 @router.get("/plants", dependencies=auth)
-async def list_plants(request: Request):
+async def list_plants(request: Request, include_archived: bool = False):
+    out = {"plants": await _plants_api(request)}
+    if include_archived:
+        out["archived"] = [{"id": p["id"], "name": p["name"], "owner": p["owner"]}
+                           for p in await request.app.state.store.plants(include_archived=True) if p.get("archived")]
+    return out
+
+
+@router.post("/plants/{pid}/restore", dependencies=auth)
+async def restore_plant(pid: int, request: Request):
+    st = request.app.state
+    p = await st.store.get_plant(pid)
+    if not p:
+        raise HTTPException(404, "No such plant")
+    await st.store.unarchive_plant(pid)
+    await st.store.add_event("info", "system", f"Plant brought back: {p['name']}")
     return {"plants": await _plants_api(request)}
+
+
+@router.post("/notify/test", dependencies=auth)
+async def notify_test(request: Request, service: str):
+    """Send one test push so a person can check their phone is linked."""
+    check_rate("notify_test", 10, 3600)
+    st = request.app.state
+    if not re.fullmatch(r"notify\.[a-z0-9_]+", service):
+        raise HTTPException(422, "That isn't a notification service.")
+    if not await st.controller.ha.notify(service, "Test from GrowOp: this phone will get the tent's alerts.", title="GrowOp"):
+        raise HTTPException(502, "Home Assistant couldn't send it. Is the Home Assistant app installed and signed in on that phone?")
+    return {"ok": True}
 
 
 @router.post("/plants", dependencies=auth)
@@ -520,10 +547,12 @@ async def _settings_api(request: Request) -> dict:
     s = await st.controller.settings()
     s["model"] = s.get("model") or st.boot.model
     s["advisor_enabled"] = st.advisor.enabled
+    from .advisor import MODELS
+    s["models_available"] = MODELS
     month_start = datetime.now(st.controller.tz(s)).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     s["advisor_month_usd"] = (await st.store.usage_summary(iso(month_start)))["usd"]
     try:
-        s["notify_services_available"] = await st.controller.ha.list_notify_services()
+        s["notify_services_available"] = [x for x in await st.controller.ha.list_notify_services() if x != "notify.notify"]
     except Exception:
         s["notify_services_available"] = []
     return SettingsModel(**s).model_dump()

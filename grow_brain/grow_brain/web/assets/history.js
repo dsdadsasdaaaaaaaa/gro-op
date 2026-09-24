@@ -19,6 +19,17 @@ export function createHistory(ctx) {
     };
   }
 
+  /** The day band from status, or the night band derived the same way the controller does. */
+  function bandAt(k, lightsOn) {
+    const s = ctx.getStatus() || {}; const d = s.day_targets || s.targets || {}; const f = usesF();
+    const conv = (c) => (c == null ? null : f ? cToF(c) : c);
+    if (k === 'humidity') return { min: d.humidity_min, max: d.humidity_max };
+    if (k === 'vpd') return { min: d.vpd_min, max: d.vpd_max };
+    const drop = d.night_temp_drop_c || 0;
+    if (lightsOn || !drop) return { min: conv(d.temp_min_c), max: conv(d.temp_max_c) };
+    return { min: conv(Math.min(d.temp_min_c - drop, 18)), max: conv(d.temp_max_c - drop + 1) };
+  }
+
   function series() {
     const f = usesF();
     return {
@@ -47,7 +58,7 @@ export function createHistory(ctx) {
 
   function renderStats() {
     const ser = series(), b = bands(), f = usesF();
-    const rows = [['temp', `Temp (${f ? '°F' : '°C'})`, 1], ['humidity', 'Humidity (%)', 0], ['vpd', 'VPD (kPa)', 2]];
+    const rows = [['temp', `Temp (${f ? '°F' : '°C'})`, 1], ['humidity', 'Humidity (%)', 0], ['vpd', 'Air dryness, VPD (kPa)', 2]];
     const span = ser.x.length > 1 ? (ser.x[ser.x.length - 1] - ser.x[0]) / 3600 : 0;
     const lightPts = points.filter((p) => p.light_on).length;
     const lightHours = points.length ? span * lightPts / points.length : 0;
@@ -57,7 +68,15 @@ export function createHistory(ctx) {
         const vals = ser[k].filter((v) => v != null);
         if (!vals.length) return h('tr', null, h('td', null, label), h('td', null, '—'), h('td', null, '—'), h('td', null, '—'), h('td', null, '—'));
         const min = Math.min(...vals), max = Math.max(...vals), avg = vals.reduce((a, v) => a + v, 0) / vals.length;
-        const inBand = b[k].min != null ? vals.filter((v) => v >= b[k].min && v <= b[k].max).length / vals.length * 100 : null;
+        // each reading is judged against the band that applied then: day band with the lights on, night band without
+        let hit = 0, n = 0;
+        ser[k].forEach((v, i) => {
+          if (v == null) return;
+          const band = bandAt(k, points[i]?.light_on);
+          if (band.min == null) return;
+          n += 1; if (v >= band.min && v <= band.max) hit += 1;
+        });
+        const inBand = n ? hit / n * 100 : null;
         return h('tr', null, h('td', null, label), h('td', null, num(min, d)), h('td', null, num(avg, d)), h('td', null, num(max, d)),
           h('td', { class: inBand == null ? '' : inBand >= 80 ? 'lvl-good' : inBand >= 50 ? 'lvl-warn' : 'lvl-alert' }, inBand == null ? '—' : `${Math.round(inBand)}%`));
       }),
@@ -68,14 +87,14 @@ export function createHistory(ctx) {
   function renderTimeline() {
     const s = ctx.getStatus() || {};
     const labels = Object.fromEntries((s.devices || []).map((d) => [d.role, d.label]));
-    if (devEvents === null) { replaceChildren(refs.timeline, notice("Device history isn't available on this grow brain yet.", 'info')); return; }
+    if (devEvents === null) { replaceChildren(refs.timeline, notice("Device history needs a newer Grow Brain add-on.", 'info')); return; }
     const end = Date.now() / 1000, start = end - hours * 3600;
     refs.timeline.className = '';
     deviceTimeline(refs.timeline, { events: devEvents, labels, start, end });
   }
 
   function renderEnergy() {
-    if (energy === null) { replaceChildren(refs.energy, notice("Energy data isn't available on this grow brain yet.", 'info')); return; }
+    if (energy === null) { replaceChildren(refs.energy, notice("Energy data needs a newer Grow Brain add-on.", 'info')); return; }
     const cur = energy.currency || '';
     const money = (v) => (v == null ? null : `${cur ? cur + ' ' : ''}${v.toFixed(2)}`);
     const tiles = h('div', { class: 'tiles' },
@@ -136,7 +155,7 @@ export function createHistory(ctx) {
       h('div', { class: 'grid grid-2 history-grid' },
         h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', null, 'Stats')), refs.stats),
         h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', null, icon('zap'), 'Energy')), refs.energy)),
-      h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', null, 'Device timeline'), h('span', { class: 'tiny faint' }, 'when the grow brain switched things on')), refs.timeline));
+      h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', null, 'Device timeline'), h('span', { class: 'tiny faint' }, 'when GrowOp switched things on')), refs.timeline));
     load();
     window.addEventListener('growop:theme', onTheme);
   }

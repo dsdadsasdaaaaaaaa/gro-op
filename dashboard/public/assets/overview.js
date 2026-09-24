@@ -10,7 +10,7 @@ import { vitalChart, lightsFromPoints } from './charts.js';
 const VITALS = {
   temp: { title: 'Temp', ic: 'thermo', decimals: 1, tol: (f) => (f ? 2.7 : 1.5), scale: (f) => (f ? [50, 104] : [10, 40]) },
   humidity: { title: 'Humidity', ic: 'humidity', unit: '%', decimals: 0, tol: () => 5, scale: () => [20, 90] },
-  vpd: { title: 'VPD', ic: 'vpd', unit: 'kPa', decimals: 2, tol: () => 0.2, scale: () => [0, 2] },
+  vpd: { title: 'Air dryness (VPD)', ic: 'vpd', unit: 'kPa', decimals: 2, tol: () => 0.2, scale: () => [0, 2] },
 };
 
 function polar(cx, cy, r, deg) { const a = deg * Math.PI / 180; return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; }
@@ -39,7 +39,7 @@ function makeRing(spec) {
   const bandEl = h('div', { class: 'band num' }, 'no target');
   const el = h('div', { class: 'vital' }, h('div', { class: 'title' }, icon(spec.ic), spec.title), ring, bandEl);
 
-  function set({ value, min, max, unit, scaleMin, scaleMax, decimals, level, muted }) {
+  function set({ value, min, max, unit, scaleMin, scaleMax, decimals, level, muted, night }) {
     const frac = (v) => Math.min(Math.max((v - scaleMin) / (scaleMax - scaleMin), 0), 1);
     ring.className = `ring lvl-${muted ? 'unknown' : level}`;
     u.textContent = unit;
@@ -50,7 +50,7 @@ function makeRing(spec) {
       const [mx, my] = polar(cx, cy, r, start + frac(value) * sweep);
       marker.setAttribute('cx', mx.toFixed(2)); marker.setAttribute('cy', my.toFixed(2)); marker.style.display = '';
     } else marker.style.display = 'none';
-    bandEl.textContent = min != null && max != null ? `${num(min, decimals)}–${num(max, decimals)}` : 'no target';
+    bandEl.textContent = min != null && max != null ? `${num(min, decimals)}–${num(max, decimals)}${night ? ' · night' : ''}` : 'no target';
     ring.setAttribute('aria-label', `${spec.title} ${value == null ? 'unknown' : num(value, decimals) + ' ' + unit}${min != null ? `, target ${num(min, decimals)} to ${num(max, decimals)}` : ''}, ${level}`);
   }
   return { el, set };
@@ -99,6 +99,14 @@ export function createOverview(ctx) {
       if (!ok) return;
       try { await api.post('/api/control/standby'); toast('Tent is off'); } catch (e) { toast(errText(e), 'error'); }
     } else {
+      const seedlings = s.grow?.stage === 'seedling';
+      const checks = seedlings
+        ? ['Only the big light plugged in, dimmer at about 75 % (the light shows about 175 W)', 'Humidifier tank filled',
+           'Both cups in the tent on a towel or foam, under the light', 'Camera pointing at the cups']
+        : ['Lights plugged in and set the way you want', 'Humidifier tank filled', 'Plants in place', 'Camera pointing at the plants'];
+      const extra = h('ul', { class: 'clean checklist' }, checks.map((c) => h('li', null, icon('check'), c)));
+      const ok = await confirmDialog({ title: 'Start the tent?', message: 'A quick check first:', extra, confirmText: 'Start', cancelText: 'Not yet', ic: 'power' });
+      if (!ok) return;
       try { await api.post('/api/control/start'); toast('Tent started', 'ok'); } catch (e) { toast(errText(e), 'error'); }
     }
     ctx.refreshStatus();
@@ -132,8 +140,9 @@ export function createOverview(ctx) {
     const t = s.targets || {}, sensor = s.sensor || {};
     const tv = tempVals(s);
     const tScale = VITALS.temp.scale(f);
-    refs.rings.temp.set({ ...tv, unit: f ? '°F' : '°C', scaleMin: tScale[0], scaleMax: tScale[1], decimals: 1, level: bandStatus(tv.value, tv.min, tv.max, VITALS.temp.tol(f)), muted });
-    refs.rings.humidity.set({ value: sensor.humidity, min: t.humidity_min, max: t.humidity_max, unit: '%', scaleMin: 20, scaleMax: 90, decimals: 0, level: bandStatus(sensor.humidity, t.humidity_min, t.humidity_max, 5), muted });
+    const night = t.band === 'night';
+    refs.rings.temp.set({ ...tv, unit: f ? '°F' : '°C', scaleMin: tScale[0], scaleMax: tScale[1], decimals: 1, level: bandStatus(tv.value, tv.min, tv.max, VITALS.temp.tol(f)), muted, night });
+    refs.rings.humidity.set({ value: sensor.humidity, min: t.humidity_min, max: t.humidity_max, unit: '%', scaleMin: 20, scaleMax: 90, decimals: 0, level: bandStatus(sensor.humidity, t.humidity_min, t.humidity_max, 5), muted, night });
     refs.rings.vpd.set({ value: sensor.vpd_kpa, min: t.vpd_min, max: t.vpd_max, unit: 'kPa', scaleMin: 0, scaleMax: 2, decimals: 2, level: bandStatus(sensor.vpd_kpa, t.vpd_min, t.vpd_max, 0.2), muted });
     replaceChildren(refs.vitalsMeta, sensor.stale
       ? h('span', { class: 'chip warn' }, icon('warn'), 'Sensor not reporting')
@@ -145,7 +154,7 @@ export function createOverview(ctx) {
     refs.assess.className = `assess ${level === 'alert' ? 'alert' : ''}`;
     replaceChildren(refs.assess,
       h('div', { class: 'row', style: { gap: '10px' } }, icon(levelIcon(level), cls), h('span', { class: level === 'standby' ? 'muted' : '' }, s.standby ? 'Tent is off' : (a.headline || 'Waiting for the first reading'))),
-      level === 'alert' && a.details?.length ? h('ul', null, a.details.map((d) => h('li', null, d))) : null);
+      (level === 'alert' || level === 'warn') && a.details?.length ? h('ul', null, a.details.map((d) => h('li', null, d))) : null);
     updateChartBands(s);
   }
 
@@ -221,21 +230,28 @@ export function createOverview(ctx) {
   }
 
   // ---------- devices ----------
+  function byHand(d) {
+    if (!d.mode || d.mode === 'auto') return null;
+    const until = parseISO(d.override_until);
+    return `Set by hand: ${d.mode}${until ? ` until ${fmtTime(until)}` : ''}`;
+  }
   function reasonLine(d, standby) {
     if (!d.entity_id) return 'Not set up';
-    if (d.available === false) return 'Unavailable';
+    if (d.available === false) return 'Not responding';
+    const hand = byHand(d);
+    if (hand) return standby ? `${hand} (tent in standby)` : hand;
     if (standby) return 'Standby';
-    if (d.mode && d.mode !== 'auto') return `Manual · ${d.mode}${d.reason ? ' · ' + d.reason : ''}`;
     if (d.reason) return d.reason;
     return d.state === 'on' ? 'On · automatic' : 'Off · automatic';
   }
 
   function renderDevices(s) {
     const devices = (s.devices || []).filter((d) => d.kind === 'switch' && d.entity_id);
-    refs.devicesAll.textContent = s.standby ? 'All off' : '';
+    const handOn = devices.filter((d) => d.state === 'on' && d.mode === 'on').length;
+    refs.devicesAll.textContent = s.standby ? (handOn ? `Standby · ${handOn} on by hand` : 'Standby') : '';
     replaceChildren(refs.devices, devices.length ? devices.map((d) => {
-      const on = d.state === 'on' && !s.standby;
-      const btn = h('button', { class: `device ${on ? 'on' : ''} ${s.standby ? 'dim' : ''}`, type: 'button', 'aria-label': `${d.label}, ${on ? 'on' : 'off'}. ${reasonLine(d, s.standby)}`, onclick: (e) => openDevicePopover(d, e.currentTarget) },
+      const on = d.state === 'on';
+      const btn = h('button', { class: `device ${on ? 'on' : ''} ${s.standby && !on ? 'dim' : ''}`, type: 'button', 'aria-label': `${d.label}, ${on ? 'on' : 'off'}. ${reasonLine(d, s.standby)}`, onclick: (e) => openDevicePopover(d, e.currentTarget) },
         h('span', { class: 'icon' }, icon(DEVICE_ICON[d.role] || 'plug'), h('span', { class: `dot ${d.available === false ? 'off' : on ? 'on' : 'idle'}` })),
         h('span', { class: 'body' }, h('div', { class: 'name' }, d.label), h('div', { class: 'why' }, reasonLine(d, s.standby))),
         d.power_w != null ? h('span', { class: 'watts num' }, `${Math.round(d.power_w)} W`) : null);
@@ -248,12 +264,12 @@ export function createOverview(ctx) {
   function openDevicePopover(d, anchor) {
     closePopover();
     const s = lastStatus;
-    const on = d.state === 'on' && !s.standby;
+    const on = d.state === 'on';
     const el = h('div', { class: 'pop', role: 'dialog', 'aria-label': `${d.label} controls` });
-    const why = h('div', { class: 'why' }, s.standby ? 'The tent is in standby, so everything stays off.' : (d.reason || 'No reason reported.'));
+    const why = h('div', { class: 'why' }, byHand(d) || (s.standby ? 'The tent is in standby, so everything stays off unless you switch it on here.' : (d.reason || 'No reason reported.')));
     const status = h('div', { class: 'row' },
-      h('span', { class: `chip ${d.available === false ? 'alert' : on ? 'good' : ''}` }, d.available === false ? 'Unavailable' : s.standby ? 'Off · standby' : (d.state === 'on' ? 'On' : d.state === 'off' ? 'Off' : 'Unknown')),
-      d.mode && d.mode !== 'auto' ? h('span', { class: 'chip warn' }, 'Manual') : null,
+      h('span', { class: `chip ${d.available === false ? 'alert' : on ? 'good' : ''}` }, d.available === false ? 'Not responding' : (d.state === 'on' ? 'On' : d.state === 'off' ? 'Off' : 'Unknown')),
+      d.mode && d.mode !== 'auto' ? h('span', { class: 'chip warn' }, 'Set by hand') : null,
       d.power_w != null ? h('span', { class: 'chip brand num' }, icon('zap'), `${d.power_w.toFixed(1)} W`) : null);
     const until = parseISO(d.override_until);
     const busy = h('div', { class: 'row small muted hidden' }, spinner(), 'Updating…');
@@ -278,8 +294,8 @@ export function createOverview(ctx) {
     }, 'lg');
     append(el, [
       h('div', { class: 'head' }, h('span', { class: 'icon' }, icon(DEVICE_ICON[d.role] || 'plug')), h('div', null, h('h3', null, d.label), status)),
-      h('div', null, h('div', { class: 'label' }, 'Why'), why, until ? h('div', { class: 'tiny lvl-warn row' }, icon('clock'), `Manual until ${fmtTime(until)}`) : null),
-      h('div', null, h('div', { class: 'label', style: { marginBottom: '6px' } }, 'Mode'), seg, h('div', { class: 'tiny faint', style: { marginTop: '6px' } }, 'Auto lets the grow brain decide. On or Off holds it there for a while.')),
+      h('div', null, h('div', { class: 'label' }, 'Why'), why),
+      h('div', null, h('div', { class: 'label', style: { marginBottom: '6px' } }, 'Mode'), seg, h('div', { class: 'tiny faint', style: { marginTop: '6px' } }, 'Auto lets GrowOp decide. On or Off holds it there for a while; the safety limits still apply.')),
       durations, busy,
     ]);
     document.body.append(el);
@@ -311,7 +327,7 @@ export function createOverview(ctx) {
       refs.camTime.textContent = fmtTime(new Date());
     } catch (e) { if (e.name !== 'AbortError') refs.camTime.textContent = 'no signal'; }
   }
-  function startSnaps() { stopSnaps(); snap(); snapTimer = setInterval(snap, 5000); }
+  function startSnaps() { stopSnaps(); snap(); snapTimer = setInterval(snap, 30000); }
   function stopSnaps() { if (snapTimer) clearInterval(snapTimer); snapTimer = null; if (snapAbort) snapAbort.abort(); }
 
   function renderCamera(s) {
@@ -340,10 +356,10 @@ export function createOverview(ctx) {
     const playBtn = h('button', { class: 'btn icon ghost', 'aria-label': 'Play' }, icon('play'));
     const liveBtn = h('button', { class: 'btn sm quiet' }, icon('camera'), 'Live');
     const countEl = h('span', { class: 'tiny faint num' });
-    const rangeSeg = segmented([{ label: '24 h', value: 24 }, { label: '7 d', value: 168 }], range, (v) => { range = v; applyFilter(); });
+    const rangeSeg = segmented([{ label: '24 h', value: 24 }, { label: '7 d', value: 168 }, { label: '14 d', value: 336 }], range, (v) => { range = v; applyFilter(); });
     const analysisBox = h('div', { class: 'analysis' });
     const plants = lastStatus.plants || [];
-    const plantSel = select([{ value: '', label: 'Whole tent' }, ...plants.map((p) => ({ value: p.id, label: p.name }))], plants[0]?.id ?? '', { 'aria-label': 'Plant to look at' });
+    const plantSel = select([{ value: '', label: 'Whole tent' }, ...plants.map((p) => ({ value: p.id, label: p.name }))], '', { 'aria-label': 'Plant to look at' });
     const askBtn = h('button', { class: 'btn' }, icon('sparkles'), 'Ask the advisor to look now');
 
     async function loadFrame(f) {
@@ -382,7 +398,15 @@ export function createOverview(ctx) {
       if (!live) return;
       try { const u = await api.blobUrl('/api/camera/snapshot'); if (liveUrl) URL.revokeObjectURL(liveUrl); liveUrl = u; if (live) { img.src = u; stamp.textContent = `Live · ${fmtTime(new Date())}`; } } catch { /* retry */ }
     }
-    function startLive() { stopPlay(); live = true; liveBtn.className = 'btn sm'; liveTick(); liveTimer = setInterval(liveTick, 2000); }
+    let liveStarted = 0;
+    function startLive() {
+      stopPlay(); live = true; liveStarted = Date.now(); liveBtn.className = 'btn sm'; liveTick();
+      liveTimer = setInterval(() => {
+        if (document.visibilityState !== 'visible') return;
+        if (Date.now() - liveStarted > 2 * 60 * 1000) { stopLive(); stamp.textContent = 'Live view paused after 2 minutes. Tap Live to resume.'; return; }
+        liveTick();
+      }, 5000);
+    }
     function stopLive() { live = false; liveBtn.className = 'btn sm quiet'; if (liveTimer) clearInterval(liveTimer); liveTimer = null; }
 
     playBtn.onclick = () => (playing ? stopPlay() : startPlay());
@@ -418,7 +442,7 @@ export function createOverview(ctx) {
       else if (e.key === ' ') { e.preventDefault(); playing ? stopPlay() : startPlay(); }
     });
     try {
-      const r = await api.get('/api/camera/frames?days=7');
+      const r = await api.get('/api/camera/frames?days=14');
       frames = (r.frames || []).slice().sort((a, b) => (parseISO(a.t)?.getTime() || 0) - (parseISO(b.t)?.getTime() || 0));
       if (!frames.length) { stamp.textContent = 'No timelapse frames yet — showing live'; startLive(); }
       else applyFilter();
@@ -429,10 +453,51 @@ export function createOverview(ctx) {
   function renderNeeds(s) {
     const items = [];
     if (s.unread_brief) items.push(h('a', { class: 'pill night', href: '#/advisor' }, icon('sparkles'), 'New brief'));
-    if (s.open_photo_requests > 0) items.push(h('a', { class: 'pill', href: '#/journal?filter=request' }, icon('camera'), s.open_photo_requests === 1 ? '1 photo request' : `${s.open_photo_requests} photo requests`));
-    if (s.open_tasks > 0) items.push(h('a', { class: 'pill', href: '#/journal?filter=task' }, icon('list'), s.open_tasks === 1 ? '1 task' : `${s.open_tasks} tasks`));
+    if (s.open_photo_requests > 0) items.push(h('a', { class: 'pill', href: '#/journal?filter=todo' }, icon('camera'), s.open_photo_requests === 1 ? '1 photo request' : `${s.open_photo_requests} photo requests`));
+    if (s.open_tasks > 0) items.push(h('a', { class: 'pill', href: '#/journal?filter=todo' }, icon('list'), s.open_tasks === 1 ? '1 thing to do' : `${s.open_tasks} things to do`));
     refs.needsCard.classList.toggle('hidden', !items.length);
     replaceChildren(refs.needs, items);
+  }
+
+  function renderTank(s) {
+    const tank = s.humidifier_tank;
+    const hum = (s.devices || []).find((d) => d.role === 'humidifier' && d.entity_id);
+    refs.tankCard.classList.toggle('hidden', !tank || !hum);
+    if (!tank || !hum) return;
+    const pct = Math.max(0, Math.min(100, tank.percent_left ?? 100));
+    const lvl = tank.dry ? 'alert' : pct <= 20 ? 'warn' : 'good';
+    replaceChildren(refs.tank,
+      h('div', { class: 'row', style: { justifyContent: 'space-between' } },
+        h('span', null, tank.dry ? 'Empty: refill it' : `About ${num(tank.hours_left, 1)} h of misting left`),
+        h('span', { class: `chip ${lvl === 'good' ? 'good' : lvl}` }, `${pct}%`)),
+      h('div', { class: 'meter', role: 'img', 'aria-label': `Humidifier water about ${pct} percent` }, h('div', { class: `fill lvl-${lvl}`, style: { width: `${pct}%` } })),
+      h('button', { class: 'btn sm ghost', type: 'button', onclick: async () => {
+        try { await api.post('/api/humidifier/refilled'); toast('Humidifier marked as refilled', 'ok'); ctx.refreshStatus(); } catch (e) { toast(errText(e), 'error'); }
+      } }, icon('check'), 'I just refilled it'));
+  }
+
+  let planLoadedAt = 0;
+  async function loadPlan(force = false) {
+    if (!force && Date.now() - planLoadedAt < 30 * 60 * 1000) return;
+    planLoadedAt = Date.now();
+    try {
+      const pid = (lastStatus?.plants || [])[0]?.id;
+      const plan = await api.get('/api/plan' + (pid ? `?plant_id=${pid}` : ''));
+      renderPlan(plan);
+    } catch { refs.planCard?.classList.add('hidden'); }
+  }
+  function renderPlan(plan) {
+    if (!refs.planCard) return;
+    const cur = (plan.phases || []).find((p) => p.status === 'current');
+    const next = (plan.phases || []).find((p) => p.status === 'upcoming');
+    refs.planCard.classList.toggle('hidden', !cur);
+    if (!cur) return;
+    const today = new Date().toISOString().slice(0, 10);
+    const when = next?.start_date ? (next.start_date <= today ? 'when ready' : fmtDateLong(parseISO(next.start_date + 'T12:00:00'))) : '';
+    replaceChildren(refs.plan,
+      h('div', { class: 'row', style: { justifyContent: 'space-between' } }, h('b', null, cur.title), h('span', { class: 'tiny faint' }, cur.environment || '')),
+      h('ul', { class: 'clean small' }, (cur.what || []).slice(0, 4).map((w) => h('li', null, w))),
+      next ? h('div', { class: 'tiny muted' }, `Next: ${next.title}${when ? ' · ' + when : ''}`) : null);
   }
 
   function renderAlerts(s) {
@@ -440,7 +505,7 @@ export function createOverview(ctx) {
     const extra = [];
     if (s.control_paused_until) extra.push({ level: 'warn', message: `Automation paused until ${fmtTime(parseISO(s.control_paused_until))}`, at: null });
     if (!s.ha_connected) extra.push({ level: 'alert', message: "Can't reach Home Assistant", at: null });
-    const all = [...extra, ...alerts];
+    const all = [...extra, ...alerts.filter((a) => s.ha_connected || !String(a.message || '').startsWith('Cannot reach Home Assistant'))];
     refs.alertsCard.classList.toggle('hidden', !all.length);
     replaceChildren(refs.alerts, all.map((a) => h('div', { class: 'alert-item' }, icon(levelIcon(a.level), `lvl-${a.level}`), h('span', null, a.message), a.at ? h('time', { datetime: a.at }, relTime(a.at)) : null)));
   }
@@ -477,9 +542,13 @@ export function createOverview(ctx) {
     refs.camTime = h('span', { class: 'num' });
     const camera = h('button', { class: 'card camera', type: 'button', 'aria-label': 'Open the tent camera and timelapse', onclick: openTimelapse },
       h('div', { class: 'frame' }, refs.camImg, refs.camEmpty, refs.camLive,
-        h('div', { class: 'cap' }, h('div', null, refs.camName, refs.camFrames), h('div', { style: { textAlign: 'right' } }, refs.camTime, h('div', { class: 'tiny', style: { opacity: 0.8 } }, 'Tap for timelapse')))));
+        h('div', { class: 'cap' }, h('div', null, refs.camName, refs.camFrames), h('div', { style: { textAlign: 'right' } }, refs.camTime, h('div', { class: 'tiny', style: { opacity: 0.8 } }, 'Open timelapse')))));
     refs.needs = h('div', { class: 'needs' });
     refs.needsCard = h('div', { class: 'card tight hidden' }, h('div', { class: 'card-head' }, h('h2', null, 'Needs you')), refs.needs);
+    refs.tank = h('div', { class: 'stack' });
+    refs.tankCard = h('div', { class: 'card tight hidden' }, h('div', { class: 'card-head' }, h('h2', null, icon('humidity'), 'Humidifier water')), refs.tank);
+    refs.plan = h('div', { class: 'stack' });
+    refs.planCard = h('div', { class: 'card tight hidden' }, h('div', { class: 'card-head' }, h('h2', null, icon('leaf'), 'This stage of the grow')), refs.plan);
     refs.alerts = h('div', { class: 'alerts' });
     refs.alertsCard = h('div', { class: 'card tight hidden' }, h('div', { class: 'card-head' }, h('h2', null, icon('bell'), 'Alerts')), refs.alerts);
 
@@ -495,7 +564,7 @@ export function createOverview(ctx) {
             minis,
             h('div', { class: 'chart-legend' }, h('span', null, h('i', { style: { background: 'var(--primary-tint)' } }), 'target band'), h('span', null, h('i', { style: { background: 'var(--sun-tint)' } }), 'lights on'), h('span', { class: 'faint' }, 'last 24 h'))),
           h('div', null, h('div', { class: 'section-title' }, 'Devices', refs.devicesAll), refs.devices)),
-        h('div', { class: 'col' }, camera, refs.lightCard, refs.needsCard, refs.alertsCard)));
+        h('div', { class: 'col' }, refs.alertsCard, refs.needsCard, camera, refs.planCard, refs.tankCard, refs.lightCard)));
 
     const s = ctx.getStatus();
     if (s) onStatus(s);
@@ -514,6 +583,7 @@ export function createOverview(ctx) {
     lastStatus = s;
     if (!root) return;
     renderHeader(s); renderPlants(s); renderVitals(s); renderLight(s); renderDevices(s); renderCamera(s); renderNeeds(s); renderAlerts(s);
+    renderTank(s); loadPlan();
   }
 
   function onSettings() { if (lastStatus && root) { renderVitals(lastStatus); } }

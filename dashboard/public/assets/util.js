@@ -112,6 +112,22 @@ export function dayKey(iso) {
   if (same(d, y)) return 'Yesterday';
   return new Intl.DateTimeFormat(undefined, { weekday: 'short', month: 'long', day: 'numeric' }).format(d);
 }
+/** 'Due today' / 'Overdue since Mon 21 Sep' / 'Due Thu 24 Sep' for a YYYY-MM-DD due date. */
+export function dueText(due) {
+  if (!due) return '';
+  const today = todayISO();
+  const d = new Date(due + 'T12:00:00');
+  const nice = new Intl.DateTimeFormat(undefined, { weekday: 'short', day: 'numeric', month: 'short' }).format(d);
+  if (due === today) return 'Due today';
+  return due < today ? `Overdue since ${nice}` : `Due ${nice}`;
+}
+
+export const LOG_LABEL = {
+  water: 'Watered', planted: 'Planted', transplant: 'Transplanted', height: 'Height', note: 'Note', observation: 'Noticed',
+  ph: 'pH', feed: 'Fed', defoliation: 'Removed leaves', training: 'Training (tie-down / topping)', ec: 'EC', ppm: 'PPM', other: 'Other',
+};
+export const CONTEXT_LABEL = { water_in: 'going in', runoff: 'runoff', reservoir: 'reservoir', task: 'from a task', planted: 'planted' };
+
 export function todayISO() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -159,7 +175,7 @@ export function openModal({ title, body, size = '', onClose, closeLabel = 'Close
   return { close, el: modal };
 }
 
-export function confirmDialog({ title, message, confirmText = 'Confirm', cancelText = 'Cancel', danger = false, ic = null }) {
+export function confirmDialog({ title, message, confirmText = 'Confirm', cancelText = 'Cancel', danger = false, ic = null, extra = null }) {
   return new Promise((resolve) => {
     let done = false;
     const m = openModal({
@@ -169,6 +185,7 @@ export function confirmDialog({ title, message, confirmText = 'Confirm', cancelT
         ic ? icon(ic, `big-ic ${danger ? 'lvl-alert' : ''}`) : null,
         h('h2', { style: { fontSize: '20px' } }, title),
         message ? h('p', { class: 'muted' }, message) : null,
+        extra,
         h('div', { class: 'modal-actions' },
           h('button', { class: `btn big ${danger ? 'danger' : ''}`, onclick: () => { done = true; m.close(); resolve(true); } }, confirmText),
           h('button', { class: 'btn big ghost', onclick: () => { done = true; m.close(); resolve(false); } }, cancelText))),

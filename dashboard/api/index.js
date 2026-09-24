@@ -8,6 +8,8 @@
 //   DASHBOARD_PASSWORD  what the dashboard's "key" field must contain
 //   ADDON_SLUG          optional; auto-discovered (ends with "grow_brain")
 
+import { createHash, timingSafeEqual } from 'node:crypto';
+
 const HA_URL = (process.env.HA_URL || '').replace(/\/$/, '');
 const HA_TOKEN = process.env.HA_TOKEN || '';
 const GROW_API_KEY = process.env.GROW_API_KEY || '';
@@ -98,6 +100,7 @@ function targetPath(request) {
     p = '/api/' + q;
     url.searchParams.delete('__path');
   }
+  url.searchParams.delete('api_key');   // the password never travels further than this function
   return { path: p, search: url.searchParams.toString() ? '?' + url.searchParams.toString() : '' };
 }
 
@@ -116,16 +119,57 @@ async function forward(request, bodyBuf, retried = false) {
   });
   // A 401 here is usually an expired ingress session; renew once and retry.
   if (res.status === 401 && !retried) return forward(request, bodyBuf, true);
+  if (res.status === 401) {
+    return json({ detail: "The online dashboard's key doesn't match the Grow Brain add-on. Tell whoever set up Home Assistant (GROW_API_KEY in Vercel)." }, 502);
+  }
   return res;
 }
 
+// Things that stay on the home network: the setup QR (it contains the add-on key), the full database backup,
+// and changing which Home Assistant devices the tent controls.
+const LOCAL_ONLY = [
+  [/^\/api\/setup-qr\.png$/, null], [/^\/api\/backup$/, null],
+  [/^\/api\/devices\/[^/]+$/, 'PUT'], [/^\/api\/ha\/automap$/, null], [/^\/api\/ha\/entities$/, null],
+];
+
+function sameSecret(a, b) {
+  const ha = createHash('sha256').update(String(a)).digest();
+  const hb = createHash('sha256').update(String(b)).digest();
+  return timingSafeEqual(ha, hb);
+}
+
+// Slow down password guessing: 10 wrong tries from one address locks it out for 15 minutes (per function instance).
+const failures = new Map();
+function clientIp(request) {
+  return (request.headers.get('x-forwarded-for') || '').split(',')[0].trim() || request.headers.get('x-real-ip') || 'unknown';
+}
+function lockedOut(ip) {
+  const f = failures.get(ip);
+  return f && f.until && f.until > Date.now();
+}
+function recordFailure(ip) {
+  const now = Date.now();
+  const f = failures.get(ip) && now - failures.get(ip).first < 10 * 60 * 1000 ? failures.get(ip) : { n: 0, first: now, until: 0 };
+  f.n += 1;
+  if (f.n >= 10) f.until = now + 15 * 60 * 1000;
+  failures.set(ip, f);
+  if (failures.size > 5000) failures.clear();
+}
+
 async function handler(request) {
-  const url = new URL(request.url);
-  const key = request.headers.get('x-api-key') || url.searchParams.get('api_key') || '';
-  if (!DASHBOARD_PASSWORD || key !== DASHBOARD_PASSWORD) {
+  const ip = clientIp(request);
+  if (lockedOut(ip)) return json({ detail: 'Too many wrong passwords. Try again in 15 minutes.' }, 429);
+  const key = request.headers.get('x-api-key') || '';     // header only: never in a URL, so never in a log
+  if (!DASHBOARD_PASSWORD || !key || !sameSecret(key, DASHBOARD_PASSWORD)) {
+    recordFailure(ip);
     return json({ detail: 'Wrong dashboard password' }, 401);
   }
-  if (!targetPath(request).path.startsWith('/api/')) return json({ detail: 'Not found' }, 404);
+  failures.delete(ip);
+  const { path } = targetPath(request);
+  if (!path.startsWith('/api/')) return json({ detail: 'Not found' }, 404);
+  if (LOCAL_ONLY.some(([re, method]) => re.test(path) && (!method || method === request.method))) {
+    return json({ detail: "Not available on the online dashboard. Open GrowOp from Home Assistant's sidebar for this." }, 403);
+  }
   try {
     const bodyBuf = ['GET', 'HEAD'].includes(request.method) ? undefined : await request.arrayBuffer();
     const res = await forward(request, bodyBuf);
@@ -138,7 +182,11 @@ async function handler(request) {
     out.set('cache-control', 'no-store');
     return new Response(res.body, { status: res.status, headers: out });
   } catch (e) {
-    return json({ detail: e.message || String(e) }, 502);
+    // plain words, no internals
+    const msg = /token/i.test(e.message || '') ? "Home Assistant didn't accept the online dashboard's access token."
+      : /WebSocket|timed out|fetch failed|ECONN|ENOTFOUND/i.test(e.message || '') ? "Can't reach Home Assistant right now. Is the box at home online?"
+      : 'The online dashboard had a problem talking to Home Assistant.';
+    return json({ detail: msg }, 502);
   }
 }
 

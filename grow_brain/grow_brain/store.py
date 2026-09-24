@@ -224,6 +224,10 @@ class Store:
         await self.db.execute("UPDATE tasks SET status='done', completed_at=? WHERE status='open' AND plant_id=?", (iso(utcnow()), pid))
         await self.db.commit()
 
+    async def unarchive_plant(self, pid: int) -> None:
+        await self.db.execute("UPDATE plants SET archived=0 WHERE id=?", (pid,))
+        await self.db.commit()
+
     async def assign_orphans_to_plant(self, pid: int) -> None:
         """One-time migration: rows created before plants existed belong to the first plant."""
         for t in ("log_entries", "photo_requests", "photos"):

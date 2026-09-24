@@ -1,5 +1,5 @@
 // Settings: plants, tent, targets, camera, preferences, backup, connection, events.
-import { api, getConn, setConn, clearConn } from './api.js';
+import { api, getConn, setConn, clearConn, MODE } from './api.js';
 import { icon, levelIcon } from './icons.js';
 import {
   h, replaceChildren, num, cToF, fToC, capitalize, STAGE_NAMES, fmtDateTime, spinner, notice, toast, errText, confirmDialog,
@@ -20,10 +20,23 @@ export function createSettings(ctx) {
     btn.disabled = false; replaceChildren(btn, ...prev);
   }
 
+  // 'notify.mobile_app_sm_g781w' → 'Samsung phone (sm g781w)', 'notify.mobile_app_iphone' → 'iPhone'
+  function phoneName(svc) {
+    const id = String(svc || '').replace(/^notify\./, '').replace(/^mobile_app_/, '');
+    if (/^sm_/.test(id)) return `Samsung phone (${id.replace(/_/g, ' ')})`;
+    if (/iphone/.test(id)) return id === 'iphone' ? 'iPhone' : `iPhone (${id.replace(/_/g, ' ')})`;
+    if (/ipad/.test(id)) return `iPad (${id.replace(/_/g, ' ')})`;
+    return id.replace(/_/g, ' ');
+  }
+  async function testPush(svc) {
+    if (!svc) { toast('Pick a phone first', 'error'); return; }
+    try { await api.post('/api/notify/test?service=' + encodeURIComponent(svc)); toast('Test sent: check that phone', 'ok'); } catch (e) { toast(errText(e), 'error'); }
+  }
+
   // ---------- plants ----------
   function plantForm(p, onDone) {
-    const notifyOpts = [{ value: '', label: 'No push' }, ...(settings?.notify_services_available || []).map((s) => ({ value: s, label: s }))];
-    if (p?.notify_service && !notifyOpts.some((o) => o.value === p.notify_service)) notifyOpts.push({ value: p.notify_service, label: p.notify_service });
+    const notifyOpts = [{ value: '', label: 'No phone' }, ...(settings?.notify_services_available || []).map((s) => ({ value: s, label: phoneName(s) }))];
+    if (p?.notify_service && !notifyOpts.some((o) => o.value === p.notify_service)) notifyOpts.push({ value: p.notify_service, label: phoneName(p.notify_service) });
     const f = {
       name: input({ value: p?.name || '', required: true, placeholder: "Levi's plant" }), owner: input({ value: p?.owner || '', placeholder: 'Levi' }),
       strain: input({ value: p?.strain ?? 'Liberty Haze' }), breeder: input({ value: p?.breeder ?? "Barney's Farm" }), seed_type: input({ value: p?.seed_type ?? 'feminized photoperiod' }),
@@ -36,10 +49,10 @@ export function createSettings(ctx) {
       if (p) await api.put(`/api/plants/${p.id}`, body); else await api.post('/api/plants', body);
       ctx.refreshStatus(); onDone();
     }, p ? 'Plant saved' : 'Plant added'); } },
-      h('div', { class: 'form-grid' }, field('Name', f.name), field('Owner', f.owner), field('Strain', f.strain), field('Breeder', f.breeder), field('Seed type', f.seed_type), field('Medium', f.medium), field('Pot size (L)', f.pot_size_l), field('Start date', f.start_date), field('Notify', f.notify_service, { hint: 'Photo requests go to this phone' }), field('Notes', f.notes, { class: 'wide' })),
+      h('div', { class: 'form-grid' }, field('Name', f.name), field('Owner', f.owner), field('Strain', f.strain), field('Breeder', f.breeder), field('Seed type', f.seed_type), field('Medium', f.medium), field('Pot size (L)', f.pot_size_l), field('Start date', f.start_date), field('Phone for alerts', h('div', { class: 'row', style: { flexWrap: 'nowrap' } }, f.notify_service, h('button', { class: 'btn sm quiet', type: 'button', onclick: () => testPush(f.notify_service.value) }, 'Send test')), { hint: 'Tent alerts and this plant\'s reminders go to this phone' }), field('Notes', f.notes, { class: 'wide' })),
       h('div', { class: 'form-actions' },
         p ? h('button', { class: 'btn danger ghost', type: 'button', onclick: async () => {
-          if (!(await confirmDialog({ title: `Remove ${p.name}?`, message: 'It is archived; its journal stays.', confirmText: 'Remove', danger: true, ic: 'trash' }))) return;
+          if (!(await confirmDialog({ title: `Remove ${p.name}?`, message: 'It disappears from the tent. Its journal and photos are kept, and you can bring it back from Settings → Plants.', confirmText: 'Remove', danger: true, ic: 'trash' }))) return;
           try { await api.del(`/api/plants/${p.id}`); toast('Plant removed'); ctx.refreshStatus(); onDone(); } catch (e) { toast(errText(e), 'error'); }
         } }, icon('trash'), 'Remove') : null,
         h('button', { class: 'btn quiet', type: 'button', onclick: onDone }, 'Cancel'), btn));
@@ -56,7 +69,16 @@ export function createSettings(ctx) {
     }
     const addBox = h('div');
     const addBtn = h('button', { class: 'btn ghost', onclick: () => { replaceChildren(addBox, h('div', { class: 'plant-edit' }, plantForm(null, () => replaceChildren(addBox)))); } }, icon('plus'), 'Add plant');
-    replaceChildren(refs.plants, list, addBox, addBtn);
+    const removed = h('div', { class: 'stack' });
+    replaceChildren(refs.plants, list, addBox, addBtn, removed);
+    api.get('/api/plants?include_archived=true').then((r) => {
+      const gone = r.archived || [];
+      if (!gone.length || !root) return;
+      replaceChildren(removed, h('div', { class: 'label', style: { marginTop: '12px' } }, 'Removed plants'),
+        gone.map((g) => h('div', { class: 'row' }, h('span', { class: 'muted' }, g.name), h('button', { class: 'btn sm quiet', onclick: async () => {
+          try { await api.post(`/api/plants/${g.id}/restore`); toast(`${g.name} is back`, 'ok'); ctx.refreshStatus(); renderPlants(); } catch (e) { toast(errText(e), 'error'); }
+        } }, 'Bring back'))));
+    }).catch(() => {});
   }
 
   // ---------- tent ----------
@@ -65,7 +87,8 @@ export function createSettings(ctx) {
     const stageSel = select(STAGES.map((s) => ({ value: s, label: STAGE_NAMES[s] })), grow.stage);
     const changeBtn = h('button', { class: 'btn ghost', type: 'button', onclick: async () => {
       const s = stageSel.value; if (s === grow.stage) return;
-      if (!(await confirmDialog({ title: `Move the tent to ${STAGE_NAMES[s]}?`, message: 'Targets reset to the stage defaults and the advisor is told.', confirmText: 'Change stage' }))) { stageSel.value = grow.stage; return; }
+      const lightNote = { flower: ' The light switches to 12 hours on and 12 hours off by itself: never turn it on during the dark hours.', veg: ' The light stays on 18 hours a day.', drying: ' The light stays off from now on.', curing: ' Lights, humidifier and exhaust go idle.' }[s] || '';
+      if (!(await confirmDialog({ title: `Move the tent to ${STAGE_NAMES[s]}?`, message: `Temperature and humidity go to the ${STAGE_NAMES[s].toLowerCase()} settings and the advisor is told.${lightNote}`, confirmText: 'Change stage' }))) { stageSel.value = grow.stage; return; }
       try { grow = await api.post('/api/grow/stage', { stage: s }); toast(`Now in ${STAGE_NAMES[s]}`, 'ok'); ctx.refreshStatus(); renderTent(); loadTargets(); } catch (e) { toast(errText(e), 'error'); }
     } }, 'Change stage');
     const ducted = h('input', { type: 'checkbox', checked: !!grow.exhaust_ducted });
@@ -88,19 +111,19 @@ export function createSettings(ctx) {
     const tmin = input({ type: 'number', step: '0.5', inputmode: 'decimal', value: num(f ? (t.temp_min_f ?? cToF(t.temp_min_c)) : t.temp_min_c, 1) });
     const tmax = input({ type: 'number', step: '0.5', inputmode: 'decimal', value: num(f ? (t.temp_max_f ?? cToF(t.temp_max_c)) : t.temp_max_c, 1) });
     const hmin = input({ type: 'number', step: '1', value: t.humidity_min }), hmax = input({ type: 'number', step: '1', value: t.humidity_max });
-    const vmin = input({ type: 'number', step: '0.05', value: t.vpd_min }), vmax = input({ type: 'number', step: '0.05', value: t.vpd_max });
     const lon = input({ type: 'time', value: t.light_on_time || '06:00' }), lh = input({ type: 'number', step: '0.5', min: 0, max: 24, value: t.light_hours });
     const btn = saveBtn();
     replaceChildren(refs.targets,
       h('div', { class: 'row small muted', style: { marginBottom: '12px' } }, h('span', { class: 'chip brand' }, { stage_default: 'stage default', advisor: 'set by advisor', manual: 'manual' }[t.source] || t.source), t.note || ''),
       h('form', { onsubmit: (e) => { e.preventDefault(); submitForm(btn, async () => {
-        const body = { temp_min_c: f ? fToC(Number(tmin.value)) : Number(tmin.value), temp_max_c: f ? fToC(Number(tmax.value)) : Number(tmax.value), humidity_min: Number(hmin.value), humidity_max: Number(hmax.value), vpd_min: Number(vmin.value), vpd_max: Number(vmax.value), light_on_time: lon.value, light_hours: Number(lh.value) };
+        const body = { temp_min_c: f ? fToC(Number(tmin.value)) : Number(tmin.value), temp_max_c: f ? fToC(Number(tmax.value)) : Number(tmax.value), humidity_min: Number(hmin.value), humidity_max: Number(hmax.value), light_on_time: lon.value, light_hours: Number(lh.value) };
         body.temp_min_c = Math.round(body.temp_min_c * 10) / 10; body.temp_max_c = Math.round(body.temp_max_c * 10) / 10;
         targets = await api.put('/api/targets', body); renderTargets(); ctx.refreshStatus();
       }); } },
-        h('div', { class: 'form-grid' }, field(`Temp min (${f ? '°F' : '°C'})`, tmin), field(`Temp max (${f ? '°F' : '°C'})`, tmax), field('Humidity min (%)', hmin), field('Humidity max (%)', hmax), field('VPD min (kPa)', vmin), field('VPD max (kPa)', vmax), field('Lights on at', lon), field('Light hours', lh)),
+        h('div', { class: 'form-grid' }, field(`Temp min (${f ? '°F' : '°C'})`, tmin), field(`Temp max (${f ? '°F' : '°C'})`, tmax), field('Humidity min (%)', hmin), field('Humidity max (%)', hmax), field('Lights on at', lon), field('Light hours', lh)),
+        h('p', { class: 'tiny faint' }, 'These are the daytime settings; at night the tent is allowed to be a few degrees cooler. Air dryness (VPD) follows from temperature and humidity.'),
         h('div', { class: 'form-actions' }, h('button', { class: 'btn quiet', type: 'button', onclick: async () => {
-          if (!(await confirmDialog({ title: 'Reset targets to the stage defaults?', confirmText: 'Reset' }))) return;
+          if (!(await confirmDialog({ title: 'Reset targets to the stage defaults?', message: 'Your own changes and the advisor\'s tweaks for this stage are dropped.', confirmText: 'Reset' }))) return;
           try { targets = await api.del('/api/targets'); renderTargets(); ctx.refreshStatus(); toast('Targets reset', 'ok'); } catch (e) { toast(errText(e), 'error'); }
         } }, 'Reset to defaults'), btn)));
   }
@@ -122,28 +145,42 @@ export function createSettings(ctx) {
         h('div', { class: 'form-actions' }, btn)));
   }
 
-  // ---------- preferences ----------
+  // ---------- shared tent settings ----------
   function renderPrefs() {
     if (!settings) return;
     const s = settings;
-    const notifyOpts = [{ value: '', label: 'Off' }, ...(s.notify_services_available || []).map((x) => ({ value: x, label: x }))];
-    if (s.notify_service && !notifyOpts.some((o) => o.value === s.notify_service)) notifyOpts.push({ value: s.notify_service, label: s.notify_service });
+    const phones = (s.notify_services_available || []);
+    const phoneOpts = (none) => [{ value: '', label: none }, ...phones.map((x) => ({ value: x, label: phoneName(x) }))];
+    const models = s.models_available || [s.model || 'claude-opus-5'];
     const f = {
-      units: select([{ value: 'c', label: '°C' }, { value: 'f', label: '°F' }], s.units), brief_time: input({ type: 'time', value: s.brief_time || '08:00' }), timezone: input({ value: s.timezone || '', placeholder: 'America/New_York' }),
-      notify_service: select(notifyOpts, s.notify_service || ''), auto: h('input', { type: 'checkbox', checked: !!s.auto_apply_advisor_targets }), model: input({ value: s.model || '' }),
+      units: select([{ value: 'c', label: '°C' }, { value: 'f', label: '°F' }], s.units), brief_time: input({ type: 'time', value: s.brief_time || '08:00' }),
+      auto: h('input', { type: 'checkbox', checked: !!s.auto_apply_advisor_targets }),
+      budget: input({ type: 'number', min: 1, max: 500, step: 1, value: s.advisor_budget_usd ?? 40 }),
+      timezone: input({ value: s.timezone || '', placeholder: 'America/New_York' }),
+      notify_service: select(phoneOpts('Nobody extra'), s.notify_service || ''), admin: select(phoneOpts('The first plant\'s phone'), s.admin_notify_service || ''),
+      model: select(models.map((m) => ({ value: m, label: m })), s.model || models[0]),
       temp_offset_c: input({ type: 'number', step: '0.1', inputmode: 'decimal', value: s.temp_offset_c ?? 0 }), humidity_offset: input({ type: 'number', step: '0.5', inputmode: 'decimal', value: s.humidity_offset ?? 0 }),
       price: input({ type: 'number', step: '0.001', min: 0, inputmode: 'decimal', value: s.price_per_kwh ?? '', placeholder: '0.15' }), currency: input({ value: s.currency || 'CAD', maxlength: 4 }),
       capture: input({ type: 'number', min: 1, max: 240, value: s.camera_capture_minutes ?? 30 }),
+      tank: input({ type: 'number', min: 0.5, max: 48, step: 0.5, value: s.humidifier_tank_hours ?? 4 }),
     };
     const btn = saveBtn();
     replaceChildren(refs.prefs,
       h('form', { onsubmit: (e) => { e.preventDefault(); submitForm(btn, async () => {
-        const body = { units: f.units.value, brief_time: f.brief_time.value, timezone: f.timezone.value.trim(), notify_service: f.notify_service.value || null, auto_apply_advisor_targets: f.auto.checked, model: f.model.value.trim(), temp_offset_c: Number(f.temp_offset_c.value) || 0, humidity_offset: Number(f.humidity_offset.value) || 0, price_per_kwh: f.price.value === '' ? null : Number(f.price.value), currency: f.currency.value.trim() || 'CAD', camera_capture_minutes: Number(f.capture.value) || 30 };
+        const body = { units: f.units.value, brief_time: f.brief_time.value, auto_apply_advisor_targets: f.auto.checked, advisor_budget_usd: Number(f.budget.value) || 40,
+          timezone: f.timezone.value.trim(), notify_service: f.notify_service.value || null, admin_notify_service: f.admin.value || null, model: f.model.value,
+          temp_offset_c: Number(f.temp_offset_c.value) || 0, humidity_offset: Number(f.humidity_offset.value) || 0, price_per_kwh: f.price.value === '' ? null : Number(f.price.value),
+          currency: f.currency.value.trim() || 'CAD', camera_capture_minutes: Number(f.capture.value) || 30, humidifier_tank_hours: Number(f.tank.value) || 4 };
         settings = await api.put('/api/settings', body); ctx.setSettings(settings); renderPrefs(); renderTargets();
       }); } },
-        h('div', { class: 'form-grid' }, field('Units', f.units), field('Brief time', f.brief_time), field('Timezone', f.timezone), field('Default notify service', f.notify_service, { hint: 'Briefs and safety alerts go to everyone' }), field('Advisor model', f.model), h('label', { class: 'check' }, f.auto, 'Let the advisor adjust targets'),
-          field('Temp offset (°C)', f.temp_offset_c, { hint: 'Added to the raw sensor reading' }), field('Humidity offset (%)', f.humidity_offset), field('Price per kWh', f.price), field('Currency', f.currency), field('Camera frame every (min)', f.capture)),
-        h('p', { class: 'muted small' }, `Advisor spend this month: $${Number(s.advisor_month_usd || 0).toFixed(2)} USD (${s.model || 'claude-opus-5'})`),
+        h('p', { class: 'muted small' }, 'These apply to the whole tent, for both of you.'),
+        h('div', { class: 'form-grid' }, field('Units', f.units), field('Morning brief at', f.brief_time), field('Monthly advisor budget ($)', f.budget, { hint: `Spent this month: $${Number(s.advisor_month_usd || 0).toFixed(2)}` }), h('label', { class: 'check' }, f.auto, 'Let the advisor fine-tune temperature and humidity')),
+        h('details', { class: 'exp', style: { marginTop: '12px' } }, h('summary', null, 'Advanced (tent setup)'),
+          h('div', { class: 'form-grid', style: { marginTop: '10px' } },
+            field('Extra phone for every alert', f.notify_service, { hint: 'Each plant\'s own phone already gets alerts' }), field('Update notices go to', f.admin),
+            field('Humidifier tank lasts (h of misting)', f.tank), field('Timezone', f.timezone), field('Advisor model', f.model),
+            field('Temp offset (°C)', f.temp_offset_c, { hint: 'Added to the raw sensor reading' }), field('Humidity offset (%)', f.humidity_offset),
+            field('Price per kWh', f.price), field('Currency', f.currency), field('Camera frame every (min)', f.capture))),
         h('div', { class: 'form-actions' }, btn)));
   }
 
@@ -171,17 +208,24 @@ export function createSettings(ctx) {
 
   function renderConnection() {
     const c = getConn();
+    const keyName = MODE === 'hosted' ? 'Dashboard password' : 'API key';
     replaceChildren(refs.conn,
-      h('div', { class: 'kv' }, h('dt', null, 'Server'), h('dd', null, c.server || 'this page'), h('dt', null, 'API key'), h('dd', null, c.key ? '•'.repeat(Math.min(12, c.key.length)) : '—'), h('dt', null, 'Version'), h('dd', null, refs.version)),
-      h('div', { class: 'form-actions', style: { justifyContent: 'flex-start' } }, h('button', { class: 'btn quiet', onclick: async () => { if (await confirmDialog({ title: 'Disconnect?', message: 'You will be asked for the API key again.', confirmText: 'Disconnect' })) { clearConn(); location.reload(); } } }, icon('key'), 'Change key / disconnect')));
-    api.get('/api/health').then((hh) => { refs.version.textContent = `Grow Brain ${hh.version}${hh.advisor_enabled ? ' · advisor on' : ' · advisor off'}`; }).catch(() => {});
+      h('div', { class: 'kv' },
+        MODE === 'addon' ? [h('dt', null, 'Server'), h('dd', null, c.server || 'this page')] : [h('dt', null, 'Signed in'), h('dd', null, MODE === 'ingress' ? 'through Home Assistant' : 'with the dashboard password')],
+        MODE !== 'ingress' ? [h('dt', null, keyName), h('dd', null, c.key ? '•'.repeat(Math.min(12, c.key.length)) : '—')] : null,
+        h('dt', null, 'Version'), h('dd', null, refs.version)),
+      MODE !== 'ingress' ? h('div', { class: 'form-actions', style: { justifyContent: 'flex-start' } }, h('button', { class: 'btn quiet', onclick: async () => { if (await confirmDialog({ title: 'Sign out?', message: `You will be asked for the ${keyName.toLowerCase()} again.`, confirmText: 'Sign out' })) { clearConn(); location.reload(); } } }, icon('key'), 'Sign out')) : null);
+    api.get('/api/health').then((hh) => { refs.version.textContent = `Grow Brain add-on ${hh.version}${hh.advisor_enabled ? ' · advisor on' : ' · advisor off'}`; }).catch(() => {});
   }
 
   async function loadEvents() {
     try {
       const r = await api.get('/api/events?limit=100');
       if (!root) return;
-      replaceChildren(refs.events, (r.events || []).length ? r.events.map((e) => h('div', { class: 'event' }, h('span', { class: `dot ${e.level}` }), h('span', { class: 'kind' }, e.kind), h('span', null, e.message), h('time', { datetime: e.at, title: e.at }, fmtDateTime(e.at)))) : h('div', { class: 'empty' }, 'No events yet.'));
+      replaceChildren(refs.events, (r.events || []).length ? r.events.map((e) => h('div', { class: `event ${e.resolved_at ? 'resolved' : ''}` },
+        h('span', { class: `dot ${e.resolved_at ? 'info' : e.level}` }), h('span', { class: 'kind' }, e.kind),
+        h('span', null, e.message, e.resolved_at ? h('span', { class: 'chip good', style: { marginLeft: '6px' } }, 'cleared') : null),
+        h('time', { datetime: e.at, title: e.at }, fmtDateTime(e.at)))) : h('div', { class: 'empty' }, 'No events yet.'));
     } catch (e) { if (root) replaceChildren(refs.events, notice(errText(e), 'alert')); }
   }
 
@@ -205,13 +249,17 @@ export function createSettings(ctx) {
     backupBtn.onclick = () => backup(backupBtn);
     const card = (title, ic, body, cls = '') => h('section', { class: `card ${cls}`.trim(), 'aria-label': title }, h('div', { class: 'card-head' }, h('h2', null, icon(ic), title)), body);
     replaceChildren(root,
-      h('header', { class: 'page-head' }, h('div', null, h('h1', null, 'Settings'), h('div', { class: 'date' }, 'Plants, tent, targets, camera and preferences.'))),
+      h('header', { class: 'page-head' }, h('div', null, h('h1', null, 'Settings'), h('div', { class: 'date' }, 'Plants, tent, targets, camera and shared settings.'))),
       h('div', { class: 'settings-grid' },
         card('Plants', 'leaf', refs.plants, 'span2'),
         card('Tent', 'home', refs.tent), card('Targets', 'vpd', refs.targets),
-        card('Camera', 'camera', refs.camera), card('Preferences', 'gear', refs.prefs),
-        card('Set up a phone', 'key', h('div', { class: 'stack' }, h('p', { class: 'muted small' }, 'Show this QR code and scan it with the phone\'s camera: the GrowOp app opens already connected (home Wi-Fi mode).'), refs.qrUrl, h('div', { class: 'row' }, h('button', { class: 'btn', onclick: showQr }, icon('key'), 'Show QR code')), refs.qrBox)),
-        card('Backup', 'archive', h('div', { class: 'stack' }, h('p', { class: 'muted small' }, 'A zip of the database and photos. Keep one somewhere safe now and then.'), h('div', null, backupBtn))),
+        card('Camera', 'camera', refs.camera), card('Tent settings (shared)', 'gear', refs.prefs),
+        card('Set up a phone', 'key', MODE === 'hosted'
+          ? h('p', { class: 'muted small' }, 'For safety the setup QR code is only shown at home: open GrowOp from Home Assistant\'s sidebar, then Settings → Set up a phone.')
+          : h('div', { class: 'stack' }, h('p', { class: 'muted small' }, 'On the phone, install GrowOp, join the home Wi-Fi, then point the phone\'s camera at this QR code: the app opens already connected. It works on the home Wi-Fi only.'), refs.qrUrl, h('div', { class: 'row' }, h('button', { class: 'btn', onclick: showQr }, icon('key'), 'Show QR code')), refs.qrBox)),
+        card('Backup', 'archive', MODE === 'hosted'
+          ? h('p', { class: 'muted small' }, 'Backups hold everything, so they can only be downloaded at home: open GrowOp from Home Assistant\'s sidebar. Home Assistant\'s own backups include GrowOp too.')
+          : h('div', { class: 'stack' }, h('p', { class: 'muted small' }, 'A zip of the database and photos. Home Assistant\'s own backups include it too.'), h('div', null, backupBtn))),
         card('Connection', 'key', refs.conn),
         card('Events', 'list', refs.events, 'span2')));
     renderConnection(); loadAll();

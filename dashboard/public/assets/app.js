@@ -1,5 +1,5 @@
 // GrowOp dashboard shell: connect card, theme, router, status polling.
-import { api, getConn, setConn, ApiError } from './api.js';
+import { api, getConn, setConn, ApiError, MODE } from './api.js';
 import { icon } from './icons.js';
 import { h, replaceChildren, fmtTime, toast, errText, spinner } from './util.js';
 import { createOverview } from './overview.js';
@@ -58,7 +58,8 @@ async function poll(force = false) {
     setConnDot(false, errText(e));
   }
 }
-function startPolling() { stopPolling(); poll(true); state.pollTimer = setInterval(() => poll(), 10000); }
+// 30 s is plenty for a tent that changes over minutes, and keeps the hosted copy's traffic small.
+function startPolling() { stopPolling(); poll(true); state.pollTimer = setInterval(() => poll(), 30000); }
 function stopPolling() { if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer = null; }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') startPolling(); else stopPolling(); });
 
@@ -108,7 +109,7 @@ async function tryConnect(e) {
   e?.preventDefault();
   const key = document.getElementById('connect-key').value.trim(), server = document.getElementById('connect-server').value.trim().replace(/\/+$/, '');
   const err = document.getElementById('connect-err'), btn = document.getElementById('connect-btn');
-  if (!key) { err.textContent = location.port === '8099' ? 'Enter the API key from the add-on settings.' : 'Enter the dashboard password.'; return; }
+  if (!key) { err.textContent = MODE === 'addon' ? 'Enter the API key from the add-on settings.' : 'Enter the dashboard password.'; return; }
   setConn({ key, server });
   btn.disabled = true; replaceChildren(btn, spinner(), 'Connecting…'); err.textContent = '';
   try {
@@ -116,7 +117,7 @@ async function tryConnect(e) {
     state.status = s;
     await boot();
   } catch (ex) {
-    err.textContent = ex instanceof ApiError && ex.status === 401 ? 'That key was not accepted.' : errText(ex);
+    err.textContent = ex instanceof ApiError && ex.status === 401 ? (MODE === 'hosted' ? 'That password was not accepted.' : 'That key was not accepted.') : errText(ex);
   }
   btn.disabled = false; replaceChildren(btn, 'Connect');
 }
@@ -129,13 +130,14 @@ async function boot() {
   startPolling();
 }
 
-// Hosted copy (Vercel): the key field is the dashboard password, not the add-on key. // growop-hosted-label
-if (location.port !== '8099') {
+// Hosted copy (Vercel): the key field is the dashboard password, and there is no server to choose. // growop-hosted-label
+if (MODE === 'hosted') {
   const lbl = document.querySelector('label[for="connect-key"]'); if (lbl) lbl.textContent = 'Dashboard password';
-  const hint = document.querySelector('p.muted.small'); if (hint && /API key/.test(hint.textContent)) hint.textContent = 'Enter the dashboard password you were given.';
+  const hint = document.getElementById('connect-hint'); if (hint) hint.textContent = 'Enter the dashboard password you were given.';
   const inp = document.getElementById('connect-key'); if (inp) inp.setAttribute('autocomplete', 'current-password');
+  document.getElementById('connect-server-field')?.classList.add('hidden');
 }
-window.addEventListener('growop:unauthorized', () => { if (state.connected) { showConnect(location.port === '8099' ? 'The API key was rejected — enter it again.' : 'Wrong dashboard password — try again.'); } });
+window.addEventListener('growop:unauthorized', () => { if (state.connected) { showConnect(MODE === 'hosted' ? 'Wrong dashboard password: try again.' : 'The API key was rejected: enter it again.'); } });
 
 // ---------- init ----------
 function init() {
@@ -148,7 +150,8 @@ function init() {
   const clock = document.getElementById('clock');
   const tick = () => { clock.textContent = fmtTime(new Date()); };
   tick(); setInterval(tick, 15000);
-  if (getConn().key) boot().catch((e) => { if (!(e instanceof ApiError && e.status === 401)) toast(errText(e), 'error'); });
+  // Inside Home Assistant's sidebar you're already signed in: no password card.
+  if (MODE === 'ingress' || getConn().key) boot().catch((e) => { if (!(e instanceof ApiError && e.status === 401)) toast(errText(e), 'error'); });
   else showConnect();
 }
 init();

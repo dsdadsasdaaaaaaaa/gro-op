@@ -420,8 +420,9 @@ async def test_bad_light_time_is_refused_and_a_stored_one_cannot_stop_the_loop(c
         assert r.status_code == 422 and "like 06:00" in r.json()["detail"]
     assert (await c.put("/api/targets", json={"light_on_time": "6:30"})).json()["light_on_time"] == "06:30"
     # a bad value that got stored by an older version
-    await store.set_kv("targets_override", {"values": {}, "source": "manual", "light_on_time": "6pm"})
+    await store.set_kv("targets_override", {"values": {"light_hours": 24}, "source": "manual", "light_on_time": "6pm"})
     await c.post("/api/control/start")
+    ha.state["switch.grow_light"] = "on"
     ha.sensors["sensor.tent_temperature"] = ("36.0", "°C", "temperature")
     ha.calls.clear()
     await controller.cycle()
@@ -432,6 +433,8 @@ async def test_bad_light_time_is_refused_and_a_stored_one_cannot_stop_the_loop(c
 async def test_database_failure_does_not_block_switching(client):
     c, ha, store, controller = client
     await c.post("/api/control/start")
+    await c.put("/api/targets", json={"light_hours": 24})
+    ha.state["switch.grow_light"] = "on"
 
     async def broken(*a, **k):
         raise RuntimeError("disk full")

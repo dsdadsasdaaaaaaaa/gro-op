@@ -69,7 +69,7 @@ export const DEVICE_ICON = {
 
 export const LOG_ICON = {
   ph: 'droplet', ec: 'zap', ppm: 'zap', water: 'droplet', feed: 'seed', height: 'ruler', note: 'note',
-  observation: 'eye', defoliation: 'scissors', training: 'ruler', transplant: 'seed', other: 'note',
+  observation: 'eye', defoliation: 'scissors', training: 'ruler', planted: 'seed', transplant: 'seed', other: 'note',
 };
 
 export function levelIcon(level) {
