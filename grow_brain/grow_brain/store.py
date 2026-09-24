@@ -481,6 +481,10 @@ class Store:
         async with self.db.execute(q, args) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
+    async def set_task_due(self, tid: int, due: str | None) -> None:
+        await self.db.execute("UPDATE tasks SET due=? WHERE id=?", (due, tid))
+        await self.db.commit()
+
     async def set_task_status(self, tid: int, status: str) -> dict | None:
         await self.db.execute("UPDATE tasks SET status=?, completed_at=? WHERE id=?",
                               (status, iso(utcnow()) if status == "done" else None, tid))

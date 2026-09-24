@@ -296,3 +296,22 @@ def test_the_climate_summary_says_when_the_extremes_happened():
     night_only = _summarise_readings(rows[1:], "c", tz=ZoneInfo("America/Toronto"), schedule=("06:00", 18))
     assert "coldest 20.3°C (Thu 03:00, lights off, night)" in night_only
 
+
+
+async def test_a_first_sprout_is_logged_announced_and_moves_the_dome_date(env):
+    store, adv, fake = env
+    from datetime import datetime, timedelta, timezone
+    await store.add_task("Take the dome off Levi's plant", "x", "2026-01-01", "normal", "system", 1)
+    await store.add_task("Check both cups for sprouts once a day", "", None, "normal", "advisor", None)
+    settings = await adv.controller.settings()
+    up = PhotoAnalysisOut.model_validate({**DEFAULTS[PhotoAnalysisOut], "sprouted": [1]})
+    assert (await adv._apply(up, settings, "camera_check"))["sprouted"] == [1]
+    assert [e["plant_id"] for e in await store.log_entries(20) if e["kind"] == "sprouted"] == [1]
+    dome = next(t for t in await store.tasks("open") if t["title"] == "Take the dome off Levi's plant")
+    assert dome["due"] == (datetime.now(timezone.utc).date() + timedelta(days=5)).isoformat()
+    assert any(t["title"].startswith("Check both cups") for t in await store.tasks("open"))    # Dad's isn't up yet
+    # seeing the same sprout again changes nothing; once Dad's is up the daily check is closed
+    assert (await adv._apply(up, settings, "camera_check"))["sprouted"] == []
+    await adv._apply(PhotoAnalysisOut.model_validate({**DEFAULTS[PhotoAnalysisOut], "sprouted": [2, 99]}), settings, "camera_check")
+    assert not any("sprout" in t["title"].lower() for t in await store.tasks("open"))
+    assert sorted(e["plant_id"] for e in await store.log_entries(20) if e["kind"] == "sprouted") == [1, 2]

@@ -22,6 +22,20 @@ async def dome_reminder(store, controller, plant_id: Optional[int]) -> Optional[
     return t["id"]
 
 
+async def sprouted(store, controller, plant_id: int) -> None:
+    """A seedling came up: its dome comes off about five days later (once the first true leaves open), so the
+    reminder is dated from today instead of from the planting."""
+    plant = await store.get_plant(plant_id)
+    if not plant:
+        return
+    tz = controller.tz(await controller.settings())
+    due = (datetime.now(tz).date() + timedelta(days=5)).isoformat()
+    title = f"Take the dome off {plant['name']}"
+    for t in await store.tasks("open"):
+        if t["title"] == title:
+            await store.set_task_due(t["id"], due)
+
+
 async def after_log(store, controller, kind: str, plant_id: Optional[int]) -> list[int]:
     """What a planting or a transplant sets in motion. Returns the ids of the tasks it added."""
     added: list[int] = []

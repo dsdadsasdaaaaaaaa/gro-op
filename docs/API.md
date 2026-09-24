@@ -7,7 +7,7 @@ All timestamps are ISO-8601 UTC strings. All temperatures are returned in BOTH Â
 Errors: non-2xx with JSON `{"detail": "human readable message"}`.
 
 ## GET /api/health   (no auth)
-`{"ok": true, "version": "0.8.8", "ha_connected": true, "advisor_enabled": true, "control": "ok", "last_cycle_at": "...", "consecutive_failures": 0}`.
+`{"ok": true, "version": "0.8.9", "ha_connected": true, "advisor_enabled": true, "control": "ok", "last_cycle_at": "...", "consecutive_failures": 0}`.
 Returns **503** with `ok:false` when the control loop has stopped or is stuck (used by the Supervisor watchdog; turn the add-on's Watchdog toggle on).
 
 ## GET /api/status
@@ -274,6 +274,7 @@ Every request may carry `X-Device-Id: <random id per phone/browser>`; it keeps t
 
 **Advisor records**
 - Brief and chat replies may carry `plantings: [{"plant_id","kind": "planted"|"transplant","date"}]`: what the advisor recorded in the log from a conversation (dated the day it happened; a record of the same kind on another day is corrected, not doubled). The plan counts seedling days from these.
+- Photo analyses (uploads, look-now, the daily camera check) may carry `sprouted: [plant_id]`: the first time a seedling is seen through the soil. The app logs a `sprouted` entry, pushes to both phones, re-dates that plant's "Take the dome off" reminder to 5 days later, and closes the daily sprout-check job once every plant is up. LogEntry kinds gain `sprouted`.
 
 **Plants and notifications**
 - `GET /api/plants?include_archived=true`; `POST /api/plants/{id}/restore` un-archives.

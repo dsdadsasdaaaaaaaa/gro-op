@@ -323,6 +323,7 @@ class Advisor:
                 merged = ((plant.get("notes") or "").rstrip(". ") + ". " if plant.get("notes") else "") + note
                 await self.store.update_plant(pn.plant_id, notes=merged[-1500:])
         recorded = await self._apply_plantings(getattr(out, "plantings", []) or [], plants, settings)
+        sprouts = await self._apply_sprouts(getattr(out, "sprouted", []) or [], plants, source)
         changes: list[TargetChange] = getattr(out, "target_changes", []) or []
         if changes:
             applied_changes = await self._apply_target_changes(changes, settings, source)
@@ -338,7 +339,34 @@ class Advisor:
                 await self.notifier.send(f"photo_request:{pid}", f"The advisor would like {len(titles)} photo(s){who}: " + "; ".join(titles),
                                          title="Photo request", url=url, service=svc, everyone=svc is None)
         return {"tasks": created_tasks, "photo_requests": created_prs, "target_changes": applied_changes, "tasks_done": closed,
-                "plantings": recorded}
+                "plantings": recorded, "sprouted": sprouts}
+
+    async def _apply_sprouts(self, plant_ids: list, plants: dict, source: str) -> list[int]:
+        """First sight of a seedling above the soil: log the day, tell both phones, date the dome removal from it,
+        and once every plant is up, close the daily 'check for sprouts' job."""
+        if not plant_ids:
+            return []
+        entries = await self.store.log_entries(500)
+        already = {e.get("plant_id") for e in entries if e["kind"] == "sprouted"}
+        seen_by = "the tent camera" if source == "camera_check" else "a photo"
+        new = []
+        for pid in dict.fromkeys(plant_ids):
+            if pid not in plants or pid in already:
+                continue
+            await self.store.add_log_entry("sprouted", None, None, "advisor", f"Sprouted: first seen by {seen_by}", pid)
+            await followups.sprouted(self.store, self.controller, pid)
+            await self.notifier.send(f"sprouted:{pid}", f"{plants[pid]['name']} has sprouted! It's through the soil. "
+                                     "Keep the dome on until the first jagged leaves open.", title="Grow tent",
+                                     url=f"growop://photos?plant={pid}", everyone=True)
+            new.append(pid)
+            already.add(pid)
+        if new and all(p in already for p in plants):
+            for t in await self.store.tasks("open"):
+                if "sprout" in t["title"].lower() and t.get("created_by") != "system":
+                    await self.store.set_task_status(t["id"], "done")
+        if new:
+            await self.store.add_event("info", "advisor", "Sprouted: " + ", ".join(plants[p]["name"] for p in new))
+        return new
 
     async def _apply_plantings(self, plantings: list, plants: dict, settings: dict) -> list[dict]:
         """Record a planting or transplant the grower reported, dated the day it happened, so the plan counts from it.
@@ -513,6 +541,8 @@ class Advisor:
         content = [
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": base64.standard_b64encode(path.read_bytes()).decode()}},
             {"type": "text", "text": f"{ctx}\n\n---\nThis is the automatic daily camera check, one hour after lights-on. Look at both plants. "
+                                     f"If a seedling has come up through the soil and the log doesn't show that plant as sprouted yet, put its "
+                                     f"plant_id in `sprouted` (only if the plant notes or the grower's log say which cup is whose; otherwise describe it and ask them to log which cup is whose). "
                                      f"If everything looks normal, say so in one sentence with no findings and no tasks. Only report findings with severity "
                                      f"'warn' or 'alert' when you can actually see a problem (drooping, colour change, dry surface, pests, light too close, "
                                      f"something fallen over). Health score reflects what you can see."},

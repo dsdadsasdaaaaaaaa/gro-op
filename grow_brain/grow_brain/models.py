@@ -161,7 +161,7 @@ class PauseRequest(BaseModel):
 # ---------- Log / tasks / photos / chat ----------
 
 LogKind = Literal["ph", "ec", "ppm", "water", "feed", "height", "note", "observation",
-                  "defoliation", "training", "planted", "transplant", "other"]
+                  "defoliation", "training", "planted", "sprouted", "transplant", "other"]
 
 
 class LogCreate(BaseModel):
@@ -260,6 +260,7 @@ class Finding(BaseModel):
 
 
 class PhotoAnalysisOut(BaseModel):
+    sprouted: list[int] = Field(default_factory=list, description="plant_ids whose seedling is now visible above the soil and isn't logged as sprouted yet. Only when the plant notes or the grower's log say which cup is whose; never guess")
     tasks_done: list[int] = Field(default_factory=list, description="Ids of OPEN tasks that are now finished or obsolete (the grower did them, or the plan changed). Close them here instead of asking the grower to.")
     summary: str
     health_score: int = Field(ge=0, le=10)
