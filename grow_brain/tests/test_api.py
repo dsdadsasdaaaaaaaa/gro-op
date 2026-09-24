@@ -673,3 +673,9 @@ async def test_refill_after_a_swap_teaches_the_swap_drop(client):
     controller.sensor = SensorSnapshot(24.5, 65.0, 1.0, None, utcnow(), False)
     await controller._learn(ctx)
     assert controller.learned["exchange_rh_drop_per_min"] == 2.17
+    # an empty tank teaches nothing: the refill couldn't add water, so the shortfall says nothing about the swap
+    controller._tank = {**(controller._tank or {}), "dry": True}
+    controller._pending_samples.append({**smp, "ended": utcnow() - timedelta(seconds=LAG_S + 10), "on_at": utcnow()})
+    controller.sensor = SensorSnapshot(24.5, 55.0, 1.0, None, utcnow(), False)
+    await controller._learn(ctx)
+    assert controller.learned["exchange_rh_drop_per_min"] == 2.17

@@ -952,6 +952,10 @@ class Controller:
                 ex_last = self.last_switched.get("exhaust_fan")
                 if (ex_last and ex_last > smp["on_at"]) or self.sensor.humidity is None or ctx.lights_on != smp["lights_on"]:
                     continue
+                if (self._tank or {}).get("dry"):
+                    # an empty tank can't refill anything: learning from it would make every swap look huge,
+                    # and the refills would overshoot for hours after the tank is filled again
+                    continue
                 cur = float(self.learned.get("exchange_rh_drop_per_min") or EXCHANGE_DROP_DEFAULT)
                 step = max(-0.5, min(0.5, 0.5 * (smp["aim"] - self.sensor.humidity) / max(smp["swap_min"], 0.5)))
                 new = round(min(6.0, max(0.3, cur + step)), 2)
