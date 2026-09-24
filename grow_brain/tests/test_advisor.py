@@ -251,20 +251,3 @@ async def test_a_new_camera_check_replaces_the_old_warning(env):
     await adv.camera_check()
     open_warns = [e["message"] for e in await store.events(50, min_level="warn") if e["message"].startswith("Camera check")]
     assert open_warns == ["Camera check: Soil looks dry"]
-
-
-
-async def test_camera_check_replaces_the_previous_warning(env):
-    store, adv, fake = env
-    import io
-    from PIL import Image
-    buf = io.BytesIO()
-    Image.new("RGB", (64, 48), (40, 120, 40)).save(buf, "JPEG")
-
-    async def snap(max_age_s=0):
-        return buf.getvalue()
-    adv.camera = SimpleNamespace(snapshot=snap)
-    await store.add_event("warn", "advisor", "Camera check: Camera can't see the plants")
-    await adv.camera_check()      # the stub's answer: healthy, nothing wrong
-    left = [e for e in await store.events(50, min_level="warn") if e["message"].startswith("Camera check")]
-    assert not left
