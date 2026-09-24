@@ -2,6 +2,7 @@ package com.growop.app.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.Alignment
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -34,6 +35,7 @@ import com.growop.app.state.AppState
 import com.growop.app.state.AppTab
 import com.growop.app.ui.advisor.AdvisorScreen
 import com.growop.app.ui.home.HomeScreen
+import com.growop.app.ui.home.UndoBanner
 import com.growop.app.ui.log.LogScreen
 import com.growop.app.ui.photos.PhotosScreen
 import com.growop.app.ui.shared.FullScreenLoading
@@ -125,6 +127,7 @@ fun MainTabs(app: AppState) {
                 AppTab.PHOTOS -> PhotosScreen(app)
                 AppTab.TASKS -> TasksScreen(app)
             }
+            UndoBanner(app, Modifier.align(Alignment.BottomCenter).padding(bottom = 10.dp))
         }
     }
 }

@@ -30,8 +30,9 @@ final class AppState {
     var plantsSupported: Bool?
     private(set) var myPlantId: Int? = UserDefaults.standard.object(forKey: AppState.myPlantKey) as? Int
     var selectedPlantId: Int?
-    private var plantChoiceDismissed = false
+    private var plantChoiceDismissed = UserDefaults.standard.bool(forKey: AppState.plantSkipKey)
     private static let myPlantKey = "growop.myPlantId"
+    private static let plantSkipKey = "growop.plantChoiceSkipped"
     /// Plans cached per plant id (0 = no plant / older backend).
     var plans: [Int: GrowPlan] = [:]
 
@@ -174,6 +175,9 @@ final class AppState {
             }
             let historyStale = lastHistoryAt.map { Date().timeIntervalSince($0) > 300 } ?? true
             if historyStale { await loadHistory() }
+            // keep the tab badges honest: if the server's counts moved, reload the lists behind them
+            if tasksLoaded, st.openTasks != previous?.openTasks { await loadTasks() }
+            if requestsLoaded, st.openPhotoRequests != previous?.openPhotoRequests { await loadPhotoRequests() }
         } catch {
             if case APIError.network(let e) = error, e.code == .cancelled { return }
             statusError = error.localizedDescription
@@ -201,7 +205,10 @@ final class AppState {
         plantsSupported == true && (myPlantId == nil || !plants.contains { $0.id == myPlantId })
     }
     var showPlantChoice: Bool { needsPlantChoice && !plantChoiceDismissed }
-    func dismissPlantChoice() { plantChoiceDismissed = true }
+    func dismissPlantChoice() {
+        plantChoiceDismissed = true
+        UserDefaults.standard.set(true, forKey: Self.plantSkipKey)
+    }
 
     func loadPlants() async {
         guard isConfigured else { return }
@@ -273,6 +280,13 @@ final class AppState {
     var needsYouPhotoCount: Int { requestsLoaded ? openRequestsForSelected.count : (status?.openPhotoRequests ?? 0) }
     private var tasksLoaded = false
     private var requestsLoaded = false
+
+    // MARK: Humidifier water
+
+    func markHumidifierRefilled() async throws {
+        try await client.humidifierRefilled()
+        await refreshStatus()
+    }
 
     // MARK: Tent camera
 
@@ -400,12 +414,13 @@ final class AppState {
         }
     }
 
-    func sendChat(_ text: String) async throws {
+    func sendChat(_ text: String, plantId: Int?) async throws {
         // Optimistically show the user's message.
         let tempId = -(Int(Date().timeIntervalSince1970 * 1000))
-        chatMessages.append(ChatMessage(id: tempId, role: "user", content: text, createdAt: Formatting.iso.string(from: Date())))
+        let author = myPlant?.owner ?? plants.first { $0.id == plantId }?.owner
+        chatMessages.append(ChatMessage(id: tempId, role: "user", content: text, createdAt: Formatting.iso.string(from: Date()), author: author, plantId: plantId))
         do {
-            let reply = try await client.sendChat(text, plantId: selectedPlantId)
+            let reply = try await client.sendChat(text, plantId: plantId, author: myPlant?.owner)
             chatMessages.append(ChatMessage(id: reply.id ?? tempId - 1, role: "assistant", content: reply.reply ?? "", createdAt: Formatting.iso.string(from: Date())))
             await loadChat()
         } catch {
@@ -523,6 +538,28 @@ final class AppState {
         openTasks.removeAll { $0.id == task.id }
         doneTasks.insert(updated, at: 0)
         status?.openTasks = openTasks.count
+    }
+
+    /// The task just ticked off, offered back for a few seconds in case the tap was a slip.
+    var undoTask: TaskItem?
+    @ObservationIgnored private var undoClear: Task<Void, Never>?
+
+    func completeWithUndo(_ task: TaskItem) async throws {
+        try await completeTask(task)
+        undoTask = task
+        undoClear?.cancel()
+        undoClear = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(6))
+            if !Task.isCancelled { self?.undoTask = nil }
+        }
+    }
+
+    func undoLastComplete() async {
+        guard let t = undoTask else { return }
+        undoTask = nil
+        undoClear?.cancel()
+        try? await reopenTask(t)
+        await refreshStatus()
     }
 
     func reopenTask(_ task: TaskItem) async throws {

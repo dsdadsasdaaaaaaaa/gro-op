@@ -58,10 +58,12 @@ struct GrowPlanCard: View {
                 }
 
                 if missingStartDate {
-                    Label("Set your start date in Settings → Grow", systemImage: "calendar.badge.exclamationmark")
+                    Label("Set the start date in Settings → Plants", systemImage: "calendar.badge.exclamationmark")
                         .font(.footnote.weight(.medium)).foregroundStyle(Color.warn)
                 } else if let next = plan.next {
-                    if let date = Formatting.monthDay(next.startDate) {
+                    if let sd = next.startDate, sd <= Formatting.todayISO() {
+                        Text("Next: \(next.displayTitle) · when ready").font(.footnote).foregroundStyle(.secondary)
+                    } else if let date = Formatting.monthDay(next.startDate) {
                         Text("Next: \(next.displayTitle) · \(date)").font(.footnote).foregroundStyle(.secondary)
                     } else {
                         Text("Next: \(next.displayTitle)").font(.footnote).foregroundStyle(.secondary)
@@ -121,7 +123,7 @@ struct PlanView: View {
                     header(plan)
                     let phases = plan.orderedPhases
                     if phases.isEmpty {
-                        EmptyStateView(symbol: "map", title: "No plan yet", message: "The grow brain hasn't produced a plan for this grow.")
+                        EmptyStateView(symbol: "map", title: "No plan yet", message: "GrowOp hasn't made a plan for this grow yet.")
                     }
                     VStack(spacing: 0) {
                         ForEach(Array(phases.enumerated()), id: \.element.key) { idx, phase in
@@ -177,7 +179,7 @@ struct PlanView: View {
                 }
             }
             if plan.startDate == nil {
-                Label("Set your start date in Settings → Grow to see dates on this plan.", systemImage: "calendar.badge.exclamationmark")
+                Label("Set the start date in Settings → Plants to see dates on this plan.", systemImage: "calendar.badge.exclamationmark")
                     .font(.subheadline.weight(.medium)).foregroundStyle(Color.warn)
             }
             if let cur = plan.current {

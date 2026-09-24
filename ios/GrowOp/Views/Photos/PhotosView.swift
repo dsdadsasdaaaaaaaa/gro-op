@@ -18,6 +18,8 @@ struct PhotosView: View {
     @State private var pending: PendingPhoto?
     @State private var alert: AlertMessage?
     @State private var skipping: Int?
+    @State private var confirmSkip: PhotoRequest?
+    @State private var lightBusy = false
 
     private let gridColumns = [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)]
 
@@ -32,14 +34,24 @@ struct PhotosView: View {
                             PhotoRequestCard(request: r,
                                              onTake: { startCamera(for: r) },
                                              onChoose: { startLibrary(for: r) },
-                                             onSkip: { Task { await skip(r) } },
-                                             busy: skipping == r.id)
+                                             onSkip: { confirmSkip = r },
+                                             onLightOff: lightIsOn ? { Task { await lightOff() } } : nil,
+                                             busy: skipping == r.id || lightBusy)
                         }
                     }
 
+                    Color.clear.frame(height: 0)
+                        .confirmationDialog("Skip this photo?", isPresented: Binding(get: { confirmSkip != nil }, set: { if !$0 { confirmSkip = nil } }),
+                                            titleVisibility: .visible, presenting: confirmSkip) { r in
+                            Button("Skip it", role: .destructive) { Task { await skip(r) } }
+                            Button("Keep it", role: .cancel) {}
+                        } message: { _ in
+                            Text("The advisor won't get this picture. It will ask again if it still needs it.")
+                        }
+
                     VStack(alignment: .leading, spacing: 10) {
                         Label("Send a photo", systemImage: "camera.viewfinder").font(.title3.weight(.semibold))
-                        Text("Any photo of your plants — the advisor will check it over.")
+                        Text("Any photo of your plants: the advisor will check it over.")
                             .font(.subheadline).foregroundStyle(.secondary)
                         HStack(spacing: 10) {
                             Button { startCamera(for: nil) } label: { Label("Take photo", systemImage: "camera.fill") }
@@ -127,6 +139,16 @@ struct PhotosView: View {
         showLibrary = true
     }
 
+    private var lightIsOn: Bool { app.status?.devices?.first { $0.role == "light" }?.isOn == true }
+
+    /// Colours are true only under normal light: switch the grow light off for 10 minutes, then it comes back by itself.
+    private func lightOff() async {
+        lightBusy = true
+        defer { lightBusy = false }
+        do { try await app.setOverride(role: "light", mode: "off", minutes: 10) }
+        catch { alert = AlertMessage(title: "Couldn't switch the light off", message: error.localizedDescription) }
+    }
+
     private func skip(_ r: PhotoRequest) async {
         skipping = r.id
         defer { skipping = nil }
@@ -142,6 +164,7 @@ struct PhotoRequestCard: View {
     var onTake: () -> Void
     var onChoose: () -> Void
     var onSkip: () -> Void
+    var onLightOff: (() -> Void)? = nil
     var busy: Bool
 
     var body: some View {
@@ -169,6 +192,13 @@ struct PhotoRequestCard: View {
             }
             if let r = request.reason, !r.isEmpty {
                 Label(r, systemImage: "questionmark.circle").font(.footnote).foregroundStyle(.secondary)
+            }
+            if let onLightOff {
+                Button(action: onLightOff) {
+                    Label("Grow light off for 10 minutes", systemImage: "lightbulb.slash")
+                        .font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity)
+                }
+                .buttonStyle(BigButtonStyle(color: .night, filled: false))
             }
             HStack(spacing: 10) {
                 Button(action: onTake) { Label("Take photo", systemImage: "camera.fill") }
@@ -422,7 +452,7 @@ struct PhotoDetailView: View {
                         LevelChip(text: "Requested by advisor", color: .night)
                     }
                 }
-                if let n = photo.note, !n.isEmpty {
+                if let n = photo.userNote, !n.isEmpty {
                     Text("Your note: \(n)").font(.subheadline).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }

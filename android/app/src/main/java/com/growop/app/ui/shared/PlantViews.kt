@@ -1,5 +1,7 @@
 package com.growop.app.ui.shared
 
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -93,11 +95,13 @@ fun PlantChoiceScreen(ui: AppUi, app: AppState, onDone: () -> Unit) {
 
     LaunchedEffect(Unit) {
         if (ui.plants.isEmpty()) app.loadPlants()
-        selection = app.value.myPlantId ?: app.value.selectedPlantId ?: app.value.plants.firstOrNull()?.id
+        selection = app.value.myPlantId   // nothing pre-picked: on a new phone, "yours" must be a choice
     }
+    // Back means "not now", not "close the app".
+    BackHandler { app.dismissPlantChoice(); onDone() }
 
     Column(
-        Modifier.fillMaxSize().background(c.bg).statusBarsPadding().verticalScroll(rememberScrollState()).imePadding().padding(GrowTheme.spacing),
+        Modifier.fillMaxSize().background(c.bg).statusBarsPadding().navigationBarsPadding().verticalScroll(rememberScrollState()).imePadding().padding(GrowTheme.spacing),
         verticalArrangement = Arrangement.spacedBy(GrowTheme.sectionSpacing),
     ) {
         Column(Modifier.fillMaxWidth().padding(top = 12.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {

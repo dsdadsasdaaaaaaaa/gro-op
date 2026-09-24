@@ -136,8 +136,15 @@ struct Targets: Codable {
     var lightHours: Double?
     var source: String?
     var note: String?
+    /// "day" or "night": which band the numbers are (status only).
+    var band: String?
+    var nightTempDropC: Double?
+
+    var isNight: Bool { band == "night" }
 
     enum CodingKeys: String, CodingKey {
+        case band
+        case nightTempDropC = "night_temp_drop_c"
         case tempMinC = "temp_min_c"
         case tempMaxC = "temp_max_c"
         case tempMinF = "temp_min_f"
@@ -174,6 +181,7 @@ struct DeviceStatus: Codable, Identifiable {
     var overrideUntil: String?
     var reason: String?
     var available: Bool?
+    var powerW: Double?
 
     var id: String { role }
 
@@ -181,7 +189,11 @@ struct DeviceStatus: Codable, Identifiable {
         case role, label, kind, state, mode, reason, available
         case entityId = "entity_id"
         case overrideUntil = "override_until"
+        case powerW = "power_w"
     }
+
+    /// Switched on or off by hand (not following the automation).
+    var isSetByHand: Bool { mode == "on" || mode == "off" }
 
     var displayLabel: String { label ?? role.replacingOccurrences(of: "_", with: " ").capitalized }
     var isSwitch: Bool { (kind ?? "switch") == "switch" }
@@ -228,14 +240,33 @@ struct StatusResponse: Codable {
     var standby: Bool?
     var plants: [Plant]?
     var camera: CameraInfo?
+    var humidifierTank: HumidifierTank?
+    var dayTargets: Targets?
 
     enum CodingKeys: String, CodingKey {
         case time, sensor, grow, targets, light, devices, assessment, alerts, standby, plants, camera
+        case humidifierTank = "humidifier_tank"
+        case dayTargets = "day_targets"
         case haConnected = "ha_connected"
         case openTasks = "open_tasks"
         case openPhotoRequests = "open_photo_requests"
         case unreadBrief = "unread_brief"
         case controlPausedUntil = "control_paused_until"
+    }
+}
+
+/// How much water the humidifier has left, estimated from misting time since the last refill.
+struct HumidifierTank: Codable {
+    var hoursLeft: Double?
+    var percentLeft: Int?
+    var dry: Bool?
+    var tankHours: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case dry
+        case hoursLeft = "hours_left"
+        case percentLeft = "percent_left"
+        case tankHours = "tank_hours"
     }
 }
 
@@ -485,9 +516,11 @@ struct LogRequest: Codable {
     var context: String?
     var note: String?
     var plantId: Int? = nil
+    /// true: ask the advisor now (paid, 10–40 s). false: saved instantly; the next brief reads it.
+    var advise: Bool = false
 
     enum CodingKeys: String, CodingKey {
-        case kind, value, unit, context, note
+        case kind, value, unit, context, note, advise
         case plantId = "plant_id"
     }
 }
@@ -501,12 +534,14 @@ struct LogEntry: Codable, Identifiable {
     var context: String?
     var note: String?
     var adviceSummary: String?
+    var adviceSteps: [String]?
     var plantId: Int?
 
     enum CodingKeys: String, CodingKey {
         case id, kind, value, unit, context, note
         case createdAt = "created_at"
         case adviceSummary = "advice_summary"
+        case adviceSteps = "advice_steps"
         case plantId = "plant_id"
     }
 }
@@ -587,17 +622,20 @@ struct Photo: Codable, Identifiable {
     var analysis: PhotoAnalysis?
     var imageUrl: String?
     var plantId: Int?
+    var source: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, note, analysis
+        case id, note, analysis, source
         case createdAt = "created_at"
         case requestId = "request_id"
         case imageUrl = "image_url"
         case plantId = "plant_id"
     }
 
-    /// Photos the backend took from the tent camera ("look now" or brief frames).
-    var isFromCamera: Bool { (note ?? "").hasPrefix("Tent camera snapshot") }
+    /// Photos the backend took from the tent camera ("look now" or the daily check).
+    var isFromCamera: Bool { source == "camera" || (note ?? "").hasPrefix("Tent camera") }
+    /// The note the grower wrote (camera shots don't have one).
+    var userNote: String? { isFromCamera ? nil : note }
 }
 
 struct PhotosResponse: Codable {
@@ -708,10 +746,13 @@ struct ChatMessage: Codable, Identifiable {
     var role: String?
     var content: String?
     var createdAt: String?
+    var author: String?
+    var plantId: Int?
 
     enum CodingKeys: String, CodingKey {
-        case id, role, content
+        case id, role, content, author
         case createdAt = "created_at"
+        case plantId = "plant_id"
     }
     var isUser: Bool { role == "user" }
 }
@@ -723,10 +764,12 @@ struct ChatListResponse: Codable {
 struct ChatSendRequest: Codable {
     var message: String
     var plantId: Int?
+    var author: String?
 
     enum CodingKeys: String, CodingKey {
         case message
         case plantId = "plant_id"
+        case author
     }
 
     func encode(to encoder: Encoder) throws {
@@ -773,9 +816,17 @@ struct Settings: Codable {
     var cameraEntity: String?
     var cameraCaptureMinutes: Double?
     var advisorMonthUsd: Double?
+    var advisorBudgetUsd: Double?
+    var modelsAvailable: [String]?
+    var humidifierTankHours: Double?
+    var adminNotifyService: String?
 
     enum CodingKeys: String, CodingKey {
         case units, timezone, model
+        case advisorBudgetUsd = "advisor_budget_usd"
+        case modelsAvailable = "models_available"
+        case humidifierTankHours = "humidifier_tank_hours"
+        case adminNotifyService = "admin_notify_service"
         case cameraEntity = "camera_entity"
         case cameraCaptureMinutes = "camera_capture_minutes"
         case briefTime = "brief_time"
@@ -892,6 +943,30 @@ enum Formatting {
         f.timeZone = TimeZone.current
         return f
     }()
+
+    /// "notify.mobile_app_sm_g781w" → "Samsung phone (sm g781w)", "notify.mobile_app_iphone" → "iPhone".
+    static func phoneName(_ svc: String) -> String {
+        var id = svc.replacingOccurrences(of: "notify.", with: "")
+        if id.hasPrefix("mobile_app_") { id.removeFirst("mobile_app_".count) }
+        let spaced = id.replacingOccurrences(of: "_", with: " ")
+        if id.hasPrefix("sm_") { return "Samsung phone (\(spaced))" }
+        if id == "iphone" { return "iPhone" }
+        if id.contains("iphone") { return "iPhone (\(spaced))" }
+        if id.contains("ipad") { return "iPad (\(spaced))" }
+        return spaced
+    }
+
+    /// Today as YYYY-MM-DD in the phone's time zone (task due dates use this form).
+    static func todayISO() -> String { dayFormatter.string(from: Date()) }
+
+    /// "Due today" / "Overdue since Mon, Sep 21" / "Due Thu, Sep 24" for a YYYY-MM-DD due date.
+    static func dueText(_ due: String) -> String {
+        let today = todayISO()
+        guard let d = dayFormatter.date(from: due) else { return "Due \(due)" }
+        let nice = d.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
+        if due == today { return "Due today" }
+        return due < today ? "Overdue since \(nice)" : "Due \(nice)"
+    }
 
     /// Parses ISO-8601 timestamps (with or without fractional seconds, with or without "Z").
     static func parseISO(_ s: String?) -> Date? {

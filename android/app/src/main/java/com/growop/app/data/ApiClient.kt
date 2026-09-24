@@ -45,6 +45,10 @@ class ApiClient(initial: ServerConfig, private val onDiscovery: (slug: String, p
     var config: ServerConfig = initial
         private set
 
+    /** A stable id for this phone, so "read the brief" is remembered per person. */
+    @Volatile
+    var deviceId: String = "android"
+
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(SHORT_TIMEOUT_S, TimeUnit.SECONDS)
@@ -77,7 +81,7 @@ class ApiClient(initial: ServerConfig, private val onDiscovery: (slug: String, p
         if (base.isEmpty()) throw ApiError.NotConfigured
         val parsed: HttpUrl = (base + spec.path).toHttpUrlOrNull() ?: throw ApiError.InvalidUrl(base)
         val url = parsed.newBuilder().apply { spec.query.forEach { (k, v) -> addQueryParameter(k, v) } }.build()
-        val b = Request.Builder().url(url).header("Accept", "application/json")
+        val b = Request.Builder().url(url).header("Accept", "application/json").header("X-Device-Id", deviceId)
         headers.forEach { (k, v) -> b.header(k, v) }
         when (spec.method) {
             "GET" -> b.get()
@@ -259,6 +263,11 @@ class ApiClient(initial: ServerConfig, private val onDiscovery: (slug: String, p
     suspend fun photoRequests(status: String = "open"): PhotoRequestsResponse =
         get("/api/photo-requests", PhotoRequestsResponse.serializer(), listOf("status" to status))
     suspend fun skipPhotoRequest(id: Int) = sendIgnoringBody("POST", "/api/photo-requests/$id/skip")
+
+    suspend fun humidifierRefilled() = sendIgnoringBody("POST", "/api/humidifier/refilled")
+
+    suspend fun notifyTest(service: String) =
+        sendIgnoringBody("POST", "/api/notify/test?service=" + java.net.URLEncoder.encode(service, "UTF-8"))
 
     suspend fun uploadPhoto(jpeg: ByteArray, requestId: Int?, note: String?, plantId: Int?): Photo {
         val b = MultipartBody.Builder().setType(MultipartBody.FORM)

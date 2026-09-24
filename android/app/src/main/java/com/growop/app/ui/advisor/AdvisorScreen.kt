@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Eco
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
@@ -54,6 +55,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -92,13 +94,29 @@ fun AdvisorScreen(app: AppState) {
     var alertMessage by remember { mutableStateOf<String?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
+    var aboutMenuOpen by remember { mutableStateOf(false) }
+    // null = the whole tent. Until the person picks, a question is about the plant they're looking at.
+    var aboutChosen by rememberSaveable { mutableStateOf(false) }
+    var aboutPlantId by rememberSaveable { mutableStateOf<Int?>(null) }
+    val currentAbout: Int? = if (aboutChosen) aboutPlantId else ui.selectedPlantId
+    val aboutName = ui.plants.firstOrNull { it.id == currentAbout }?.displayName ?: "the whole tent"
+    // Only jump to the end after this person sends something, so opening the tab shows the brief first.
+    var followBottom by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+    val me = ui.myPlant?.owner
+    fun isMine(m: ChatMessage): Boolean {
+        if (!m.isUser) return false
+        val author = m.author
+        if (author.isNullOrBlank() || me.isNullOrBlank()) return true
+        return author.equals(me, ignoreCase = true)
+    }
 
     LaunchedEffect(Unit) {
         app.loadBrief(); app.loadChat(); app.markBriefRead()
     }
     LaunchedEffect(ui.brief?.id) { app.markBriefRead() }
     LaunchedEffect(ui.chatMessages.size, sending) {
+        if (!followBottom) return@LaunchedEffect
         val count = listState.layoutInfo.totalItemsCount
         if (count > 0) listState.animateScrollToItem(count - 1)
     }
@@ -107,9 +125,12 @@ fun AdvisorScreen(app: AppState) {
         val text = draft.trim()
         if (text.isEmpty()) return
         draft = ""
-        scope.launch {
+        followBottom = true
+        val about = currentAbout
+        // The app's scope, not this screen's: leaving the tab mid-answer must not throw the answer away.
+        app.launch {
             sending = true
-            try { app.sendChat(text) } catch (e: Throwable) {
+            try { app.sendChat(text, about) } catch (e: Throwable) {
                 draft = text; alertTitle = "Message not sent"; alertMessage = ApiError.wrap(e).message
             } finally { sending = false }
         }
@@ -149,8 +170,8 @@ fun AdvisorScreen(app: AppState) {
                     }
                 }
                 item {
-                    BigButton(if (runningBrief) "Writing your brief… (up to a minute)" else "Run brief now", filled = false, loading = runningBrief, icon = Icons.Filled.AutoAwesome) {
-                        scope.launch {
+                    BigButton(if (runningBrief) "Writing your brief… (up to a minute)" else "Write a brief now (≈ \$0.10)", filled = false, loading = runningBrief, icon = Icons.Filled.AutoAwesome) {
+                        app.launch {
                             runningBrief = true
                             try { app.runBrief(); app.markBriefRead() } catch (e: Throwable) { alertTitle = "Couldn't run the brief"; alertMessage = ApiError.wrap(e).message } finally { runningBrief = false }
                         }
@@ -163,7 +184,7 @@ fun AdvisorScreen(app: AppState) {
                         Text("Anything about your plant — watering, feeding, what a leaf looks like, when to flip to flower…", style = MaterialTheme.typography.bodyMedium, color = c.textSecondary)
                     }
                 }
-                items(ui.chatMessages, key = { it.id }) { m -> ChatBubble(m) }
+                items(ui.chatMessages, key = { it.id }) { m -> ChatBubble(m, mine = isMine(m)) }
                 if (sending) {
                     item {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -179,11 +200,25 @@ fun AdvisorScreen(app: AppState) {
             }
             // Input bar
             Column(Modifier.fillMaxWidth().background(c.bg).padding(horizontal = GrowTheme.spacing, vertical = 10.dp)) {
-                ui.selectedPlant?.let { p ->
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp)) {
-                        Icon(Icons.Filled.Eco, contentDescription = null, tint = c.textSecondary, modifier = Modifier.size(14.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Asking about ${p.displayName}", style = MaterialTheme.typography.labelMedium, color = c.textSecondary)
+                if (ui.plants.isNotEmpty()) {
+                    Box {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { aboutMenuOpen = true }.padding(horizontal = 6.dp, vertical = 8.dp),
+                        ) {
+                            Icon(if (currentAbout == null) Icons.Filled.Home else Icons.Filled.Eco, contentDescription = null, tint = c.textSecondary, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("About: $aboutName", style = MaterialTheme.typography.labelMedium, color = c.textSecondary)
+                            Icon(Icons.Filled.ExpandMore, contentDescription = "Change", tint = c.textSecondary, modifier = Modifier.size(16.dp))
+                        }
+                        DropdownMenu(expanded = aboutMenuOpen, onDismissRequest = { aboutMenuOpen = false }) {
+                            DropdownMenuItem(text = { Text("The whole tent") }, leadingIcon = { Icon(Icons.Filled.Home, null) },
+                                onClick = { aboutPlantId = null; aboutChosen = true; aboutMenuOpen = false })
+                            ui.plants.forEach { p ->
+                                DropdownMenuItem(text = { Text(p.displayName) }, leadingIcon = { Icon(Icons.Filled.Eco, null) },
+                                    onClick = { aboutPlantId = p.id; aboutChosen = true; aboutMenuOpen = false })
+                            }
+                        }
                     }
                 }
                 Row(verticalAlignment = Alignment.Bottom) {
@@ -206,7 +241,7 @@ fun AdvisorScreen(app: AppState) {
         }
     }
 
-    if (confirmClear) ConfirmDialog("Clear the whole conversation?", null, "Clear chat", destructive = true,
+    if (confirmClear) ConfirmDialog("Clear the chat for both of you?", "Everyone who uses the tent shares this chat.", "Clear it", destructive = true,
         onConfirm = { scope.launch { try { app.clearChat() } catch (e: Throwable) { alertMessage = ApiError.wrap(e).message } } },
         onDismiss = { confirmClear = false })
     ErrorDialog(alertMessage, title = alertTitle) { alertMessage = null }
@@ -326,16 +361,21 @@ fun LeafGlyph() {
     }
 }
 
+/** This person's own messages sit on the right; the advisor's and the other grower's on the left. */
 @Composable
-fun ChatBubble(message: ChatMessage) {
+fun ChatBubble(message: ChatMessage, mine: Boolean = true) {
     val c = GrowTheme.colors
-    val user = message.isUser
+    val user = message.isUser && mine
+    val other = message.isUser && !mine
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom, horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) {
-        if (!user) { LeafGlyph(); Spacer(Modifier.width(8.dp)) }
+        if (!message.isUser) { LeafGlyph(); Spacer(Modifier.width(8.dp)) }
         Column(horizontalAlignment = if (user) Alignment.End else Alignment.Start, modifier = Modifier.widthIn(max = 320.dp)) {
+            if (other && !message.author.isNullOrBlank()) {
+                Text(message.author, style = MaterialTheme.typography.labelMedium, color = c.textSecondary, modifier = Modifier.padding(start = 6.dp, bottom = 2.dp))
+            }
             Box(
-                Modifier.clip(RoundedCornerShape(18.dp)).background(if (user) c.brand else c.card)
-                    .border(if (user) 0.dp else 1.dp, if (user) Color.Transparent else c.track, RoundedCornerShape(18.dp))
+                Modifier.clip(RoundedCornerShape(18.dp)).background(if (user) c.brand else if (other) c.night.copy(alpha = 0.12f) else c.card)
+                    .border(if (user || other) 0.dp else 1.dp, if (user || other) Color.Transparent else c.track, RoundedCornerShape(18.dp))
                     .padding(horizontal = 14.dp, vertical = 10.dp),
             ) {
                 SelectionContainer {

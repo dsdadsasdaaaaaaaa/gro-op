@@ -21,6 +21,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.ArrowCircleUp
+import androidx.compose.material.icons.filled.Spa
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.ChatBubble
@@ -78,12 +82,14 @@ import com.growop.app.ui.theme.GrowTheme
 import kotlinx.coroutines.launch
 
 enum class LogKind(val key: String, val title: String, val icon: ImageVector) {
-    PH("ph", "pH", Icons.Filled.Science),
-    EC("ec", "EC / PPM", Icons.Filled.Bolt),
     WATER("water", "Watered", Icons.Filled.WaterDrop),
-    FEED("feed", "Fed", Icons.Filled.Restaurant),
+    PLANTED("planted", "Planted", Icons.Filled.Spa),
+    TRANSPLANT("transplant", "Moved to big pot", Icons.Filled.ArrowCircleUp),
     HEIGHT("height", "Height", Icons.Filled.Height),
-    NOTE("note", "Note", Icons.Filled.ChatBubble);
+    NOTE("note", "Note", Icons.Filled.ChatBubble),
+    PH("ph", "pH", Icons.Filled.Science),
+    FEED("feed", "Fed", Icons.Filled.Restaurant),
+    EC("ec", "EC / PPM", Icons.Filled.Bolt);
 
     val hasContext: Boolean get() = this == PH || this == EC
 
@@ -98,11 +104,11 @@ fun LogKind.color(): Color = when (this) {
     LogKind.EC -> GrowTheme.colors.warn
     LogKind.WATER -> GrowTheme.colors.brand
     LogKind.FEED -> GrowTheme.colors.good
-    LogKind.HEIGHT -> GrowTheme.colors.leaf
+    LogKind.HEIGHT, LogKind.PLANTED, LogKind.TRANSPLANT -> GrowTheme.colors.leaf
     LogKind.NOTE -> GrowTheme.colors.textSecondary
 }
 
-val contexts: List<Pair<String, String>> = listOf("water_in" to "Water going in", "runoff" to "Runoff", "reservoir" to "Reservoir")
+val contexts: List<Pair<String, String>> = listOf("water_in" to "Water going in", "runoff" to "Runoff")
 fun contextLabel(c: String): String = contexts.firstOrNull { it.first == c }?.second ?: Formatting.capitalize(c)
 
 @Composable
@@ -132,7 +138,7 @@ private fun LogMain(app: AppState, onPick: (LogKind) -> Unit) {
         PullToRefreshBox(isRefreshing = refreshing, onRefresh = { scope.launch { refreshing = true; app.loadLog(); refreshing = false } }, modifier = Modifier.fillMaxSize().padding(inner)) {
             Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(GrowTheme.spacing), verticalArrangement = Arrangement.spacedBy(20.dp)) {
                 PlantSwitcher(ui, app)
-                Text("Tell the advisor what you did or measured. It replies with advice right away.", style = MaterialTheme.typography.bodyMedium, color = c.textSecondary)
+                Text("Log what you did or measured. It saves instantly and the advisor reads it in the morning brief, or ask it right away.", style = MaterialTheme.typography.bodyMedium, color = c.textSecondary)
                 LogKind.entries.chunked(2).forEach { row ->
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         row.forEach { kind ->
@@ -169,18 +175,21 @@ private fun LogMain(app: AppState, onPick: (LogKind) -> Unit) {
 fun LogEntryRow(entry: LogEntry) {
     val c = GrowTheme.colors
     val kind = LogKind.from(entry.kind)
+    var expanded by remember { mutableStateOf(false) }
     val headline = buildString {
         var s = Formatting.capitalize(entry.kind ?: "entry")
-        if (entry.kind == "ph") s = "pH"
-        if (entry.kind == "ec") s = "EC"
-        if (entry.kind == "ppm") s = "PPM"
+        when (entry.kind) {
+            "ph" -> s = "pH"; "ec" -> s = "EC"; "ppm" -> s = "PPM"; "water" -> s = "Watered"
+            "planted" -> s = "Planted"; "transplant" -> s = "Moved to big pot"; "feed" -> s = "Fed"
+        }
+        if (entry.context == "task") s = entry.note ?: s   // "Done: Water the cups"
         append(s)
         entry.value?.let { v ->
             append(" ").append(Formatting.number(v, 2))
             val u = entry.unit
             if (!u.isNullOrEmpty() && u.lowercase() != "ph") append(" ").append(u)
         }
-        entry.context?.takeIf { it.isNotEmpty() }?.let { append(" · ").append(contextLabel(it)) }
+        entry.context?.takeIf { it.isNotEmpty() && it != "task" }?.let { append(" · ").append(contextLabel(it)) }
     }
     Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.Top) {
         Icon(kind?.icon ?: Icons.Filled.ChatBubble, contentDescription = null, tint = kind?.color() ?: c.textSecondary, modifier = Modifier.size(22.dp))
@@ -190,8 +199,17 @@ fun LogEntryRow(entry: LogEntry) {
                 Text(headline, style = MaterialTheme.typography.titleSmall, color = c.text, modifier = Modifier.weight(1f))
                 Text(Formatting.relative(entry.createdAt), style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
             }
-            if (!entry.note.isNullOrEmpty()) Text(entry.note, style = MaterialTheme.typography.bodySmall, color = c.textSecondary, maxLines = 2)
-            if (!entry.adviceSummary.isNullOrEmpty()) Text(entry.adviceSummary, style = MaterialTheme.typography.bodySmall, color = c.text, maxLines = 3)
+            if (!entry.note.isNullOrEmpty() && entry.context != "task") Text(entry.note, style = MaterialTheme.typography.bodySmall, color = c.textSecondary, maxLines = 2)
+            val advice = entry.adviceSummary
+            if (!advice.isNullOrEmpty()) {
+                Text(advice, style = MaterialTheme.typography.bodySmall, color = c.text, maxLines = if (expanded) Int.MAX_VALUE else 3)
+                val steps = entry.adviceSteps.orEmpty()
+                if (expanded) steps.forEachIndexed { i, st -> Text("${i + 1}. $st", style = MaterialTheme.typography.bodySmall, color = c.textSecondary) }
+                if (steps.isNotEmpty() || advice.length > 140) {
+                    Text(if (expanded) "Less" else "More", style = MaterialTheme.typography.labelMedium, color = c.brand,
+                        modifier = Modifier.clip(androidx.compose.foundation.shape.RoundedCornerShape(6.dp)).clickable { expanded = !expanded }.padding(vertical = 4.dp, horizontal = 2.dp))
+                }
+            }
         }
     }
 }
@@ -218,11 +236,11 @@ fun LogEntryScreen(app: AppState, kind: LogKind, onClose: () -> Unit) {
     val canSubmit = when (kind) {
         LogKind.PH, LogKind.EC, LogKind.HEIGHT -> parsedValue != null
         LogKind.NOTE -> note.isNotBlank()
-        LogKind.WATER, LogKind.FEED -> true
+        LogKind.WATER, LogKind.FEED, LogKind.PLANTED, LogKind.TRANSPLANT -> true
     }
     val title = if (result == null) (ui.selectedPlant?.let { "Log ${kind.title} · ${it.shortName}" } ?: "Log ${kind.title}") else "Advice"
 
-    fun submit() {
+    fun submit(advise: Boolean) {
         val trimmedNote = note.trim()
         var req = when (kind) {
             LogKind.PH -> LogRequest("ph", parsedValue, "pH", context)
@@ -231,11 +249,18 @@ fun LogEntryScreen(app: AppState, kind: LogKind, onClose: () -> Unit) {
             LogKind.FEED -> LogRequest("feed", parsedValue, if (parsedValue == null) null else "L")
             LogKind.HEIGHT -> LogRequest("height", parsedValue, heightUnit)
             LogKind.NOTE -> LogRequest("note")
+            LogKind.PLANTED -> LogRequest("planted")
+            LogKind.TRANSPLANT -> LogRequest("transplant")
         }
         if (trimmedNote.isNotEmpty()) req = req.copy(note = trimmedNote)
-        scope.launch {
-            submitting = true
-            try { result = app.submitLog(req) } catch (e: Throwable) { error = ApiError.wrap(e).message } finally { submitting = false }
+        req = req.copy(advise = advise)
+        // The app's scope: leaving the screen while the advisor thinks must not lose the entry.
+        app.launch {
+            if (advise) submitting = true
+            try {
+                val r = app.submitLog(req)
+                if (advise) result = r else onClose()
+            } catch (e: Throwable) { error = ApiError.wrap(e).message } finally { submitting = false }
         }
     }
 
@@ -287,7 +312,13 @@ fun LogEntryScreen(app: AppState, kind: LogKind, onClose: () -> Unit) {
                         }
                         LogKind.WATER -> GrowCard {
                             Text("How much water? (optional)", style = MaterialTheme.typography.titleMedium, color = c.text); Spacer(Modifier.height(10.dp))
-                            numberField("e.g. 1.5", "litres")
+                            numberField("e.g. 0.05 for a cup, 1 for a pot", "litres")
+                        }
+                        LogKind.PLANTED -> GrowCard {
+                            Text("Log it the day the seed goes into its cup. The plan and the advisor count the seedling days from here.", style = MaterialTheme.typography.bodyMedium, color = c.textSecondary)
+                        }
+                        LogKind.TRANSPLANT -> GrowCard {
+                            Text("Log it the day the plant goes into its 11 L pot. GrowOp then reminds you to switch the stage to Veg.", style = MaterialTheme.typography.bodyMedium, color = c.textSecondary)
                         }
                         LogKind.FEED -> GrowCard {
                             Text("How much feed solution? (optional)", style = MaterialTheme.typography.titleMedium, color = c.text); Spacer(Modifier.height(10.dp))
@@ -309,14 +340,17 @@ fun LogEntryScreen(app: AppState, kind: LogKind, onClose: () -> Unit) {
                             modifier = Modifier.fillMaxWidth().then(if (kind == LogKind.NOTE) Modifier.focusRequester(focus) else Modifier),
                         )
                     }
-                    BigButton("Send to advisor", color = color, enabled = canSubmit) { submit() }
+                    BigButton("Save", color = color, enabled = canSubmit) { submit(advise = false) }
+                    BigButton("Save & ask the advisor (≈ \$0.05)", color = c.night, filled = false, enabled = canSubmit, icon = Icons.Filled.AutoAwesome) { submit(advise = true) }
+                    Text("Save is instant and free. Asking takes 10–40 seconds and costs a few cents.", style = MaterialTheme.typography.bodySmall,
+                        color = c.textSecondary, modifier = Modifier.fillMaxWidth(), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
                     Spacer(Modifier.height(24.dp))
                 }
             }
         }
     }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
-    ErrorDialog(error, title = "Couldn't send that") { error = null }
+    ErrorDialog(error, title = "Couldn't save that") { error = null }
 }
 
 @Composable

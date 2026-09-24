@@ -76,7 +76,11 @@ data class Targets(
     @SerialName("light_hours") val lightHours: Double? = null,
     val source: String? = null,
     val note: String? = null,
-)
+    /** "day" or "night": which band the numbers are (status only). */
+    val band: String? = null,
+) {
+    val isNight: Boolean get() = band == "night"
+}
 
 @Serializable
 data class LightStatus(
@@ -96,10 +100,13 @@ data class DeviceStatus(
     @SerialName("override_until") val overrideUntil: String? = null,
     val reason: String? = null,
     val available: Boolean? = null,
+    @SerialName("power_w") val powerW: Double? = null,
 ) {
     val displayLabel: String get() = label ?: role.replace('_', ' ').replaceFirstChar { it.uppercase() }
     val isSwitch: Boolean get() = (kind ?: "switch") == "switch"
     val isOn: Boolean get() = state == "on"
+    /** Switched on or off by hand (not following the automation). */
+    val isSetByHand: Boolean get() = mode == "on" || mode == "off"
 }
 
 enum class AssessmentLevel { GOOD, WARN, ALERT, STANDBY;
@@ -149,6 +156,16 @@ data class StatusResponse(
     val standby: Boolean? = null,
     val plants: List<Plant>? = null,
     val camera: CameraInfo? = null,
+    @SerialName("humidifier_tank") val humidifierTank: HumidifierTank? = null,
+)
+
+/** How much water the humidifier has left, estimated from misting time since the last refill. */
+@Serializable
+data class HumidifierTank(
+    @SerialName("hours_left") val hoursLeft: Double? = null,
+    @SerialName("percent_left") val percentLeft: Int? = null,
+    val dry: Boolean? = null,
+    @SerialName("tank_hours") val tankHours: Double? = null,
 )
 
 // MARK: Tent camera (v0.3.0)
@@ -271,6 +288,8 @@ data class LogRequest(
     val context: String? = null,
     val note: String? = null,
     @SerialName("plant_id") val plantId: Int? = null,
+    /** true: ask the advisor now (paid, 10–40 s). false: saved instantly; the next brief reads it. */
+    val advise: Boolean = false,
 )
 
 @Serializable
@@ -283,6 +302,7 @@ data class LogEntry(
     val context: String? = null,
     val note: String? = null,
     @SerialName("advice_summary") val adviceSummary: String? = null,
+    @SerialName("advice_steps") val adviceSteps: List<String>? = null,
     @SerialName("plant_id") val plantId: Int? = null,
 )
 
@@ -347,9 +367,12 @@ data class Photo(
     val analysis: PhotoAnalysis? = null,
     @SerialName("image_url") val imageUrl: String? = null,
     @SerialName("plant_id") val plantId: Int? = null,
+    val source: String? = null,
 ) {
-    /** Snapshots the grow brain took from the tent camera (note starts with "Tent camera snapshot"). */
-    val isFromCamera: Boolean get() = (note ?: "").startsWith("Tent camera snapshot")
+    /** Pictures GrowOp took from the tent camera ("look now" or the daily check). */
+    val isFromCamera: Boolean get() = source == "camera" || (note ?: "").startsWith("Tent camera")
+    /** The note the grower wrote (camera shots don't have one). */
+    val userNote: String? get() = if (isFromCamera) null else note
 }
 
 @Serializable
@@ -418,6 +441,8 @@ data class ChatMessage(
     val role: String? = null,
     val content: String? = null,
     @SerialName("created_at") val createdAt: String? = null,
+    val author: String? = null,
+    @SerialName("plant_id") val plantId: Int? = null,
 ) {
     val isUser: Boolean get() = role == "user"
 }
@@ -461,6 +486,8 @@ data class Settings(
     @SerialName("camera_entity") val cameraEntity: String? = null,
     @SerialName("camera_capture_minutes") val cameraCaptureMinutes: Int? = null,
     @SerialName("advisor_month_usd") val advisorMonthUsd: Double? = null,
+    @SerialName("advisor_budget_usd") val advisorBudgetUsd: Double? = null,
+    @SerialName("models_available") val modelsAvailable: List<String>? = null,
 )
 
 // MARK: Control

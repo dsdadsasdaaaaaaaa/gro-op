@@ -10,9 +10,9 @@ import javax.net.ssl.SSLException
 
 /** Every failure the UI can show. `message` is always plain language. */
 sealed class ApiError(override val message: String) : Exception(message) {
-    object NotConfigured : ApiError("The app isn't connected to your grow brain yet. Open Settings to set it up.")
+    object NotConfigured : ApiError("This phone isn't set up yet. Scan the setup QR code from the dashboard.")
     class InvalidUrl(s: String) : ApiError("\"$s\" doesn't look like a valid address.")
-    object Unauthorized : ApiError("The grow brain rejected the API key. Check it in Settings.")
+    object Unauthorized : ApiError("GrowOp at home didn't accept this phone's setup code. Use Settings → Set up this phone again, then scan the QR code.")
     class Http(val status: Int, val detail: String?) :
         ApiError(if (!detail.isNullOrBlank()) detail else "The server replied with an error ($status).")
     class Network(val cause0: Throwable) : ApiError(describe(cause0))

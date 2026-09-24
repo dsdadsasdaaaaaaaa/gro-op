@@ -147,7 +147,7 @@ fun OnboardingScreen(app: AppState) {
         Spacer(Modifier.height(24.dp))
         Icon(Icons.Filled.Eco, contentDescription = null, tint = c.brand, modifier = Modifier.size(84.dp))
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Connect to your grow brain", style = MaterialTheme.typography.headlineLarge, color = c.text, textAlign = TextAlign.Center)
+            Text("Connect to GrowOp at home", style = MaterialTheme.typography.headlineLarge, color = c.text, textAlign = TextAlign.Center)
             Text(
                 if (mode == ConnectionMode.DIRECT)
                     "Easiest way: ask Levi to open the Grow Brain dashboard → Settings → Set up a phone → Show QR code, then point this " +

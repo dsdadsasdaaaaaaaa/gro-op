@@ -94,7 +94,7 @@ struct StandbyCard: View {
             }
             .buttonStyle(BigButtonStyle())
             .disabled(busy)
-            Text("Start it when the seedling goes in")
+            Text("Start it when the seedlings go in")
                 .font(.footnote).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity)
         }
@@ -186,13 +186,13 @@ struct VitalsCard: View {
                                             tolerance: usesF ? 2.7 : 1.5),
                             value: tempValue, bandMin: tempMin, bandMax: tempMax,
                             series: history.map { p in usesF ? (p.tempF ?? p.tempC.map(Formatting.cToF)) : (p.tempC ?? p.tempF.map(Formatting.fToC)) },
-                            muted: muted || stale)
+                            muted: muted || stale, night: targets?.isNight == true)
                 VitalColumn(spec: VitalSpec(title: "Humidity", symbol: "humidity.fill", unit: "%", decimals: 0,
                                             scaleMin: 20, scaleMax: 90, tolerance: 5),
                             value: sensor?.humidity, bandMin: targets?.humidityMin, bandMax: targets?.humidityMax,
                             series: history.map { $0.humidity },
-                            muted: muted || stale)
-                VitalColumn(spec: VitalSpec(title: "VPD", symbol: "wind", unit: "kPa", decimals: 2,
+                            muted: muted || stale, night: targets?.isNight == true)
+                VitalColumn(spec: VitalSpec(title: "Air dryness", symbol: "wind", unit: "kPa", decimals: 2,
                                             scaleMin: 0, scaleMax: 2, tolerance: 0.2),
                             value: sensor?.vpdKpa, bandMin: targets?.vpdMin, bandMax: targets?.vpdMax,
                             series: history.map { $0.vpdKpa },
@@ -223,6 +223,7 @@ struct VitalColumn: View {
     let bandMax: Double?
     let series: [Double?]
     let muted: Bool
+    var night: Bool = false
 
     private var status: BandStatus {
         muted ? .unknown : BandStatus.of(value: value, min: bandMin, max: bandMax, tolerance: spec.tolerance)
@@ -241,7 +242,7 @@ struct VitalColumn: View {
             Sparkline(values: series, bandMin: bandMin, bandMax: bandMax, color: status.color, muted: muted)
                 .frame(height: 26)
             if let bandMin, let bandMax {
-                Text("\(Formatting.number(bandMin, decimals: spec.decimals))–\(Formatting.number(bandMax, decimals: spec.decimals))")
+                Text("\(Formatting.number(bandMin, decimals: spec.decimals))–\(Formatting.number(bandMax, decimals: spec.decimals))\(night ? " · night" : "")")
                     .font(.caption2).foregroundStyle(.tertiary)
             } else {
                 Text("no target").font(.caption2).foregroundStyle(.tertiary)
@@ -546,7 +547,10 @@ struct DevicesGrid: View {
             HStack {
                 Text("Devices").font(.headline)
                 Spacer()
-                if muted { Text("All off").font(.caption.weight(.semibold)).foregroundStyle(.secondary) }
+                if muted {
+                    let byHand = devices.filter { $0.isOn && $0.mode == "on" }.count
+                    Text(byHand > 0 ? "Standby · \(byHand) on by hand" : "Standby").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                }
             }
             if devices.isEmpty {
                 Text("No devices set up yet. Open Settings to map your tent equipment.")
@@ -569,7 +573,7 @@ struct DeviceChip: View {
     let action: () -> Void
 
     private var isMapped: Bool { device.entityId != nil }
-    private var isOn: Bool { device.isOn && !muted }
+    private var isOn: Bool { device.isOn }
 
     private var dotColor: Color {
         if !isMapped { return Color.secondary.opacity(0.3) }
@@ -579,11 +583,9 @@ struct DeviceChip: View {
 
     private var reasonLine: String {
         if !isMapped { return "Not set up" }
-        if device.available == false { return "Unavailable" }
+        if device.available == false { return "Not responding" }
+        if device.isSetByHand { return DeviceText.byHand(device) + (muted ? " (standby)" : "") }
         if muted { return "Standby" }
-        if let m = device.mode, m != "auto" {
-            return "Manual · \(m == "on" ? "on" : "off")" + (device.reason.map { $0.isEmpty ? "" : " · \($0)" } ?? "")
-        }
         if let r = device.reason, !r.isEmpty { return r }
         return device.isOn ? "On · automatic" : "Off · automatic"
     }
@@ -614,6 +616,9 @@ struct DeviceChip: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                    if isOn, let w = device.powerW, w >= 1 {
+                        Text("\(Int(w.rounded())) W").font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
+                    }
                 }
                 Spacer(minLength: 0)
             }
@@ -622,8 +627,16 @@ struct DeviceChip: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .opacity(muted || !isMapped ? 0.6 : 1)
+        .opacity((muted && !isOn) || !isMapped ? 0.6 : 1)
         .animation(.spring(duration: 0.35), value: isOn)
+    }
+}
+
+enum DeviceText {
+    /// "Set by hand: on until 2:33 PM"
+    static func byHand(_ d: DeviceStatus) -> String {
+        let until = Formatting.parseISO(d.overrideUntil).map { " until \($0.formatted(date: .omitted, time: .shortened))" } ?? ""
+        return "Set by hand: \(d.mode ?? "")\(until)"
     }
 }
 
@@ -651,18 +664,18 @@ struct DeviceSheet: View {
                 HStack(spacing: 14) {
                     ZStack {
                         RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(d.isOn && !standby ? Color.brand.opacity(0.15) : Color.secondary.opacity(0.10))
+                            .fill(d.isOn ? Color.brand.opacity(0.15) : Color.secondary.opacity(0.10))
                         Image(systemName: DeviceSymbol.symbol(for: d.role))
                             .font(.system(size: 24, weight: .semibold))
-                            .foregroundStyle(d.isOn && !standby ? Color.brand : Color.secondary)
+                            .foregroundStyle(d.isOn ? Color.brand : Color.secondary)
                     }
                     .frame(width: 56, height: 56)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(d.displayLabel).font(.title3.weight(.semibold))
                         HStack(spacing: 8) {
                             LevelChip(text: stateText(d), color: stateColor(d))
-                            if let m = d.mode, m != "auto" {
-                                LevelChip(text: "Manual", color: .warn)
+                            if d.isSetByHand {
+                                LevelChip(text: "Set by hand", color: .warn)
                             }
                         }
                     }
@@ -671,13 +684,11 @@ struct DeviceSheet: View {
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Why").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    Text(standby ? "The tent is in standby, so everything stays off." : ((d.reason?.isEmpty == false) ? d.reason! : "No reason reported."))
+                    Text(d.isSetByHand ? DeviceText.byHand(d)
+                         : standby ? "The tent is in standby, so everything stays off unless you switch it on here."
+                         : ((d.reason?.isEmpty == false) ? d.reason! : "No reason reported."))
                         .font(.body)
                         .fixedSize(horizontal: false, vertical: true)
-                    if let until = Formatting.parseISO(d.overrideUntil) {
-                        Label("Manual until \(until.formatted(date: .omitted, time: .shortened))", systemImage: "clock")
-                            .font(.footnote).foregroundStyle(Color.warn)
-                    }
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -699,7 +710,7 @@ struct DeviceSheet: View {
                     }
                     .pickerStyle(.segmented)
                     .disabled(busy || d.entityId == nil)
-                    Text("Auto lets the grow brain decide. On or Off holds it there for a while.")
+                    Text("Auto lets GrowOp decide. On or Off holds it there for a while; the safety limits still apply.")
                         .font(.caption).foregroundStyle(.tertiary)
                 }
                 if busy {
@@ -724,10 +735,9 @@ struct DeviceSheet: View {
 
     private func stateText(_ d: DeviceStatus) -> String {
         if d.entityId == nil { return "Not set up" }
-        if d.available == false { return "Unavailable" }
-        if standby { return "Off · standby" }
+        if d.available == false { return "Not responding" }
         switch d.state {
-        case "on": return "On"
+        case "on": return standby ? "On (tent in standby)" : "On"
         case "off": return "Off"
         default: return "Unknown"
         }
@@ -736,7 +746,6 @@ struct DeviceSheet: View {
     private func stateColor(_ d: DeviceStatus) -> Color {
         if d.entityId == nil { return .secondary }
         if d.available == false { return .alertRed }
-        if standby { return .secondary }
         return d.isOn ? .good : .secondary
     }
 
@@ -771,12 +780,162 @@ struct NeedsYouRow: View {
                             Button { onTap(.photos) } label: { PillChip(text: photos == 1 ? "1 photo request" : "\(photos) photo requests", symbol: "camera.fill", tint: .brand) }
                         }
                         if tasks > 0 {
-                            Button { onTap(.tasks) } label: { PillChip(text: tasks == 1 ? "1 task" : "\(tasks) tasks", symbol: "checklist", tint: .brand) }
+                            Button { onTap(.tasks) } label: { PillChip(text: tasks == 1 ? "1 thing to do" : "\(tasks) things to do", symbol: "checklist", tint: .brand) }
                         }
                     }
                 }
                 .buttonStyle(.plain)
             }
         }
+    }
+}
+
+
+// MARK: - Next up
+
+/// The next few jobs, with a tick right there, so the most important thing is at the top of Home.
+struct TodayCard: View {
+    @Environment(AppState.self) private var app
+    let onAll: () -> Void
+    @State private var alert: AlertMessage?
+
+    private var jobs: [TaskItem] {
+        let all = app.plantTasks + app.tentTasks
+        let today = Formatting.todayISO()
+        func rank(_ t: TaskItem) -> Int { guard let d = t.due else { return 2 }; return d <= today ? 0 : 1 }
+        return Array(all.sorted { (rank($0), $0.due ?? "~") < (rank($1), $1.due ?? "~") }.prefix(3))
+    }
+
+    var body: some View {
+        if !jobs.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Next up").font(.headline)
+                    Spacer()
+                    Button("All", action: onAll).font(.subheadline.weight(.semibold))
+                }
+                ForEach(jobs) { t in
+                    HStack(alignment: .top, spacing: 8) {
+                        Button {
+                            Task { do { try await app.completeWithUndo(t) } catch { alert = AlertMessage(message: error.localizedDescription) } }
+                        } label: {
+                            Image(systemName: "circle").font(.title3).foregroundStyle(Color.brand)
+                                .frame(width: 44, height: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .accessibilityLabel("Mark done: \(t.title ?? "task")")
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(t.title ?? "").font(.subheadline.weight(.semibold))
+                            if let due = t.due {
+                                Text(Formatting.dueText(due)).font(.caption)
+                                    .foregroundStyle(due <= Formatting.todayISO() ? Color.warn : Color.secondary)
+                            }
+                        }
+                        .padding(.top, 10)
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+            .card(padding: 16)
+            .errorAlert($alert)
+        }
+    }
+}
+
+/// "Done: Water the cups · Undo" for a few seconds after a tick.
+struct UndoBanner: View {
+    @Environment(AppState.self) private var app
+
+    var body: some View {
+        if let t = app.undoTask {
+            HStack(spacing: 12) {
+                Image(systemName: "checkmark.circle.fill").foregroundStyle(Color.good)
+                Text("Done: \(t.title ?? "task")").font(.subheadline).lineLimit(1)
+                Spacer(minLength: 0)
+                Button("Undo") { Task { await app.undoLastComplete() } }.font(.subheadline.weight(.bold))
+            }
+            .padding(.horizontal, 16).padding(.vertical, 12)
+            .background(.regularMaterial, in: Capsule())
+            .padding(.horizontal, 16)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+}
+
+// MARK: - Humidifier water
+
+struct TankCard: View {
+    @Environment(AppState.self) private var app
+    let tank: HumidifierTank
+    @State private var busy = false
+    @State private var alert: AlertMessage?
+
+    private var pct: Double { Double(max(0, min(100, tank.percentLeft ?? 100))) / 100 }
+    private var color: Color { tank.dry == true ? .alertRed : pct <= 0.2 ? .warn : .good }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Humidifier water", systemImage: "drop.fill").font(.headline)
+                Spacer()
+                Text(tank.dry == true ? "Empty" : "\(Int((pct * 100).rounded()))%")
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(color)
+            }
+            ProgressView(value: pct).tint(color)
+            Text(tank.dry == true ? "It stopped misting: refill the tank."
+                 : "About \(Formatting.number(tank.hoursLeft ?? 0, decimals: 1)) h of misting left.")
+                .font(.footnote).foregroundStyle(.secondary)
+            Button {
+                Task {
+                    busy = true
+                    defer { busy = false }
+                    do { try await app.markHumidifierRefilled() } catch { alert = AlertMessage(message: error.localizedDescription) }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    if busy { ProgressView() } else { Image(systemName: "checkmark") }
+                    Text("I just refilled it")
+                }
+            }
+            .font(.subheadline.weight(.semibold))
+            .disabled(busy)
+        }
+        .card(padding: 16)
+        .errorAlert($alert)
+    }
+}
+
+// MARK: - Start checklist
+
+struct StartChecklistSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let seedlings: Bool
+    let onConfirm: () -> Void
+
+    private var checks: [String] {
+        seedlings
+            ? ["Only the big light plugged in, dimmer at about 75 % (the light shows about 175 W)",
+               "Humidifier tank filled",
+               "Both cups in the tent on a towel or foam, under the light",
+               "Camera pointing at the cups"]
+            : ["Lights plugged in and set the way you want", "Humidifier tank filled", "Plants in place",
+               "Camera pointing at the plants"]
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Image(systemName: "power.circle.fill").font(.system(size: 52)).foregroundStyle(Color.brand)
+                .frame(maxWidth: .infinity)
+            Text("Start the tent?").font(.title2.bold()).frame(maxWidth: .infinity)
+            Text("A quick check first:").font(.subheadline).foregroundStyle(.secondary)
+            ForEach(checks, id: \.self) { c in
+                Label(c, systemImage: "checkmark.circle").font(.body)
+            }
+            Spacer(minLength: 0)
+            Button("Start") { onConfirm(); dismiss() }.buttonStyle(BigButtonStyle())
+            Button("Not yet") { dismiss() }.buttonStyle(BigButtonStyle(color: .brand, filled: false))
+        }
+        .padding(24)
+        .background(Color.bg.ignoresSafeArea())
     }
 }

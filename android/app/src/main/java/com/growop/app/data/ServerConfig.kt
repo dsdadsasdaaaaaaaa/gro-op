@@ -83,9 +83,12 @@ class ConfigStore(private val context: Context) {
         val haIngressPath = stringPreferencesKey("server.haIngressPath")
         val myPlantId = intPreferencesKey("myPlantId")
         val units = stringPreferencesKey("units")
+        val plantChoiceSkipped = androidx.datastore.preferences.core.booleanPreferencesKey("plantChoiceSkipped")
+        val deviceId = stringPreferencesKey("deviceId")
     }
 
-    data class Loaded(val config: ServerConfig, val myPlantId: Int?, val units: String?)
+    data class Loaded(val config: ServerConfig, val myPlantId: Int?, val units: String?,
+                      val plantChoiceSkipped: Boolean = false, val deviceId: String = "android")
 
     suspend fun load(): Loaded {
         val p = context.growDataStore.data.first()
@@ -98,7 +101,16 @@ class ConfigStore(private val context: Context) {
             haAddonSlug = p[Keys.haAddonSlug],
             haIngressPath = p[Keys.haIngressPath],
         )
-        return Loaded(cfg, p[Keys.myPlantId], p[Keys.units])
+        var id = p[Keys.deviceId]
+        if (id == null) {
+            id = "android-" + java.util.UUID.randomUUID().toString().take(8)
+            context.growDataStore.edit { it[Keys.deviceId] = id }
+        }
+        return Loaded(cfg, p[Keys.myPlantId], p[Keys.units], p[Keys.plantChoiceSkipped] ?: false, id)
+    }
+
+    suspend fun savePlantChoiceSkipped(skipped: Boolean) {
+        context.growDataStore.edit { it[Keys.plantChoiceSkipped] = skipped }
     }
 
     suspend fun saveConfig(cfg: ServerConfig) {

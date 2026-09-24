@@ -102,7 +102,9 @@ fun GrowPlanCard(plan: GrowPlan?, growStartDate: String?, onClick: () -> Unit) {
                 }
             } else plan.next?.let { next ->
                 val date = Formatting.monthDay(next.startDate)
-                Text(if (date != null) "Next: ${next.displayTitle} · $date" else "Next: ${next.displayTitle}", style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
+                // A stage whose date has passed starts when the plant is ready, not on a date.
+                val due = next.startDate?.let { it <= Formatting.todayISO() } == true
+                Text(when { due -> "Next: ${next.displayTitle} · when ready"; date != null -> "Next: ${next.displayTitle} · $date"; else -> "Next: ${next.displayTitle}" }, style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
             }
         } else {
             Text("Plan not loaded yet", style = MaterialTheme.typography.bodyMedium, color = c.textSecondary)
@@ -167,7 +169,7 @@ fun PlanScreen(app: AppState, onBack: () -> Unit) {
                     item { PlanHeader(plan) }
                     val phases = plan.orderedPhases
                     if (phases.isEmpty()) {
-                        item { EmptyStateView(Icons.Filled.Map, "No plan yet", "The grow brain hasn't produced a plan for this grow.") }
+                        item { EmptyStateView(Icons.Filled.Map, "No plan yet", "GrowOp hasn't made a plan for this grow yet.") }
                     }
                     itemsIndexed(phases, key = { _, p -> p.key }) { idx, phase ->
                         PlanPhaseRow(phase, isLast = idx == phases.size - 1, isExpanded = expanded.contains(phase.key)) {

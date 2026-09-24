@@ -77,6 +77,8 @@ data class AppUi(
     val doneTasks: List<TaskItem> = emptyList(),
     val tasksLoaded: Boolean = false,
     val requestsLoaded: Boolean = false,
+    /** The task just ticked off, offered back for a few seconds in case the tap was a slip. */
+    val undoTask: TaskItem? = null,
 
     val unitsPref: String? = null,
     /** From GET /api/health (shown read-only in Settings). */
@@ -158,9 +160,10 @@ class AppState(context: Context) {
         scope.launch {
             val loaded = store.load()
             client.update(loaded.config)
+            client.deviceId = loaded.deviceId
             _ui.update {
                 it.copy(configLoaded = true, config = loaded.config, isConfigured = loaded.config.isConfigured,
-                    myPlantId = loaded.myPlantId, unitsPref = loaded.units)
+                    myPlantId = loaded.myPlantId, unitsPref = loaded.units, plantChoiceDismissed = loaded.plantChoiceSkipped)
             }
             if (loaded.config.isConfigured && pollingWanted) startPolling()
         }
@@ -249,6 +252,9 @@ class AppState(context: Context) {
             val stale = lastPlanAt[value.planKey]?.let { System.currentTimeMillis() - it > 600_000 } ?: true
             if (value.plan == null || growChanged || stale) loadPlan()
             if (System.currentTimeMillis() - lastHistoryAt > 300_000) loadHistory()
+            // keep the tab badges honest: if the server's counts moved, reload the lists behind them
+            if (value.tasksLoaded && st.openTasks != previous?.openTasks) loadTasks()
+            if (value.requestsLoaded && st.openPhotoRequests != previous?.openPhotoRequests) loadPhotoRequests()
         } catch (e: Throwable) {
             _ui.update { it.copy(statusError = ApiError.wrap(e).message) }
         } finally {
@@ -269,7 +275,10 @@ class AppState(context: Context) {
 
     // MARK: Plants
 
-    fun dismissPlantChoice() = _ui.update { it.copy(plantChoiceDismissed = true) }
+    fun dismissPlantChoice() {
+        _ui.update { it.copy(plantChoiceDismissed = true) }
+        scope.launch { store.savePlantChoiceSkipped(true) }
+    }
 
     suspend fun loadPlants() {
         if (!value.isConfigured) return
@@ -391,14 +400,16 @@ class AppState(context: Context) {
         }
     }
 
-    suspend fun sendChat(text: String) {
+    suspend fun sendChat(text: String, plantId: Int?) {
         val tempId = -(System.currentTimeMillis() % 1_000_000_000L).toInt() - 1
         val nowIso = Instant.now().toString()
-        _ui.update { it.copy(chatMessages = it.chatMessages + ChatMessage(tempId, "user", text, nowIso)) }
+        val author = value.myPlant?.owner ?: value.plants.firstOrNull { it.id == plantId }?.owner
+        _ui.update { it.copy(chatMessages = it.chatMessages + ChatMessage(tempId, "user", text, nowIso, author, plantId)) }
         try {
             val body = buildJsonObject {
                 put("message", text)
-                value.selectedPlantId?.let { put("plant_id", it) } ?: put("plant_id", JsonNull)
+                plantId?.let { put("plant_id", it) } ?: put("plant_id", JsonNull)
+                value.myPlant?.owner?.takeIf { it.isNotBlank() }?.let { put("author", it) }
             }
             val reply = client.sendChat(body)
             _ui.update { it.copy(chatMessages = it.chatMessages + ChatMessage(reply.id ?: (tempId - 1), "assistant", reply.reply ?: "", Instant.now().toString())) }
@@ -482,6 +493,31 @@ class AppState(context: Context) {
             val open = it.openTasks.filter { t -> t.id != task.id }
             it.copy(openTasks = open, doneTasks = listOf(updated) + it.doneTasks, status = it.status?.copy(openTasks = open.size))
         }
+    }
+
+    private var undoJob: Job? = null
+
+    suspend fun completeWithUndo(task: TaskItem) {
+        completeTask(task)
+        _ui.update { it.copy(undoTask = task) }
+        undoJob?.cancel()
+        undoJob = scope.launch {
+            delay(6_000)
+            _ui.update { if (it.undoTask?.id == task.id) it.copy(undoTask = null) else it }
+        }
+    }
+
+    suspend fun undoLastComplete() {
+        val t = value.undoTask ?: return
+        _ui.update { it.copy(undoTask = null) }
+        undoJob?.cancel()
+        runCatching { reopenTask(t) }
+        refreshStatus()
+    }
+
+    suspend fun markHumidifierRefilled() {
+        client.humidifierRefilled()
+        refreshStatus()
     }
 
     suspend fun reopenTask(task: TaskItem) {

@@ -18,6 +18,7 @@ struct PlantEditView: View {
     @State private var startDate = Date()
     @State private var notes = ""
     @State private var notifyService = ""
+    @State private var testSent = false
     @State private var saving = false
     @State private var confirmDelete = false
     @State private var alert: AlertMessage?
@@ -57,14 +58,20 @@ struct PlantEditView: View {
                 TextField("Notes", text: $notes, axis: .vertical).lineLimit(2...5)
             }
             Section {
-                Picker("Notifications", selection: $notifyService) {
-                    Text("Tent default").tag("")
-                    ForEach(notifyOptions, id: \.self) { s in
-                        Text(s.replacingOccurrences(of: "notify.", with: "")).tag(s)
+                Picker("Phone for alerts", selection: $notifyService) {
+                    Text("No phone").tag("")
+                    ForEach(notifyOptions, id: \.self) { s in Text(Formatting.phoneName(s)).tag(s) }
+                }
+                Button("Send a test notification") {
+                    Task {
+                        do { try await app.client.notifyTest(service: notifyService); testSent = true }
+                        catch { alert = AlertMessage(title: "Test not sent", message: error.localizedDescription) }
                     }
                 }
+                .disabled(notifyService.isEmpty)
+                if testSent { Label("Sent: check that phone", systemImage: "checkmark.circle").font(.footnote).foregroundStyle(.secondary) }
             } footer: {
-                Text("Where alerts about this plant go. \"Tent default\" uses the phone chosen in Preferences.")
+                Text("Tent alerts and this plant's reminders go to this phone. It needs the Home Assistant app installed and signed in.")
             }
             Section {
                 Button {

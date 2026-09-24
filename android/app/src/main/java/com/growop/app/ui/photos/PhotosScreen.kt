@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.LightbulbCircle
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -51,6 +52,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -85,6 +87,7 @@ import com.growop.app.ui.shared.NumberedList
 import com.growop.app.ui.shared.PlantSwitcher
 import com.growop.app.ui.shared.SectionTitle
 import com.growop.app.ui.shared.WorkingView
+import com.growop.app.ui.shared.ConfirmDialog
 import com.growop.app.ui.theme.GrowTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -119,8 +122,23 @@ private fun PhotosMain(app: AppState, onPending: (PendingPhoto) -> Unit, onOpen:
     var alertMessage by remember { mutableStateOf<String?>(null) }
     var skipping by remember { mutableStateOf<Int?>(null) }
     var preparing by remember { mutableStateOf(false) }
-    var cameraUri by remember { mutableStateOf<Uri?>(null) }
-    var target by remember { mutableStateOf<PhotoRequest?>(null) }
+    // Saved across the activity being recreated while the camera app is open (Android may do that on low memory).
+    var cameraUri by rememberSaveable { mutableStateOf<Uri?>(null) }
+    var targetId by rememberSaveable { mutableStateOf<Int?>(null) }
+    val target: PhotoRequest? = ui.openPhotoRequests.firstOrNull { it.id == targetId }
+    var confirmSkip by remember { mutableStateOf<PhotoRequest?>(null) }
+    var lightBusy by remember { mutableStateOf(false) }
+    val lightIsOn = ui.status?.devices?.firstOrNull { it.role == "light" }?.isOn == true
+
+    /** Colours are only true under normal light: the grow light goes off for 10 minutes, then comes back by itself. */
+    fun lightOff() {
+        scope.launch {
+            lightBusy = true
+            try { app.setOverride("light", "off", 10) } catch (e: Throwable) {
+                alertTitle = "Couldn't switch the light off"; alertMessage = ApiError.wrap(e).message
+            } finally { lightBusy = false }
+        }
+    }
 
     LaunchedEffect(Unit) { app.loadPhotoRequests(); app.loadPhotos() }
 
@@ -136,25 +154,25 @@ private fun PhotosMain(app: AppState, onPending: (PendingPhoto) -> Unit, onOpen:
 
     val takePicture = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
         val uri = cameraUri
-        if (ok && uri != null) loadPicked(uri, target)
-        target = null
+        if (ok && uri != null) loadPicked(uri, app.value.openPhotoRequests.firstOrNull { it.id == targetId })
+        targetId = null; cameraUri = null
     }
     val pickMedia = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) loadPicked(uri, target)
-        target = null
+        if (uri != null) loadPicked(uri, app.value.openPhotoRequests.firstOrNull { it.id == targetId })
+        targetId = null
     }
 
     fun startCamera(request: PhotoRequest?) {
         val dir = File(context.cacheDir, "camera").apply { mkdirs() }
         val file = File(dir, "capture_${System.currentTimeMillis()}.jpg")
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-        cameraUri = uri; target = request
+        cameraUri = uri; targetId = request?.id
         try { takePicture.launch(uri) } catch (e: ActivityNotFoundException) {
             alertTitle = "No camera"; alertMessage = "This phone has no camera app available. Use \"Choose\" to pick a photo instead."
         }
     }
     fun startLibrary(request: PhotoRequest?) {
-        target = request
+        targetId = request?.id
         pickMedia.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
     }
 
@@ -170,9 +188,8 @@ private fun PhotosMain(app: AppState, onPending: (PendingPhoto) -> Unit, onOpen:
                 if (requests.isNotEmpty()) {
                     SectionTitle("The advisor wants to see")
                     requests.forEach { r ->
-                        PhotoRequestCard(r, onTake = { startCamera(r) }, onChoose = { startLibrary(r) }, busy = skipping == r.id, onSkip = {
-                            scope.launch { skipping = r.id; try { app.skipPhotoRequest(r.id) } catch (e: Throwable) { alertMessage = ApiError.wrap(e).message } finally { skipping = null } }
-                        })
+                        PhotoRequestCard(r, onTake = { startCamera(r) }, onChoose = { startLibrary(r) }, busy = skipping == r.id || lightBusy,
+                            onSkip = { confirmSkip = r }, onLightOff = if (lightIsOn) ({ lightOff() }) else null)
                     }
                 }
                 GrowCard {
@@ -182,7 +199,7 @@ private fun PhotosMain(app: AppState, onPending: (PendingPhoto) -> Unit, onOpen:
                         Text("Send a photo", style = MaterialTheme.typography.titleLarge, color = c.text)
                     }
                     Spacer(Modifier.height(6.dp))
-                    Text("Any photo of your plants — the advisor will check it over.", style = MaterialTheme.typography.bodyMedium, color = c.textSecondary)
+                    Text("Any photo of your plants: the advisor will check it over.", style = MaterialTheme.typography.bodyMedium, color = c.textSecondary)
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         BigButton("Take photo", modifier = Modifier.weight(1f), icon = Icons.Filled.CameraAlt) { startCamera(null) }
@@ -211,13 +228,18 @@ private fun PhotosMain(app: AppState, onPending: (PendingPhoto) -> Unit, onOpen:
             }
         }
     }
+    confirmSkip?.let { r ->
+        ConfirmDialog("Skip this photo?", "The advisor won't get this picture. It will ask again if it still needs it.", "Skip it", destructive = true,
+            onConfirm = { scope.launch { skipping = r.id; try { app.skipPhotoRequest(r.id) } catch (e: Throwable) { alertMessage = ApiError.wrap(e).message } finally { skipping = null } } },
+            onDismiss = { confirmSkip = null })
+    }
     ErrorDialog(alertMessage, title = alertTitle) { alertMessage = null }
 }
 
 // MARK: - Request card
 
 @Composable
-fun PhotoRequestCard(request: PhotoRequest, onTake: () -> Unit, onChoose: () -> Unit, onSkip: () -> Unit, busy: Boolean) {
+fun PhotoRequestCard(request: PhotoRequest, onTake: () -> Unit, onChoose: () -> Unit, onSkip: () -> Unit, busy: Boolean, onLightOff: (() -> Unit)? = null) {
     val c = GrowTheme.colors
     GrowCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -243,6 +265,10 @@ fun PhotoRequestCard(request: PhotoRequest, onTake: () -> Unit, onChoose: () -> 
                 Spacer(Modifier.width(6.dp))
                 Text(request.reason, style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
             }
+        }
+        if (onLightOff != null) {
+            Spacer(Modifier.height(12.dp))
+            BigButton("Grow light off for 10 minutes", color = c.night, filled = false, enabled = !busy, icon = Icons.Filled.LightbulbCircle, onClick = onLightOff)
         }
         Spacer(Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -434,7 +460,7 @@ fun PhotoDetailScreen(app: AppState, photoId: Int, onBack: () -> Unit) {
                     if (photo.isFromCamera) { LevelChip("Tent camera", c.night); Spacer(Modifier.width(6.dp)) }
                     if (photo.requestId != null) LevelChip("Requested by advisor", c.night)
                 }
-                if (!photo.note.isNullOrEmpty()) Text("Your note: ${photo.note}", style = MaterialTheme.typography.bodyMedium, color = c.textSecondary)
+                if (!photo.userNote.isNullOrEmpty()) Text("Your note: ${photo.userNote}", style = MaterialTheme.typography.bodyMedium, color = c.textSecondary)
                 PhotoAnalysisView(photo.analysis)
                 Spacer(Modifier.height(24.dp))
             }

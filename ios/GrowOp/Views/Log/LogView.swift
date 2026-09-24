@@ -1,40 +1,45 @@
 import SwiftUI
 
 enum LogKind: String, CaseIterable, Identifiable {
-    case ph, ec, water, feed, height, note
+    case water, planted, transplant, height, note, ph, feed, ec
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .ph: return "pH"
-        case .ec: return "EC / PPM"
         case .water: return "Watered"
-        case .feed: return "Fed"
+        case .planted: return "Planted"
+        case .transplant: return "Moved to big pot"
         case .height: return "Height"
         case .note: return "Note"
+        case .ph: return "pH"
+        case .feed: return "Fed"
+        case .ec: return "EC / PPM"
         }
     }
 
     var symbol: String {
         switch self {
-        case .ph: return "drop.circle.fill"
-        case .ec: return "bolt.circle.fill"
         case .water: return "drop.triangle.fill"
-        case .feed: return "fork.knife.circle.fill"
+        case .planted: return "leaf.circle.fill"
+        case .transplant: return "arrow.up.circle.fill"
         case .height: return "arrow.up.and.down.circle.fill"
         case .note: return "text.bubble.fill"
+        case .ph: return "drop.circle.fill"
+        case .feed: return "fork.knife.circle.fill"
+        case .ec: return "bolt.circle.fill"
         }
     }
 
     var color: Color {
         switch self {
-        case .ph: return .night
-        case .ec: return .warn
         case .water: return .brand
-        case .feed: return .good
+        case .planted, .transplant: return .leaf
         case .height: return .leaf
         case .note: return .secondary
+        case .ph: return .night
+        case .feed: return .good
+        case .ec: return .warn
         }
     }
 
@@ -52,7 +57,7 @@ struct LogView: View {
             ScrollView {
                 VStack(spacing: 20) {
                     PlantSwitcher()
-                    Text("Tell the advisor what you did or measured. It replies with advice right away.")
+                    Text("Log what you did or measured. It saves instantly and the advisor reads it in the morning brief, or ask it right away.")
                         .font(.subheadline).foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -105,6 +110,7 @@ struct LogView: View {
 
 struct LogEntryRow: View {
     let entry: LogEntry
+    @State private var expanded = false
 
     private var kind: LogKind? { LogKind(rawValue: entry.kind ?? "") ?? (entry.kind == "ppm" ? .ec : nil) }
 
@@ -123,7 +129,16 @@ struct LogEntryRow: View {
                     Text(n).font(.footnote).foregroundStyle(.secondary).lineLimit(2)
                 }
                 if let a = entry.adviceSummary, !a.isEmpty {
-                    Text(a).font(.footnote).foregroundStyle(.primary).lineLimit(3)
+                    Text(a).font(.footnote).foregroundStyle(.primary).lineLimit(expanded ? nil : 3)
+                    if expanded, let steps = entry.adviceSteps, !steps.isEmpty {
+                        ForEach(Array(steps.enumerated()), id: \.offset) { i, st in
+                            Text("\(i + 1). \(st)").font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                    if (entry.adviceSteps?.isEmpty == false) || a.count > 140 {
+                        Button(expanded ? "Less" : "More") { withAnimation(.snappy) { expanded.toggle() } }
+                            .font(.caption.weight(.semibold))
+                    }
                 }
             }
         }
@@ -135,6 +150,11 @@ struct LogEntryRow: View {
         if entry.kind == "ph" { s = "pH" }
         if entry.kind == "ec" { s = "EC" }
         if entry.kind == "ppm" { s = "PPM" }
+        if entry.kind == "water" { s = "Watered" }
+        if entry.kind == "planted" { s = "Planted" }
+        if entry.kind == "transplant" { s = "Moved to big pot" }
+        if entry.kind == "feed" { s = "Fed" }
+        if entry.context == "task" { s = entry.note ?? s }
         if let v = entry.value {
             s += " \(Formatting.number(v, decimals: 2))"
             if let u = entry.unit, !u.isEmpty, u.lowercased() != "ph" { s += " \(u)" }
@@ -163,7 +183,7 @@ struct LogEntrySheet: View {
     @State private var alert: AlertMessage?
     @FocusState private var valueFocused: Bool
 
-    static let contexts: [(String, String)] = [("water_in", "Water going in"), ("runoff", "Runoff"), ("reservoir", "Reservoir")]
+    static let contexts: [(String, String)] = [("water_in", "Water going in"), ("runoff", "Runoff")]
 
     static func contextLabel(_ c: String) -> String {
         contexts.first { $0.0 == c }?.1 ?? c.replacingOccurrences(of: "_", with: " ").capitalized
@@ -212,7 +232,17 @@ struct LogEntrySheet: View {
                 }
             case .water:
                 Section("How much water? (optional)") {
-                    numberField(placeholder: "e.g. 1.5", suffix: "litres")
+                    numberField(placeholder: "e.g. 0.05 for a cup, 1 for a pot", suffix: "litres")
+                }
+            case .planted:
+                Section {
+                    Text("Log it the day the seed goes into its cup. The plan and the advisor count the seedling days from here.")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+            case .transplant:
+                Section {
+                    Text("Log it the day the plant goes into its 11 L pot. GrowOp then reminds you to switch the stage to Veg.")
+                        .font(.subheadline).foregroundStyle(.secondary)
                 }
             case .feed:
                 Section("How much feed solution? (optional)") {
@@ -238,14 +268,27 @@ struct LogEntrySheet: View {
 
             Section {
                 Button {
-                    Task { await submit() }
+                    Task { await submit(advise: false) }
                 } label: {
-                    Text("Send to advisor").frame(maxWidth: .infinity)
+                    Text("Save").frame(maxWidth: .infinity)
                 }
                 .buttonStyle(BigButtonStyle(color: kind.color))
                 .disabled(!canSubmit)
                 .listRowInsets(EdgeInsets())
                 .listRowBackground(Color.clear)
+            } footer: {
+                VStack(spacing: 10) {
+                    Button {
+                        Task { await submit(advise: true) }
+                    } label: {
+                        Label("Save & ask the advisor (≈ $0.05)", systemImage: "sparkles").frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(BigButtonStyle(color: .night, filled: false))
+                    .disabled(!canSubmit)
+                    Text("Save is instant and free. Asking takes 10–40 seconds and costs a few cents.")
+                        .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity)
+                }
+                .padding(.top, 10)
             }
         }
         .scrollContentBackground(.hidden)
@@ -279,11 +322,11 @@ struct LogEntrySheet: View {
         switch kind {
         case .ph, .ec, .height: return parsedValue != nil
         case .note: return !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        case .water, .feed: return true
+        case .water, .feed, .planted, .transplant: return true
         }
     }
 
-    private func submit() async {
+    private func submit(advise: Bool) async {
         var req: LogRequest
         let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
         switch kind {
@@ -299,15 +342,21 @@ struct LogEntrySheet: View {
             req = LogRequest(kind: "height", value: parsedValue, unit: heightUnit, context: nil, note: nil)
         case .note:
             req = LogRequest(kind: "note", value: nil, unit: nil, context: nil, note: nil)
+        case .planted:
+            req = LogRequest(kind: "planted", value: nil, unit: nil, context: nil, note: nil)
+        case .transplant:
+            req = LogRequest(kind: "transplant", value: nil, unit: nil, context: nil, note: nil)
         }
         if !trimmedNote.isEmpty { req.note = trimmedNote }
+        req.advise = advise
 
-        submitting = true
+        if advise { submitting = true }
         defer { submitting = false }
         do {
-            result = try await app.submitLog(req)
+            let r = try await app.submitLog(req)
+            if advise { result = r } else { dismiss() }
         } catch {
-            alert = AlertMessage(title: "Couldn't send that", message: error.localizedDescription)
+            alert = AlertMessage(title: "Couldn't save that", message: error.localizedDescription)
         }
     }
 }

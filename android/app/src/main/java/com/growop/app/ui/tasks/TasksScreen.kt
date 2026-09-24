@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -116,10 +117,10 @@ private fun TasksMain(app: AppState, onAdd: () -> Unit) {
                     GrowCard { EmptyStateView(Icons.Filled.Verified, "Nothing to do", "The advisor adds tasks here when something needs doing. You can add your own with +.") }
                 } else {
                     if (plantTasks.isNotEmpty()) TaskGroup(ui.selectedPlant?.displayName ?: "To do", Icons.Filled.Eco, plantTasks) { t ->
-                        try { app.completeTask(t) } catch (e: Throwable) { error = ApiError.wrap(e).message }
+                        try { app.completeWithUndo(t) } catch (e: Throwable) { error = ApiError.wrap(e).message }
                     }
                     if (tentTasks.isNotEmpty()) TaskGroup("Tent", Icons.Filled.Home, tentTasks) { t ->
-                        try { app.completeTask(t) } catch (e: Throwable) { error = ApiError.wrap(e).message }
+                        try { app.completeWithUndo(t) } catch (e: Throwable) { error = ApiError.wrap(e).message }
                     }
                 }
                 Row(
@@ -137,7 +138,7 @@ private fun TasksMain(app: AppState, onAdd: () -> Unit) {
                         done.forEach { t -> TaskRow(t) { try { app.reopenTask(t) } catch (e: Throwable) { error = ApiError.wrap(e).message } } }
                     }
                 }
-                Spacer(Modifier.height(24.dp))
+                Spacer(Modifier.height(72.dp))   // room for the "Done · Undo" bar
             }
         }
     }
@@ -177,33 +178,41 @@ fun TaskRow(task: TaskItem, onToggle: suspend () -> Unit) {
         dueDate == null -> task.due
         dueDate == today -> "Today"
         dueDate == today.plusDays(1) -> "Tomorrow"
-        overdue -> "Overdue · ${Formatting.abbrevDate(dueDate)}"
+        overdue -> "Overdue since ${Formatting.abbrevDate(dueDate)}"
         else -> Formatting.abbrevDate(dueDate)
     }
     val checked = task.isDone || justTapped
     Box(Modifier.fillMaxWidth().alpha(if (task.isDone) 0.7f else 1f)) {
-        GrowCard(padding = 16.dp, onClick = {
-            if (busy) return@GrowCard
-            justTapped = true
-            scope.launch { busy = true; onToggle(); busy = false; justTapped = false }
-        }) {
+        GrowCard(padding = 12.dp) {
             Row(verticalAlignment = Alignment.Top) {
-                Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
+                // Only this circle ticks the task off, so scrolling past can't do it by accident.
+                Box(
+                    Modifier.size(48.dp).clip(CircleShape).clickable(enabled = !busy, onClickLabel = if (task.isDone) "Mark not done" else "Mark done") {
+                        justTapped = true
+                        scope.launch { busy = true; onToggle(); busy = false; justTapped = false }
+                    },
+                    contentAlignment = Alignment.Center,
+                ) {
                     if (busy) CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp, color = c.brand)
-                    else Icon(if (checked) Icons.Filled.CheckCircle else Icons.Outlined.Circle, contentDescription = null, modifier = Modifier.size(32.dp),
+                    else Icon(if (checked) Icons.Filled.CheckCircle else Icons.Outlined.Circle,
+                        contentDescription = if (task.isDone) "Mark not done: ${task.title ?: "task"}" else "Mark done: ${task.title ?: "task"}",
+                        modifier = Modifier.size(32.dp),
                         tint = if (checked) c.brand else if (task.isHigh) c.alert else c.textSecondary.copy(alpha = 0.5f))
                 }
-                Spacer(Modifier.width(14.dp))
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f).padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                     Text(task.title ?: "Task", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = if (task.isHigh && !task.isDone) FontWeight.SemiBold else FontWeight.Normal),
                         color = if (task.isDone) c.textSecondary else c.text, textDecoration = if (task.isDone) TextDecoration.LineThrough else null)
                     if (!task.detail.isNullOrEmpty()) Text(task.detail, style = MaterialTheme.typography.bodyMedium, color = c.textSecondary)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                         if (dueText.isNotEmpty()) LevelChip(dueText, dueColor)
-                        if (task.isHigh && !task.isDone) LevelChip("High priority", c.alert)
+                        if (task.isHigh && !task.isDone) LevelChip("Important", c.alert)
                         if (task.createdBy == "advisor") {
                             Icon(Icons.Filled.AutoAwesome, contentDescription = null, tint = c.night, modifier = Modifier.size(14.dp))
                             Text("Advisor", style = MaterialTheme.typography.bodySmall, color = c.night)
+                        } else if (task.createdBy == "system") {
+                            Icon(Icons.Filled.Eco, contentDescription = null, tint = c.brand, modifier = Modifier.size(14.dp))
+                            Text("GrowOp", style = MaterialTheme.typography.bodySmall, color = c.brand)
                         }
                     }
                 }

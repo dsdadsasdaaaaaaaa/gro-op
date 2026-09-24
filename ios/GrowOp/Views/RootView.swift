@@ -69,6 +69,11 @@ struct MainTabView: View {
         }
         // growop://advisor, growop://photos, growop://log, growop://tasks (used by push notifications)
         .onOpenURL { url in
+            // growop://photos?plant=2 opens on that plant, so a reminder about Dad's plant shows Dad's request
+            if let p = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first(where: { $0.name == "plant" })?.value,
+               let id = Int(p) {
+                app.selectPlant(id)
+            }
             switch url.host?.lowercased() {
             case "advisor": selectedTab = .advisor
             case "photos": selectedTab = .photos
@@ -107,7 +112,7 @@ struct OnboardingView: View {
                         .padding(.top, 40)
 
                     VStack(spacing: 8) {
-                        Text("Connect to your grow brain")
+                        Text("Connect to GrowOp at home")
                             .font(.title.bold())
                             .multilineTextAlignment(.center)
                         Text(mode == .direct

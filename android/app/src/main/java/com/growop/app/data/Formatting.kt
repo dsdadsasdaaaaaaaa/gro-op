@@ -126,5 +126,33 @@ object Formatting {
     fun cToF(c: Double): Double = c * 9 / 5 + 32
     fun fToC(f: Double): Double = (f - 32) * 5 / 9
 
+    /** "notify.mobile_app_sm_g781w" -> "Samsung phone (sm g781w)", "notify.mobile_app_iphone" -> "iPhone". */
+    fun phoneName(svc: String): String {
+        var id = svc.removePrefix("notify.")
+        id = id.removePrefix("mobile_app_")
+        val spaced = id.replace('_', ' ')
+        return when {
+            id.startsWith("sm_") -> "Samsung phone ($spaced)"
+            id == "iphone" -> "iPhone"
+            id.contains("iphone") -> "iPhone ($spaced)"
+            id.contains("ipad") -> "iPad ($spaced)"
+            else -> spaced
+        }
+    }
+
+    fun todayISO(): String = dayString(LocalDate.now())
+
+    /** "Due today", "Overdue since Mon, Sep 21", "Due Thu, Sep 24". */
+    fun dueText(due: String): String {
+        val d = parseDay(due) ?: return "Due $due"
+        val today = LocalDate.now()
+        val nice = d.format(java.time.format.DateTimeFormatter.ofPattern("EEE, MMM d", Locale.getDefault()))
+        return when {
+            d == today -> "Due today"
+            d.isBefore(today) -> "Overdue since $nice"
+            else -> "Due $nice"
+        }
+    }
+
     fun capitalize(s: String): String = s.replace('_', ' ').replaceFirstChar { it.uppercase() }
 }

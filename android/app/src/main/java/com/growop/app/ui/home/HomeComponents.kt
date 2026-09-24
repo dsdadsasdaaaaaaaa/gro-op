@@ -25,7 +25,11 @@ import androidx.compose.material.icons.filled.AcUnit
 import androidx.compose.material.icons.filled.Air
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.CheckCircleOutline
 import androidx.compose.material.icons.filled.Checklist
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.NightsStay
@@ -41,6 +45,8 @@ import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material.icons.filled.Whatshot
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -83,7 +89,9 @@ import com.growop.app.data.AssessmentLevel
 import com.growop.app.data.DeviceStatus
 import com.growop.app.data.Formatting
 import com.growop.app.data.HistoryPoint
+import com.growop.app.data.HumidifierTank
 import com.growop.app.data.SensorReading
+import com.growop.app.data.TaskItem
 import com.growop.app.data.Targets
 import com.growop.app.state.AppState
 import com.growop.app.state.AppTab
@@ -166,7 +174,7 @@ fun StandbyCard(busy: Boolean, onStart: () -> Unit) {
         Spacer(Modifier.height(14.dp))
         BigButton("Start tent", loading = busy, icon = Icons.Filled.PowerSettingsNew, onClick = onStart)
         Spacer(Modifier.height(10.dp))
-        Text("Start it when the seedling goes in", style = MaterialTheme.typography.bodySmall, color = c.textSecondary,
+        Text("Start it when the seedlings go in", style = MaterialTheme.typography.bodySmall, color = c.textSecondary,
             modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
     }
 }
@@ -248,15 +256,15 @@ fun VitalsCard(sensor: SensorReading?, targets: Targets?, usesF: Boolean, histor
                 VitalSpec("Temp", Icons.Filled.Thermostat, if (usesF) "°F" else "°C", 1, if (usesF) 50.0 else 10.0, if (usesF) 104.0 else 40.0, if (usesF) 2.7 else 1.5),
                 tempValue, tempMin, tempMax,
                 history.map { p -> if (usesF) p.tempF ?: p.tempC?.let(Formatting::cToF) else p.tempC ?: p.tempF?.let(Formatting::fToC) },
-                muted || stale, Modifier.weight(1f),
+                muted || stale, Modifier.weight(1f), night = targets?.isNight == true,
             )
             VitalColumn(
                 VitalSpec("Humidity", Icons.Filled.WaterDrop, "%", 0, 20.0, 90.0, 5.0),
                 sensor?.humidity, targets?.humidityMin, targets?.humidityMax,
-                history.map { it.humidity }, muted || stale, Modifier.weight(1f),
+                history.map { it.humidity }, muted || stale, Modifier.weight(1f), night = targets?.isNight == true,
             )
             VitalColumn(
-                VitalSpec("VPD", Icons.Filled.Air, "kPa", 2, 0.0, 2.0, 0.2),
+                VitalSpec("Air dryness", Icons.Filled.Air, "kPa", 2, 0.0, 2.0, 0.2),
                 sensor?.vpdKpa, targets?.vpdMin, targets?.vpdMax,
                 history.map { it.vpdKpa }, muted || stale, Modifier.weight(1f),
             )
@@ -265,7 +273,7 @@ fun VitalsCard(sensor: SensorReading?, targets: Targets?, usesF: Boolean, histor
 }
 
 @Composable
-fun VitalColumn(spec: VitalSpec, value: Double?, bandMin: Double?, bandMax: Double?, series: List<Double?>, muted: Boolean, modifier: Modifier = Modifier) {
+fun VitalColumn(spec: VitalSpec, value: Double?, bandMin: Double?, bandMax: Double?, series: List<Double?>, muted: Boolean, modifier: Modifier = Modifier, night: Boolean = false) {
     val c = GrowTheme.colors
     val status = if (muted) BandStatus.UNKNOWN else BandStatus.of(value, bandMin, bandMax, spec.tolerance)
     val color = status.color()
@@ -278,7 +286,7 @@ fun VitalColumn(spec: VitalSpec, value: Double?, bandMin: Double?, bandMax: Doub
         VitalRing(value, spec.unit, spec.decimals, spec.scaleMin, spec.scaleMax, bandMin, bandMax, color, muted)
         Sparkline(series, bandMin, bandMax, color, muted, Modifier.fillMaxWidth().height(26.dp))
         if (bandMin != null && bandMax != null) {
-            Text("${Formatting.number(bandMin, spec.decimals)}–${Formatting.number(bandMax, spec.decimals)}", style = MaterialTheme.typography.labelSmall, color = c.textTertiary)
+            Text("${Formatting.number(bandMin, spec.decimals)}–${Formatting.number(bandMax, spec.decimals)}${if (night) " · night" else ""}", style = MaterialTheme.typography.labelSmall, color = c.textTertiary)
         } else {
             Text("no target", style = MaterialTheme.typography.labelSmall, color = c.textTertiary)
         }
@@ -496,10 +504,13 @@ fun DevicesGrid(devices: List<DeviceStatus>, muted: Boolean, onSelect: (DeviceSt
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Devices", style = MaterialTheme.typography.titleMedium, color = c.text)
             Spacer(Modifier.weight(1f))
-            if (muted) Text("All off", style = MaterialTheme.typography.labelMedium, color = c.textSecondary)
+            if (muted) {
+                val byHand = devices.count { it.isOn && it.mode == "on" }
+                Text(if (byHand > 0) "Standby · $byHand on by hand" else "Standby", style = MaterialTheme.typography.labelMedium, color = c.textSecondary)
+            }
         }
         if (devices.isEmpty()) {
-            GrowCard { Text("No devices set up yet. Equipment is mapped on the grow brain (server) side.", style = MaterialTheme.typography.bodyMedium, color = c.textSecondary) }
+            GrowCard { Text("No devices set up yet. They're connected in Home Assistant, on the GrowOp add-on.", style = MaterialTheme.typography.bodyMedium, color = c.textSecondary) }
         } else {
             devices.chunked(2).forEach { row ->
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -515,7 +526,7 @@ fun DevicesGrid(devices: List<DeviceStatus>, muted: Boolean, onSelect: (DeviceSt
 fun DeviceChip(device: DeviceStatus, muted: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val c = GrowTheme.colors
     val isMapped = device.entityId != null
-    val isOn = device.isOn && !muted
+    val isOn = device.isOn
     val dotColor = when {
         !isMapped -> c.textSecondary.copy(alpha = 0.3f)
         device.available == false -> c.alert
@@ -524,14 +535,13 @@ fun DeviceChip(device: DeviceStatus, muted: Boolean, modifier: Modifier = Modifi
     }
     val reasonLine = when {
         !isMapped -> "Not set up"
-        device.available == false -> "Unavailable"
+        device.available == false -> "Not responding"
+        device.isSetByHand -> DeviceText.byHand(device) + if (muted) " (standby)" else ""
         muted -> "Standby"
-        device.mode != null && device.mode != "auto" ->
-            "Manual · ${if (device.mode == "on") "on" else "off"}" + (device.reason?.takeIf { it.isNotEmpty() }?.let { " · $it" } ?: "")
         !device.reason.isNullOrEmpty() -> device.reason
         else -> if (device.isOn) "On · automatic" else "Off · automatic"
     }
-    GrowCard(modifier = modifier.alpha(if (muted || !isMapped) 0.6f else 1f), padding = 12.dp, radius = GrowTheme.chipRadius, onClick = onClick) {
+    GrowCard(modifier = modifier.alpha(if ((muted && !isOn) || !isMapped) 0.6f else 1f), padding = 12.dp, radius = GrowTheme.chipRadius, onClick = onClick) {
         Row(Modifier.heightIn(min = 46.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(42.dp)) {
                 Box(Modifier.size(42.dp).background(if (isOn) c.brand.copy(alpha = 0.15f) else c.textSecondary.copy(alpha = 0.10f), RoundedCornerShape(12.dp)), contentAlignment = Alignment.Center) {
@@ -543,6 +553,8 @@ fun DeviceChip(device: DeviceStatus, muted: Boolean, modifier: Modifier = Modifi
             Column {
                 Text(device.displayLabel, style = MaterialTheme.typography.labelLarge, color = c.text, maxLines = 2)
                 Text(reasonLine, style = MaterialTheme.typography.bodySmall, color = c.textSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                val w = device.powerW
+                if (isOn && w != null && w >= 1) Text("${Math.round(w)} W", style = MaterialTheme.typography.labelSmall, color = c.textTertiary)
             }
         }
     }
@@ -573,7 +585,7 @@ fun DeviceSheet(app: AppState, role: String, onDismiss: () -> Unit) {
                 Text("Device not found", color = c.textSecondary)
             } else {
                 val d = device
-                val on = d.isOn && !standby
+                val on = d.isOn
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(56.dp).background(if (on) c.brand.copy(alpha = 0.15f) else c.textSecondary.copy(alpha = 0.10f), RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) {
                         Icon(DeviceIcons.icon(d.role), contentDescription = null, tint = if (on) c.brand else c.textSecondary, modifier = Modifier.size(28.dp))
@@ -584,35 +596,31 @@ fun DeviceSheet(app: AppState, role: String, onDismiss: () -> Unit) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             val stateText = when {
                                 d.entityId == null -> "Not set up"
-                                d.available == false -> "Unavailable"
-                                standby -> "Off · standby"
-                                d.state == "on" -> "On"
+                                d.available == false -> "Not responding"
+                                d.state == "on" -> if (standby) "On (tent in standby)" else "On"
                                 d.state == "off" -> "Off"
                                 else -> "Unknown"
                             }
                             val stateColor = when {
                                 d.entityId == null -> c.textSecondary
                                 d.available == false -> c.alert
-                                standby -> c.textSecondary
                                 d.isOn -> c.good
                                 else -> c.textSecondary
                             }
                             LevelChip(stateText, stateColor)
-                            if (d.mode != null && d.mode != "auto") LevelChip("Manual", c.warn)
+                            if (d.isSetByHand) LevelChip("Set by hand", c.warn)
                         }
                     }
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("Why", style = MaterialTheme.typography.labelMedium, color = c.textSecondary)
-                    Text(if (standby) "The tent is in standby, so everything stays off." else (d.reason?.takeIf { it.isNotEmpty() } ?: "No reason reported."),
+                    Text(
+                        when {
+                            d.isSetByHand -> DeviceText.byHand(d)
+                            standby -> "The tent is in standby, so everything stays off unless you switch it on here."
+                            else -> d.reason?.takeIf { it.isNotEmpty() } ?: "No reason reported."
+                        },
                         style = MaterialTheme.typography.bodyLarge, color = c.text)
-                    Formatting.parseISO(d.overrideUntil)?.let { until ->
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Filled.Schedule, contentDescription = null, tint = c.warn, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Manual until ${Formatting.shortTime(until)}", style = MaterialTheme.typography.bodySmall, color = c.warn)
-                        }
-                    }
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("Mode", style = MaterialTheme.typography.labelMedium, color = c.textSecondary)
@@ -637,7 +645,7 @@ fun DeviceSheet(app: AppState, role: String, onDismiss: () -> Unit) {
                             ) { Text(label, style = MaterialTheme.typography.labelLarge) }
                         }
                     }
-                    Text("Auto lets the grow brain decide. On or Off holds it there for a while.", style = MaterialTheme.typography.bodySmall, color = c.textTertiary)
+                    Text("Auto lets GrowOp decide. On or Off holds it there for a while; the safety limits still apply.", style = MaterialTheme.typography.bodySmall, color = c.textTertiary)
                 }
                 if (busy) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -682,7 +690,143 @@ fun NeedsYouRow(tasks: Int, photos: Int, unreadBrief: Boolean, onTap: (AppTab) -
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             if (unreadBrief) PillChip("New brief", icon = Icons.Filled.AutoAwesome, tint = c.night, filled = true) { onTap(AppTab.ADVISOR) }
             if (photos > 0) PillChip(if (photos == 1) "1 photo request" else "$photos photo requests", icon = Icons.Filled.CameraAlt, tint = c.brand) { onTap(AppTab.PHOTOS) }
-            if (tasks > 0) PillChip(if (tasks == 1) "1 task" else "$tasks tasks", icon = Icons.Filled.Checklist, tint = c.brand) { onTap(AppTab.TASKS) }
+            if (tasks > 0) PillChip(if (tasks == 1) "1 thing to do" else "$tasks things to do", icon = Icons.Filled.Checklist, tint = c.brand) { onTap(AppTab.TASKS) }
+        }
+    }
+}
+
+/** "Set by hand: on until 2:33 PM" */
+object DeviceText {
+    fun byHand(d: DeviceStatus): String {
+        val until = Formatting.parseISO(d.overrideUntil)?.let { " until ${Formatting.shortTime(it)}" } ?: ""
+        return "Set by hand: ${d.mode ?: ""}$until"
+    }
+}
+
+// MARK: - Next up
+
+/** The next few jobs, with a tick right there, so the most important thing is at the top of Home. */
+@Composable
+fun TodayCard(app: AppState, jobs: List<TaskItem>, onAll: () -> Unit) {
+    val c = GrowTheme.colors
+    val scope = rememberCoroutineScope()
+    var error by remember { mutableStateOf<String?>(null) }
+    val today = Formatting.todayISO()
+    fun rank(t: TaskItem): Int = when { t.due == null -> 2; t.due <= today -> 0; else -> 1 }
+    val next = jobs.sortedWith(compareBy<TaskItem>({ rank(it) }, { it.due ?: "~" })).take(3)
+    if (next.isEmpty()) return
+    GrowCard(padding = 16.dp) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Next up", style = MaterialTheme.typography.titleMedium, color = c.text)
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = onAll) { Text("All", color = c.brand, style = MaterialTheme.typography.labelLarge) }
+        }
+        next.forEach { t ->
+            Row(verticalAlignment = Alignment.Top) {
+                IconButton(onClick = {
+                    scope.launch { try { app.completeWithUndo(t) } catch (e: Throwable) { error = ApiError.wrap(e).message } }
+                }, modifier = Modifier.size(48.dp)) {
+                    Icon(Icons.Filled.RadioButtonUnchecked, contentDescription = "Mark done: ${t.title ?: "task"}", tint = c.brand, modifier = Modifier.size(26.dp))
+                }
+                Spacer(Modifier.width(4.dp))
+                Column(Modifier.weight(1f).padding(top = 12.dp)) {
+                    Text(t.title ?: "", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold), color = c.text)
+                    t.due?.let { due ->
+                        Text(Formatting.dueText(due), style = MaterialTheme.typography.bodySmall, color = if (due <= today) c.warn else c.textSecondary)
+                    }
+                }
+            }
+        }
+    }
+    ErrorDialog(error, title = "Couldn't tick that off") { error = null }
+}
+
+/** "Done: Water the cups · Undo" for a few seconds after a tick. */
+@Composable
+fun UndoBanner(app: AppState, modifier: Modifier = Modifier) {
+    val c = GrowTheme.colors
+    val ui by app.ui.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    val t = ui.undoTask ?: return
+    Row(
+        modifier.fillMaxWidth().padding(horizontal = 16.dp).background(c.text.copy(alpha = 0.92f), RoundedCornerShape(28.dp)).padding(start = 18.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = c.good, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(10.dp))
+        Text("Done: ${t.title ?: "task"}", style = MaterialTheme.typography.bodyMedium, color = c.bg, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        TextButton(onClick = { scope.launch { app.undoLastComplete() } }) {
+            Text("Undo", color = c.bg, style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold))
+        }
+    }
+}
+
+// MARK: - Humidifier water
+
+@Composable
+fun TankCard(app: AppState, tank: HumidifierTank) {
+    val c = GrowTheme.colors
+    val scope = rememberCoroutineScope()
+    var busy by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    val pct = ((tank.percentLeft ?: 100).coerceIn(0, 100)) / 100f
+    val dry = tank.dry == true
+    val color = when { dry -> c.alert; pct <= 0.2f -> c.warn; else -> c.good }
+    GrowCard(padding = 16.dp) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Filled.WaterDrop, contentDescription = null, tint = c.brand, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Humidifier water", style = MaterialTheme.typography.titleMedium, color = c.text)
+            Spacer(Modifier.weight(1f))
+            Text(if (dry) "Empty" else "${Math.round(pct * 100)}%", style = MaterialTheme.typography.labelLarge, color = color)
+        }
+        Spacer(Modifier.height(10.dp))
+        LinearProgressIndicator(progress = { pct }, color = color, trackColor = c.track, modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)))
+        Spacer(Modifier.height(8.dp))
+        Text(if (dry) "It stopped misting: refill the tank." else "About ${Formatting.number(tank.hoursLeft ?: 0.0, 1)} h of misting left.",
+            style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
+        TextButton(onClick = {
+            scope.launch {
+                busy = true
+                try { app.markHumidifierRefilled() } catch (e: Throwable) { error = ApiError.wrap(e).message } finally { busy = false }
+            }
+        }, enabled = !busy) {
+            if (busy) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = c.brand)
+            else Icon(Icons.Filled.Check, contentDescription = null, tint = c.brand, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("I just refilled it", color = c.brand, style = MaterialTheme.typography.labelLarge)
+        }
+    }
+    ErrorDialog(error, title = "Couldn't save that") { error = null }
+}
+
+// MARK: - Start checklist
+
+@Composable
+fun StartChecklistSheet(seedlings: Boolean, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    val c = GrowTheme.colors
+    val state = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val checks = if (seedlings) listOf(
+        "Only the big light plugged in, dimmer at about 75 % (the light shows about 175 W)",
+        "Humidifier tank filled",
+        "Both cups in the tent on a towel or foam, under the light",
+        "Camera pointing at the cups",
+    ) else listOf("Lights plugged in and set the way you want", "Humidifier tank filled", "Plants in place", "Camera pointing at the plants")
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = state, containerColor = c.bg) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 32.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Icon(Icons.Filled.PowerSettingsNew, contentDescription = null, tint = c.brand, modifier = Modifier.size(52.dp).align(Alignment.CenterHorizontally))
+            Text("Start the tent?", style = MaterialTheme.typography.headlineMedium, color = c.text, modifier = Modifier.align(Alignment.CenterHorizontally))
+            Text("A quick check first:", style = MaterialTheme.typography.bodyMedium, color = c.textSecondary)
+            checks.forEach { item ->
+                Row(verticalAlignment = Alignment.Top) {
+                    Icon(Icons.Filled.CheckCircleOutline, contentDescription = null, tint = c.brand, modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text(item, style = MaterialTheme.typography.bodyLarge, color = c.text)
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            BigButton("Start") { onConfirm(); onDismiss() }
+            BigButton("Not yet", filled = false, onClick = onDismiss)
         }
     }
 }

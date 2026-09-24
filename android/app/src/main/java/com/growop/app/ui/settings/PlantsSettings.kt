@@ -93,6 +93,8 @@ fun PlantEditScreen(app: AppState, plant: Plant, onBack: () -> Unit) {
     var showDate by remember { mutableStateOf(false) }
     var notes by remember { mutableStateOf(plant.notes ?: "") }
     var notifyService by remember { mutableStateOf(plant.notifyService ?: "") }
+    var testing by remember { mutableStateOf(false) }
+    var testSent by remember { mutableStateOf(false) }
     var saving by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
     var alertTitle by remember { mutableStateOf("Something went wrong") }
@@ -133,10 +135,17 @@ fun PlantEditScreen(app: AppState, plant: Plant, onBack: () -> Unit) {
             }
             SectionHeader("Notifications")
             GrowCard {
-                PickerRow("Notifications", if (notifyService.isEmpty()) "Tent default" else notifyService.removePrefix("notify."),
-                    listOf("" to "Tent default") + notifyOptions.map { it to it.removePrefix("notify.") }) { notifyService = it }
+                PickerRow("Phone for alerts", if (notifyService.isEmpty()) "No phone" else Formatting.phoneName(notifyService),
+                    listOf("" to "No phone") + notifyOptions.map { it to Formatting.phoneName(it) }) { notifyService = it; testSent = false }
+                ActionRow("Send a test notification", loading = testing, enabled = notifyService.isNotEmpty()) {
+                    scope.launch {
+                        testing = true
+                        try { app.client.notifyTest(notifyService); testSent = true } catch (e: Throwable) { alertTitle = "Test not sent"; alertMessage = ApiError.wrap(e).message } finally { testing = false }
+                    }
+                }
+                if (testSent) Footnote("Sent: check that phone.")
             }
-            Footnote("Where alerts about this plant go. \"Tent default\" uses the phone chosen in Preferences.")
+            Footnote("Tent alerts and this plant's reminders go to this phone. It needs the Home Assistant app installed and signed in.")
             GrowCard {
                 ActionRow("Save plant", loading = saving, enabled = name.isNotBlank()) {
                     scope.launch {

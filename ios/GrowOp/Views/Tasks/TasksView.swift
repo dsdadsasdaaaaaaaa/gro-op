@@ -8,6 +8,7 @@ struct TasksView: View {
 
     var body: some View {
         NavigationStack {
+            ZStack(alignment: .bottom) {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.spacing) {
                     PlantSwitcher()
@@ -54,7 +55,11 @@ struct TasksView: View {
                     }
                 }
                 .padding(Theme.spacing)
+                .padding(.bottom, 60)
             }
+            UndoBanner().padding(.bottom, 8)
+            }
+            .animation(.spring(duration: 0.3), value: app.undoTask?.id)
             .background(Color.bg.ignoresSafeArea())
             .navigationTitle("Tasks")
             .toolbar {
@@ -78,7 +83,7 @@ struct TasksView: View {
             Label(title, systemImage: symbol).font(.headline)
             ForEach(tasks) { t in
                 TaskRow(task: t) {
-                    do { try await app.completeTask(t) }
+                    do { try await app.completeWithUndo(t) }
                     catch { alert = AlertMessage(message: error.localizedDescription) }
                 }
             }
@@ -109,21 +114,22 @@ struct TaskRow: View {
         guard let d = Formatting.parseDay(due) else { return due }
         if Calendar.current.isDateInToday(d) { return "Today" }
         if Calendar.current.isDateInTomorrow(d) { return "Tomorrow" }
-        if overdue { return "Overdue · \(d.formatted(date: .abbreviated, time: .omitted))" }
+        if overdue { return "Overdue since \(d.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day()))" }
         return d.formatted(date: .abbreviated, time: .omitted)
     }
 
     var body: some View {
-        Button {
-            justTapped = true
-            Task {
-                busy = true
-                await onToggle()
-                busy = false
-                justTapped = false
-            }
-        } label: {
-            HStack(alignment: .top, spacing: 14) {
+        HStack(alignment: .top, spacing: 14) {
+            // Only this circle ticks the task off (a scroll can't do it by accident).
+            Button {
+                justTapped = true
+                Task {
+                    busy = true
+                    await onToggle()
+                    busy = false
+                    justTapped = false
+                }
+            } label: {
                 ZStack {
                     if busy {
                         ProgressView().controlSize(.small)
@@ -135,43 +141,47 @@ struct TaskRow: View {
                             .contentTransition(.symbolEffect(.replace))
                     }
                 }
-                .frame(width: 32, height: 32)
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(task.title ?? "Task")
-                        .font(.body.weight(task.isHigh && !task.isDone ? .semibold : .regular))
-                        .strikethrough(task.isDone)
-                        .foregroundStyle(task.isDone ? .secondary : .primary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if let d = task.detail, !d.isEmpty {
-                        Text(d).font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(busy)
+            .accessibilityLabel(task.isDone ? "Mark not done: \(task.title ?? "task")" : "Mark done: \(task.title ?? "task")")
+            VStack(alignment: .leading, spacing: 5) {
+                Text(task.title ?? "Task")
+                    .font(.body.weight(task.isHigh && !task.isDone ? .semibold : .regular))
+                    .strikethrough(task.isDone)
+                    .foregroundStyle(task.isDone ? .secondary : .primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let d = task.detail, !d.isEmpty {
+                    Text(d).font(.subheadline).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                HStack(spacing: 8) {
+                    if !dueText.isEmpty {
+                        LevelChip(text: dueText, color: dueColor)
                     }
-                    HStack(spacing: 8) {
-                        if !dueText.isEmpty {
-                            LevelChip(text: dueText, color: dueColor)
-                        }
-                        if task.isHigh && !task.isDone {
-                            LevelChip(text: "High priority", color: .alertRed)
-                        }
-                        if task.createdBy == "advisor" {
-                            Label("Advisor", systemImage: "sparkles").font(.caption).foregroundStyle(Color.night)
-                        }
+                    if task.isHigh && !task.isDone {
+                        LevelChip(text: "Important", color: .alertRed)
+                    }
+                    if task.createdBy == "advisor" {
+                        Label("Advisor", systemImage: "sparkles").font(.caption).foregroundStyle(Color.night)
+                    } else if task.createdBy == "system" {
+                        Label("GrowOp", systemImage: "leaf.fill").font(.caption).foregroundStyle(Color.brand)
                     }
                 }
-                Spacer(minLength: 0)
             }
-            .padding(16)
-            .padding(.leading, 6)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.card, in: RoundedRectangle(cornerRadius: Theme.radius, style: .continuous))
-            .overlay(alignment: .leading) {
-                if task.isHigh && !task.isDone {
-                    RoundedRectangle(cornerRadius: 2).fill(Color.alertRed).frame(width: 4).padding(.vertical, 14).padding(.leading, 6)
-                }
-            }
-            .contentShape(Rectangle())
+            .padding(.top, 6)
+            Spacer(minLength: 0)
         }
-        .buttonStyle(.plain)
-        .disabled(busy)
+        .padding(12)
+        .padding(.leading, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.card, in: RoundedRectangle(cornerRadius: Theme.radius, style: .continuous))
+        .overlay(alignment: .leading) {
+            if task.isHigh && !task.isDone {
+                RoundedRectangle(cornerRadius: 2).fill(Color.alertRed).frame(width: 4).padding(.vertical, 14).padding(.leading, 6)
+            }
+        }
         .opacity(task.isDone ? 0.7 : 1)
     }
 }

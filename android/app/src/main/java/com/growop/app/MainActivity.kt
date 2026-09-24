@@ -64,6 +64,8 @@ class MainActivity : ComponentActivity() {
             if (url.isNotBlank() && key.isNotBlank()) appState.provisionDirect(url, key)
             return
         }
+        // growop://photos?plant=2 opens on that plant, so a reminder about Dad's plant shows Dad's request
+        uri.getQueryParameter("plant")?.toIntOrNull()?.let { appState.selectPlant(it) }
         appState.pendingTab.value = when (host) {
             "advisor" -> AppTab.ADVISOR
             "photos" -> AppTab.PHOTOS

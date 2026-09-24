@@ -117,7 +117,7 @@ struct PlantChoiceSheet: View {
             .errorAlert($alert)
             .task {
                 if app.plants.isEmpty { await app.loadPlants() }
-                selection = app.myPlantId ?? app.selectedPlantId ?? app.plants.first?.id
+                selection = app.myPlantId   // nothing pre-picked: on a new phone, "yours" must be a choice
             }
         }
     }

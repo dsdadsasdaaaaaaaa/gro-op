@@ -6,6 +6,7 @@ struct HomeView: View {
     @State private var showSettings = false
     @State private var alert: AlertMessage?
     @State private var confirmStandby = false
+    @State private var confirmStart = false
     @State private var powerBusy = false
     @State private var selectedDevice: DeviceSelection?
     @State private var path = NavigationPath()
@@ -78,6 +79,12 @@ struct HomeView: View {
                     .presentationDetents([.medium])
                     .presentationDragIndicator(.visible)
             }
+            .sheet(isPresented: $confirmStart) {
+                StartChecklistSheet(seedlings: app.status?.grow?.stage == "seedling") { Task { await setStandby(false) } }
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
+            }
+            .overlay(alignment: .bottom) { UndoBanner().padding(.bottom, 8).animation(.spring(duration: 0.3), value: app.undoTask?.id) }
             .errorAlert($alert)
             .task {
                 if let sc = initialScreen, ["plan", "camera", "camera-timelapse", "camera-look"].contains(sc) { path.append(sc) }
@@ -104,25 +111,28 @@ struct HomeView: View {
 
         notices(st)
 
-        TentPowerPill(running: !standby, busy: powerBusy) {
-            if standby { Task { await setStandby(false) } } else { confirmStandby = true }
+        if standby {
+            // one calm card instead of "off" everywhere
+            StandbyCard(busy: powerBusy) { confirmStart = true }
+        } else {
+            TentPowerPill(running: true, busy: powerBusy) { confirmStandby = true }
         }
 
-        if standby {
-            StandbyCard(busy: powerBusy) { Task { await setStandby(false) } }
-        }
+        TodayCard { selectedTab = .tasks }
 
         VitalsCard(sensor: st.sensor, targets: st.targets, usesF: app.usesFahrenheit,
                    history: app.history, muted: standby)
 
-        AssessmentLine(assessment: st.assessment, standby: standby)
+        if !standby {
+            AssessmentLine(assessment: st.assessment, standby: standby)
 
-        LightBar(onTime: st.targets?.lightOnTime,
-                 hours: st.targets?.lightHours,
-                 isOn: st.light?.isOn ?? false,
-                 nextChange: Formatting.parseISO(st.light?.nextChangeAt),
-                 schedule: st.light?.schedule,
-                 muted: standby)
+            LightBar(onTime: st.targets?.lightOnTime,
+                     hours: st.targets?.lightHours,
+                     isOn: st.light?.isOn ?? false,
+                     nextChange: Formatting.parseISO(st.light?.nextChangeAt),
+                     schedule: st.light?.schedule,
+                     muted: standby)
+        }
 
         if let cam = st.camera {
             NavigationLink {
@@ -146,6 +156,10 @@ struct HomeView: View {
             selectedDevice = DeviceSelection(role: d.role)
         }
         .id("devices")
+
+        if let tank = st.humidifierTank, (st.devices ?? []).contains(where: { $0.role == "humidifier" && $0.entityId != nil }) {
+            TankCard(tank: tank)
+        }
 
         NeedsYouRow(tasks: app.needsYouTaskCount, photos: app.needsYouPhotoCount,
                     unreadBrief: st.unreadBrief ?? false) { tab in selectedTab = tab }
@@ -210,7 +224,7 @@ struct HomeView: View {
                 Circle().fill(Color.warn.opacity(0.12)).frame(width: 84, height: 84)
                 Image(systemName: "wifi.exclamationmark").font(.system(size: 34, weight: .medium)).foregroundStyle(Color.warn)
             }
-            Text("Can't reach the grow brain").font(.title3.weight(.semibold))
+            Text("Can't reach GrowOp at home").font(.title3.weight(.semibold))
             Text(err).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
             Button("Try again") { Task { await app.refreshStatus() } }
                 .buttonStyle(BigButtonStyle(filled: false))

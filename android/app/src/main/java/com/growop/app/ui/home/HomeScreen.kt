@@ -76,6 +76,7 @@ private fun HomeMain(app: AppState, onSwitchTab: (AppTab) -> Unit, onOpenPlan: (
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
     var confirmStandby by remember { mutableStateOf(false) }
+    var confirmStart by remember { mutableStateOf(false) }
     var powerBusy by remember { mutableStateOf(false) }
     var selectedDevice by remember { mutableStateOf<String?>(null) }
     var alertTitle by remember { mutableStateOf("Something went wrong") }
@@ -114,8 +115,8 @@ private fun HomeMain(app: AppState, onSwitchTab: (AppTab) -> Unit, onOpenPlan: (
             val st = ui.status
             when {
                 st != null -> HomeContent(ui, st, app, powerBusy, onSwitchTab, onOpenPlan, onOpenCamera,
-                    onPower = { if (st.standby == true) setStandby(false) else confirmStandby = true },
-                    onStart = { setStandby(false) },
+                    onPower = { if (st.standby == true) confirmStart = true else confirmStandby = true },
+                    onStart = { confirmStart = true },
                     onDevice = { selectedDevice = it },
                     onResume = { scope.launch { try { app.resumeControl() } catch (e: Throwable) { alertMessage = ApiError.wrap(e).message } } })
                 ui.statusError != null -> ConnectionProblem(ui.statusError!!, onRetry = { scope.launch { app.refreshStatus() } }, onSettings = onOpenSettings)
@@ -125,6 +126,7 @@ private fun HomeMain(app: AppState, onSwitchTab: (AppTab) -> Unit, onOpenPlan: (
     }
 
     if (confirmStandby) StandbyConfirmSheet(onConfirm = { setStandby(true) }, onDismiss = { confirmStandby = false })
+    if (confirmStart) StartChecklistSheet(seedlings = ui.status?.grow?.stage == "seedling", onConfirm = { setStandby(false) }, onDismiss = { confirmStart = false })
     selectedDevice?.let { role -> DeviceSheet(app, role) { selectedDevice = null } }
     ErrorDialog(alertMessage, title = alertTitle) { alertMessage = null }
 }
@@ -164,18 +166,24 @@ private fun HomeContent(
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { notices.forEach { (i, t, tint) -> InlineNotice(i, t, tint) } }
     }
 
-    TentPowerPill(running = !standby, busy = powerBusy, onClick = onPower)
-    if (standby) StandbyCard(busy = powerBusy, onStart = onStart)
+    // One calm card in standby instead of "off" everywhere.
+    if (standby) StandbyCard(busy = powerBusy, onStart = onStart) else TentPowerPill(running = true, busy = powerBusy, onClick = onPower)
+
+    TodayCard(app, ui.plantTasks + ui.tentTasks) { onSwitchTab(AppTab.TASKS) }
 
     VitalsCard(sensor = st.sensor, targets = st.targets, usesF = ui.usesFahrenheit, history = ui.history, muted = standby)
-    AssessmentLine(assessment = st.assessment, standby = standby)
-    LightBar(
-        onTime = st.targets?.lightOnTime, hours = st.targets?.lightHours, isOn = st.light?.isOn ?: false,
-        nextChange = Formatting.parseISO(st.light?.nextChangeAt), schedule = st.light?.schedule, muted = standby,
-    )
+    if (!standby) {
+        AssessmentLine(assessment = st.assessment, standby = false)
+        LightBar(
+            onTime = st.targets?.lightOnTime, hours = st.targets?.lightHours, isOn = st.light?.isOn ?: false,
+            nextChange = Formatting.parseISO(st.light?.nextChangeAt), schedule = st.light?.schedule, muted = false,
+        )
+    }
     st.camera?.let { cam -> CameraCard(app, cam, muted = standby, onClick = onOpenCamera) }
     GrowPlanCard(plan = ui.plan, growStartDate = plant?.startDate ?: st.grow?.startDate, onClick = onOpenPlan)
     DevicesGrid(devices = (st.devices ?: emptyList()).filter { it.isSwitch && it.entityId != null }, muted = standby) { onDevice(it.role) }
+    val tank = st.humidifierTank
+    if (tank != null && st.devices.orEmpty().any { it.role == "humidifier" && it.entityId != null }) TankCard(app, tank)
     NeedsYouRow(tasks = ui.needsYouTaskCount, photos = ui.needsYouPhotoCount, unreadBrief = st.unreadBrief ?: false, onTap = onSwitchTab)
 
     // Footer
@@ -195,7 +203,7 @@ private fun ConnectionProblem(error: String, onRetry: () -> Unit, onSettings: ()
             Box(Modifier.size(84.dp).background(c.warn.copy(alpha = 0.12f), CircleShape), contentAlignment = Alignment.Center) {
                 Icon(Icons.Filled.WifiOff, contentDescription = null, tint = c.warn, modifier = Modifier.size(36.dp))
             }
-            Text("Can't reach the grow brain", style = MaterialTheme.typography.titleLarge, color = c.text)
+            Text("Can't reach GrowOp at home", style = MaterialTheme.typography.titleLarge, color = c.text)
             Text(error, style = MaterialTheme.typography.bodyMedium, color = c.textSecondary, textAlign = TextAlign.Center)
             BigButton("Try again", filled = false, onClick = onRetry)
             TextButton(onClick = onSettings) { Text("Connection settings", color = c.brand, style = MaterialTheme.typography.labelLarge) }

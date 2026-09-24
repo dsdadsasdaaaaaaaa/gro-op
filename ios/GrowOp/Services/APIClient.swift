@@ -25,11 +25,11 @@ enum APIError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notConfigured:
-            return "The app isn't connected to your grow brain yet. Open Settings to set it up."
+            return "This phone isn't set up yet. Scan the setup QR code from the dashboard."
         case .invalidURL(let s):
             return "\"\(s)\" doesn't look like a valid address."
         case .unauthorized:
-            return "The grow brain rejected the API key. Check it in Settings."
+            return "GrowOp at home didn't accept this phone's setup code. Use Settings → Set up this phone again, then scan the QR code."
         case .http(let status, let detail):
             if let detail, !detail.isEmpty { return detail }
             return "The server replied with an error (\(status))."
@@ -355,6 +355,15 @@ actor HAIngress {
 // MARK: - Client
 
 final class APIClient: @unchecked Sendable {
+    /// A stable id for this phone, so "read the brief" is remembered per person, not for the whole tent.
+    static let deviceId: String = {
+        let key = "growop.deviceId"
+        if let id = UserDefaults.standard.string(forKey: key) { return id }
+        let id = "ios-" + UUID().uuidString.prefix(8).lowercased()
+        UserDefaults.standard.set(id, forKey: key)
+        return id
+    }()
+
     static let shortTimeout: TimeInterval = 20
     static let longTimeout: TimeInterval = 90
 
@@ -405,6 +414,7 @@ final class APIClient: @unchecked Sendable {
         req.httpMethod = spec.method
         req.timeoutInterval = spec.timeout
         req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue(APIClient.deviceId, forHTTPHeaderField: "X-Device-Id")
         for (k, v) in headers { req.setValue(v, forHTTPHeaderField: k) }
         if let body = spec.body {
             req.httpBody = body
@@ -625,6 +635,13 @@ final class APIClient: @unchecked Sendable {
         try await send("POST", "/api/log", body: entry, timeout: APIClient.longTimeout)
     }
 
+    func humidifierRefilled() async throws { try await sendIgnoringBody("POST", "/api/humidifier/refilled") }
+
+    func notifyTest(service: String) async throws {
+        let enc = service.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? service
+        try await sendIgnoringBody("POST", "/api/notify/test?service=\(enc)")
+    }
+
     func logEntries(limit: Int = 50) async throws -> LogListResponse {
         try await get("/api/log", query: [URLQueryItem(name: "limit", value: String(limit))])
     }
@@ -705,8 +722,8 @@ final class APIClient: @unchecked Sendable {
 
     // MARK: Chat
 
-    func sendChat(_ message: String, plantId: Int? = nil) async throws -> ChatReply {
-        try await send("POST", "/api/chat", body: ChatSendRequest(message: message, plantId: plantId), timeout: APIClient.longTimeout)
+    func sendChat(_ message: String, plantId: Int? = nil, author: String? = nil) async throws -> ChatReply {
+        try await send("POST", "/api/chat", body: ChatSendRequest(message: message, plantId: plantId, author: author), timeout: APIClient.longTimeout)
     }
 
     func chatMessages(limit: Int = 50) async throws -> ChatListResponse {

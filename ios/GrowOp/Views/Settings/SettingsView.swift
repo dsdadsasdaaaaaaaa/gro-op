@@ -48,7 +48,11 @@ struct SettingsView: View {
     @State private var notifyOptions: [String] = []
     @State private var autoApply = true
     @State private var model = ""
+    @State private var budget: Double?
     @State private var savingPrefs = false
+    @State private var confirmReset = false
+    @State private var confirmSetupAgain = false
+    @State private var lightOnDate = Date()
 
     @State private var alert: AlertMessage?
     @State private var loading = true
@@ -87,16 +91,33 @@ struct SettingsView: View {
             .background(Color.bg.ignoresSafeArea())
             .tint(Color.brand)
             .toolbar {
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        Task {
+                            if prefsChanged { await savePrefs() }
+                            dismiss()
+                        }
+                    }
+                }
             }
             .scrollDismissesKeyboard(.interactively)
             .task { await loadAll() }
             .errorAlert($alert)
+            .confirmationDialog("Reset targets to the stage defaults?", isPresented: $confirmReset, titleVisibility: .visible) {
+                Button("Reset", role: .destructive) { Task { await resetTargets() } }
+            } message: {
+                Text("Your own changes and the advisor's tweaks for this stage are dropped.")
+            }
+            .confirmationDialog("Set this phone up again?", isPresented: $confirmSetupAgain, titleVisibility: .visible) {
+                Button("Set up again", role: .destructive) { app.disconnect(); dismiss() }
+            } message: {
+                Text("GrowOp forgets how to reach the tent on this phone. Scan the setup QR code again afterwards.")
+            }
             .alert("Change stage to \((pendingStage ?? "").capitalized)?", isPresented: $showStageConfirm) {
                 Button("Change stage") { Task { await applyStage() } }
                 Button("Cancel", role: .cancel) { stageSelection = grow?.stage ?? stageSelection }
             } message: {
-                Text("This records today as the start of the new stage, resets targets to that stage's defaults, and tells the advisor.")
+                Text(stageMessage)
             }
         }
     }
@@ -154,6 +175,7 @@ struct SettingsView: View {
         vMin = t.vpdMin
         vMax = t.vpdMax
         lightOn = t.lightOnTime ?? ""
+        if let d = Self.hhmm.date(from: lightOn) { lightOnDate = d }
         lightHours = t.lightHours.map { Int($0.rounded()) }
     }
 
@@ -165,6 +187,31 @@ struct SettingsView: View {
         if !notifyService.isEmpty, !notifyOptions.contains(notifyService) { notifyOptions.append(notifyService) }
         autoApply = s.autoApplyAdvisorTargets ?? true
         model = s.model ?? ""
+        budget = s.advisorBudgetUsd
+    }
+
+    private var stageMessage: String {
+        let light: String = {
+            switch pendingStage {
+            case "flower": return " The light switches to 12 hours on and 12 off by itself: never turn it on during the dark hours."
+            case "veg": return " The light stays on 18 hours a day."
+            case "drying": return " The light stays off from now on."
+            case "curing": return " Lights, humidifier and exhaust go idle."
+            default: return ""
+            }
+        }()
+        return "Temperature and humidity go to the new stage's settings, today is recorded as its start, and the advisor is told." + light
+    }
+
+    /// Anything typed in the shared settings that hasn't been saved yet.
+    private var prefsChanged: Bool {
+        guard let s = app.settings else { return false }
+        return units != (s.units ?? "c")
+            || Self.hhmm.string(from: briefTime) != (s.briefTime ?? "08:00")
+            || notifyService != (s.notifyService ?? "")
+            || autoApply != (s.autoApplyAdvisorTargets ?? true)
+            || (!model.isEmpty && model != (s.model ?? ""))
+            || (budget != nil && budget != s.advisorBudgetUsd)
     }
 
     // MARK: - Server (read-only)
@@ -198,6 +245,8 @@ struct SettingsView: View {
                 .tint(Color.brand)
                 .disabled(testing)
             }
+            Button("Set up this phone again…") { confirmSetupAgain = true }
+                .font(.subheadline)
             if let testResult {
                 Label(testResult, systemImage: testOK == true ? "checkmark.circle" : "xmark.octagon")
                     .font(.footnote)
@@ -205,6 +254,8 @@ struct SettingsView: View {
             }
         } header: {
             Text("Server")
+        } footer: {
+            Text("GrowOp app \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?")")
         }
     }
 
@@ -375,7 +426,7 @@ struct SettingsView: View {
         } header: {
             Text("Change stage")
         } footer: {
-            Text("Move to Flower when you flip the lights to 12/12. Targets reset to the new stage's defaults.")
+            Text("Changing to Flower switches the light to 12 hours a day by itself. Targets move to the new stage's defaults.")
         }
     }
 
@@ -410,13 +461,8 @@ struct SettingsView: View {
             }
             rangeRow(title: "Temperature", unit: app.tempUnitLabel, min: $tMin, max: $tMax)
             rangeRow(title: "Humidity", unit: "%", min: $hMin, max: $hMax)
-            rangeRow(title: "VPD", unit: "kPa", min: $vMin, max: $vMax)
-            HStack {
-                Text("Lights on at")
-                Spacer()
-                TextField("06:00", text: $lightOn)
-                    .keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing).frame(width: 90)
-            }
+            DatePicker("Lights on at", selection: $lightOnDate, displayedComponents: .hourAndMinute)
+                .onChange(of: lightOnDate) { _, d in lightOn = Self.hhmm.string(from: d) }
             HStack {
                 Text("Light hours per day")
                 Spacer()
@@ -429,12 +475,12 @@ struct SettingsView: View {
                 HStack { if savingTargets { ProgressView() }; Text("Save targets") }
             }
             .disabled(savingTargets)
-            Button("Reset to stage defaults", role: .destructive) { Task { await resetTargets() } }
+            Button("Reset to stage defaults", role: .destructive) { confirmReset = true }
                 .disabled(savingTargets)
         } header: {
             Text("Targets")
         } footer: {
-            Text("The ranges the automation tries to keep the tent in. Leave them alone unless you know why you're changing them.")
+            Text("The daytime ranges the automation keeps the tent in; at night it may be a few degrees cooler. Air dryness (VPD) follows from these.")
         }
     }
 
@@ -469,8 +515,6 @@ struct SettingsView: View {
         if let v = tMax { fields["temp_max_c"] = .number(useF ? (Formatting.fToC(v) * 10).rounded() / 10 : v) }
         if let v = hMin { fields["humidity_min"] = .number(v) }
         if let v = hMax { fields["humidity_max"] = .number(v) }
-        if let v = vMin { fields["vpd_min"] = .number(v) }
-        if let v = vMax { fields["vpd_max"] = .number(v) }
         let lo = lightOn.trimmingCharacters(in: .whitespaces)
         if !lo.isEmpty { fields["light_on_time"] = .string(lo) }
         if let h = lightHours { fields["light_hours"] = .number(Double(h)) }
@@ -505,24 +549,27 @@ struct SettingsView: View {
             }
             .pickerStyle(.segmented)
             DatePicker("Daily brief time", selection: $briefTime, displayedComponents: .hourAndMinute)
-            Picker("Phone notifications", selection: $notifyService) {
-                Text("Off").tag("")
-                ForEach(notifyOptions, id: \.self) { s in
-                    Text(s.replacingOccurrences(of: "notify.", with: "")).tag(s)
-                }
-            }
-            Toggle("Auto-apply advisor target changes", isOn: $autoApply)
+            Toggle("Let the advisor fine-tune temperature and humidity", isOn: $autoApply)
             HStack {
-                Text("Advisor model")
+                Text("Monthly advisor budget")
                 Spacer()
-                TextField("claude-opus-5", text: $model)
-                    .autocorrectionDisabled().textInputAutocapitalization(.never)
-                    .multilineTextAlignment(.trailing)
+                Text("$").foregroundStyle(.secondary)
+                TextField("40", value: $budget, format: .number)
+                    .keyboardType(.numberPad).multilineTextAlignment(.trailing).frame(width: 60)
+            }
+            DisclosureGroup("Advanced (tent setup)") {
+                Picker("Extra phone for every alert", selection: $notifyService) {
+                    Text("Nobody extra").tag("")
+                    ForEach(notifyOptions, id: \.self) { s in Text(Formatting.phoneName(s)).tag(s) }
+                }
+                Picker("Advisor model", selection: $model) {
+                    ForEach(app.settings?.modelsAvailable ?? [model], id: \.self) { m in Text(m).tag(m) }
+                }
             }
             Button {
                 Task { await savePrefs() }
             } label: {
-                HStack { if savingPrefs { ProgressView() }; Text("Save preferences") }
+                HStack { if savingPrefs { ProgressView() }; Text("Save") }
             }
             .disabled(savingPrefs)
             if let s = app.settings {
@@ -531,13 +578,14 @@ struct SettingsView: View {
                     if let lo = s.safetyTempMinC, let hi = s.safetyTempMaxC {
                         Text("Safety limits: \(Formatting.number(lo))–\(Formatting.number(hi))°C")
                     }
-                    if let ci = s.controlIntervalS { Text("Control loop every \(Formatting.number(ci))s") }
                     if let usd = s.advisorMonthUsd { Text("Advisor spend this month: $\(String(format: "%.2f", usd)) USD") }
                 }
                 .font(.footnote).foregroundStyle(.secondary)
             }
         } header: {
-            Text("Preferences")
+            Text("Tent settings (shared)")
+        } footer: {
+            Text("These apply to the whole tent, for both of you. Each plant's own phone is set under Plants.")
         }
     }
 
@@ -552,12 +600,13 @@ struct SettingsView: View {
         ]
         let m = model.trimmingCharacters(in: .whitespaces)
         if !m.isEmpty { fields["model"] = .string(m) }
+        if let b = budget { fields["advisor_budget_usd"] = .number(b) }
         do {
             try await app.saveSettings(fields)
             if let s = app.settings { applySettings(s) }
             if let t = try? await app.client.targets() { applyTargets(t) }
         } catch {
-            alert = AlertMessage(title: "Couldn't save preferences", message: error.localizedDescription)
+            alert = AlertMessage(title: "Couldn't save the settings", message: error.localizedDescription)
         }
     }
 }

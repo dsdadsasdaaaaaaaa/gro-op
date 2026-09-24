@@ -7,6 +7,9 @@ struct AdvisorView: View {
     @State private var runningBrief = false
     @State private var alert: AlertMessage?
     @State private var confirmClear = false
+    @State private var aboutPlantId: Int?          // nil = the whole tent
+    @State private var aboutChosen = false
+    @State private var followBottom = false        // only scroll to the end after this person sends something
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -27,7 +30,7 @@ struct AdvisorView: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }
                             ForEach(app.chatMessages) { m in
-                                ChatBubble(message: m).id(m.id)
+                                ChatBubble(message: m, mine: isMine(m)).id(m.id)
                             }
                             if sending {
                                 HStack(spacing: 10) {
@@ -44,10 +47,10 @@ struct AdvisorView: View {
                     }
                     .scrollDismissesKeyboard(.interactively)
                     .onChange(of: app.chatMessages.count) { _, _ in
-                        withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
+                        if followBottom { withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
                     }
                     .onChange(of: sending) { _, _ in
-                        withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
+                        if followBottom { withAnimation { proxy.scrollTo("bottom", anchor: .bottom) } }
                     }
                     .onChange(of: inputFocused) { _, focused in
                         if focused {
@@ -69,8 +72,8 @@ struct AdvisorView: View {
                     } label: { Image(systemName: "ellipsis.circle").foregroundStyle(.secondary) }
                 }
             }
-            .confirmationDialog("Clear the whole conversation?", isPresented: $confirmClear, titleVisibility: .visible) {
-                Button("Clear chat", role: .destructive) {
+            .confirmationDialog("Clear the chat for both of you?", isPresented: $confirmClear, titleVisibility: .visible) {
+                Button("Clear it", role: .destructive) {
                     Task {
                         do { try await app.clearChat() } catch { alert = AlertMessage(message: error.localizedDescription) }
                     }
@@ -110,7 +113,7 @@ struct AdvisorView: View {
         } label: {
             HStack(spacing: 8) {
                 if runningBrief { ProgressView().tint(Color.brand) } else { Image(systemName: "sparkles") }
-                Text(runningBrief ? "Writing your brief… (up to a minute)" : "Run brief now")
+                Text(runningBrief ? "Writing your brief… (up to a minute)" : "Write a brief now (≈ $0.10)")
             }
         }
         .buttonStyle(BigButtonStyle(color: .brand, filled: false))
@@ -132,10 +135,17 @@ struct AdvisorView: View {
 
     private var inputBar: some View {
         VStack(alignment: .leading, spacing: 6) {
-        if let p = app.selectedPlant, app.plants.count >= 1 {
-            Label("Asking about \(p.displayName)", systemImage: "leaf.fill")
-                .font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                .padding(.horizontal, 6)
+        if !app.plants.isEmpty {
+            Menu {
+                Button { aboutPlantId = nil; aboutChosen = true } label: { Label("The whole tent", systemImage: "house.fill") }
+                ForEach(app.plants) { p in
+                    Button { aboutPlantId = p.id; aboutChosen = true } label: { Label(p.displayName, systemImage: "leaf.fill") }
+                }
+            } label: {
+                Label("About: \(aboutName)", systemImage: aboutPlantId == nil ? "house.fill" : "leaf.fill")
+                    .font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+            }
         }
         HStack(alignment: .bottom, spacing: 10) {
             TextField("Ask the advisor…", text: $draft, axis: .vertical)
@@ -160,6 +170,19 @@ struct AdvisorView: View {
         .background(Color.bg)
     }
 
+    private var aboutName: String {
+        guard let id = currentAbout else { return "the whole tent" }
+        return app.plants.first { $0.id == id }?.displayName ?? "the whole tent"
+    }
+    /// Until the person picks, a question is about the plant they're looking at.
+    private var currentAbout: Int? { aboutChosen ? aboutPlantId : app.selectedPlantId }
+
+    private func isMine(_ m: ChatMessage) -> Bool {
+        guard m.isUser else { return false }
+        guard let author = m.author, !author.isEmpty, let me = app.myPlant?.owner, !me.isEmpty else { return true }
+        return author.caseInsensitiveCompare(me) == .orderedSame
+    }
+
     private var canSend: Bool {
         !sending && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -168,10 +191,11 @@ struct AdvisorView: View {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         draft = ""
+        followBottom = true
         sending = true
         defer { sending = false }
         do {
-            try await app.sendChat(text)
+            try await app.sendChat(text, plantId: currentAbout)
         } catch {
             draft = text
             alert = AlertMessage(title: "Message not sent", message: error.localizedDescription)
@@ -304,25 +328,32 @@ struct LeafGlyph: View {
 
 struct ChatBubble: View {
     let message: ChatMessage
+    var mine: Bool = true
+
+    /// This person's own messages sit on the right; the advisor's and the other grower's on the left.
+    private var right: Bool { message.isUser && mine }
 
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
-            if message.isUser {
+            if right {
                 Spacer(minLength: 48)
-            } else {
+            } else if !message.isUser {
                 LeafGlyph()
             }
-            VStack(alignment: message.isUser ? .trailing : .leading, spacing: 4) {
+            VStack(alignment: right ? .trailing : .leading, spacing: 4) {
+                if message.isUser && !mine, let who = message.author {
+                    Text(who).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                }
                 Text(message.content ?? "")
                     .font(.body)
-                    .foregroundStyle(message.isUser ? Color.white : Color.primary)
+                    .foregroundStyle(right ? Color.white : Color.primary)
                     .padding(.horizontal, 14).padding(.vertical, 10)
-                    .background(message.isUser ? Color.brand : Color.card,
+                    .background(right ? Color.brand : (message.isUser ? Color.night.opacity(0.12) : Color.card),
                                 in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .textSelection(.enabled)
                 Text(Formatting.relative(message.createdAt)).font(.caption2).foregroundStyle(.tertiary)
             }
-            if !message.isUser { Spacer(minLength: 48) }
+            if !right { Spacer(minLength: 48) }
         }
     }
 }

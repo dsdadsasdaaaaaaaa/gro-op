@@ -215,7 +215,14 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
     var notifyOptions by remember { mutableStateOf<List<String>>(emptyList()) }
     var autoApply by remember { mutableStateOf(true) }
     var model by remember { mutableStateOf("") }
+    var budget by remember { mutableStateOf("") }
+    var advancedOpen by remember { mutableStateOf(false) }
     var savingPrefs by remember { mutableStateOf(false) }
+    var confirmReset by remember { mutableStateOf(false) }
+    var confirmSetupAgain by remember { mutableStateOf(false) }
+    var showLightPicker by remember { mutableStateOf(false) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val appVersion = remember { runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull() ?: "?" }
 
     var alertTitle by remember { mutableStateOf("Something went wrong") }
     var alertMessage by remember { mutableStateOf<String?>(null) }
@@ -266,6 +273,31 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
         notifyOptions = opts
         autoApply = s.autoApplyAdvisorTargets ?: true
         model = s.model ?: ""
+        budget = s.advisorBudgetUsd?.let { Formatting.number(it, 0) } ?: ""
+    }
+    fun budgetValue(): Double? = budget.replace(',', '.').trim().toDoubleOrNull()
+    /** Anything typed in the shared settings that hasn't been saved yet. */
+    fun prefsChanged(): Boolean {
+        val s = app.value.settings ?: return false
+        return units != (s.units ?: "c") || Formatting.hhmm(briefTime) != (s.briefTime ?: "08:00") ||
+            notifyService != (s.notifyService ?: "") || autoApply != (s.autoApplyAdvisorTargets ?: true) ||
+            (model.isNotBlank() && model != (s.model ?: "")) || (budgetValue() != null && budgetValue() != s.advisorBudgetUsd)
+    }
+    suspend fun savePrefs() {
+        savingPrefs = true
+        try {
+            val body = buildJsonObject {
+                put("units", units)
+                put("brief_time", Formatting.hhmm(briefTime))
+                put("auto_apply_advisor_targets", autoApply)
+                if (notifyService.isEmpty()) put("notify_service", JsonNull) else put("notify_service", notifyService)
+                model.trim().takeIf { it.isNotEmpty() }?.let { put("model", it) }
+                budgetValue()?.let { put("advisor_budget_usd", it) }
+            }
+            app.saveSettings(body)
+            app.value.settings?.let { applySettings(it) }
+            runCatching { app.client.targets() }.getOrNull()?.let { applyTargets(it) }
+        } catch (e: Throwable) { alertTitle = "Couldn't save the settings"; alertMessage = ApiError.wrap(e).message } finally { savingPrefs = false }
     }
     suspend fun loadAll() {
         if (!app.value.isConfigured) { loading = false; return }
@@ -293,7 +325,7 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
             TopAppBar(
                 title = { Text("Settings", style = MaterialTheme.typography.titleLarge) },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back") } },
-                actions = { TextButton(onClick = onBack) { Text("Done", style = MaterialTheme.typography.titleMedium, color = c.brand) } },
+                actions = { TextButton(onClick = { scope.launch { if (prefsChanged()) savePrefs(); onBack() } }) { Text("Done", style = MaterialTheme.typography.titleMedium, color = c.brand) } },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = c.bg, titleContentColor = c.text, navigationIconContentColor = c.text),
             )
         },
@@ -346,7 +378,8 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
                     Text(it, style = MaterialTheme.typography.bodySmall, color = if (testOK == true) c.textSecondary else c.alert, modifier = Modifier.padding(horizontal = 4.dp))
                 }
             }
-            Footnote("Set up on first launch. To change how the app connects, clear the app's data in Android settings and set it up again.")
+            ActionRow("Set up this phone again…") { confirmSetupAgain = true }
+            Footnote("GrowOp app $appVersion. Set up on first launch; \"Set up this phone again\" goes back to the setup screen.")
 
             if (loading) {
                 Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -439,7 +472,7 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
                     if (changingStage) Row(verticalAlignment = Alignment.CenterVertically) { CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = c.brand); Spacer(Modifier.width(8.dp)); Text("Changing stage…", color = c.textSecondary) }
                     grow?.stageStarted?.takeIf { it.isNotEmpty() }?.let { Footnote("Current stage started ${Formatting.friendlyDay(it)}") }
                 }
-                Footnote("Move to Flower when you flip the lights to 12/12. Targets reset to the new stage's defaults.")
+                Footnote("Changing to Flower switches the light to 12 hours a day by itself. Targets move to the new stage's defaults.")
 
                 // MARK: Targets
                 SectionHeader("Targets")
@@ -453,8 +486,10 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
                     }
                     RangeRow("Temperature", ui.tempUnitLabel, tMin, { tMin = it }, tMax, { tMax = it })
                     RangeRow("Humidity", "%", hMin, { hMin = it }, hMax, { hMax = it })
-                    RangeRow("VPD", "kPa", vMin, { vMin = it }, vMax, { vMax = it })
-                    LabeledField("Lights on at", lightOn, { lightOn = it }, placeholder = "06:00")
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { showLightPicker = true }.padding(vertical = 10.dp, horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Lights on at", style = MaterialTheme.typography.bodyLarge, color = c.text, modifier = Modifier.weight(1f))
+                        Text(lightOn.ifEmpty { "06:00" }, style = MaterialTheme.typography.bodyLarge, color = c.brand)
+                    }
                     LabeledField("Light hours per day", lightHours, { lightHours = it }, placeholder = "18", numeric = true, suffix = "h")
                     ActionRow("Save targets", loading = savingTargets) {
                         scope.launch {
@@ -467,8 +502,6 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
                                     num(tMax)?.let { put("temp_max_c", if (useF) (Formatting.fToC(it) * 10).roundToInt() / 10.0 else it) }
                                     num(hMin)?.let { put("humidity_min", it) }
                                     num(hMax)?.let { put("humidity_max", it) }
-                                    num(vMin)?.let { put("vpd_min", it) }
-                                    num(vMax)?.let { put("vpd_max", it) }
                                     lightOn.trim().takeIf { it.isNotEmpty() }?.let { put("light_on_time", it) }
                                     lightHours.trim().toIntOrNull()?.let { put("light_hours", it) }
                                 }
@@ -476,17 +509,12 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
                             } catch (e: Throwable) { alertTitle = "Couldn't save targets"; alertMessage = ApiError.wrap(e).message } finally { savingTargets = false }
                         }
                     }
-                    ActionRow("Reset to stage defaults", destructive = true, enabled = !savingTargets) {
-                        scope.launch {
-                            savingTargets = true
-                            try { applyTargets(app.client.resetTargets()); app.refreshStatus() } catch (e: Throwable) { alertTitle = "Couldn't reset targets"; alertMessage = ApiError.wrap(e).message } finally { savingTargets = false }
-                        }
-                    }
+                    ActionRow("Reset to stage defaults", destructive = true, enabled = !savingTargets) { confirmReset = true }
                 }
-                Footnote("The ranges the automation tries to keep the tent in. Leave them alone unless you know why you're changing them.")
+                Footnote("The daytime ranges the automation keeps the tent in; at night it may be a few degrees cooler. Air dryness (VPD) follows from these.")
 
-                // MARK: Preferences
-                SectionHeader("Preferences")
+                // MARK: Tent settings (shared)
+                SectionHeader("Tent settings (shared)")
                 GrowCard {
                     Text("Temperature units", style = MaterialTheme.typography.labelMedium, color = c.textSecondary)
                     Spacer(Modifier.height(6.dp))
@@ -503,36 +531,28 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
                         Text("Daily brief time", style = MaterialTheme.typography.bodyLarge, color = c.text, modifier = Modifier.weight(1f))
                         Text(Formatting.hhmm(briefTime), style = MaterialTheme.typography.bodyLarge, color = c.brand)
                     }
-                    PickerRow("Phone notifications", if (notifyService.isEmpty()) "Off" else notifyService.removePrefix("notify."),
-                        listOf("" to "Off") + notifyOptions.map { it to it.removePrefix("notify.") }) { notifyService = it }
-                    SwitchRow("Auto-apply advisor target changes", autoApply) { autoApply = it }
-                    LabeledField("Advisor model", model, { model = it }, placeholder = "claude-opus-5")
-                    ActionRow("Save preferences", loading = savingPrefs) {
-                        scope.launch {
-                            savingPrefs = true
-                            try {
-                                val body = buildJsonObject {
-                                    put("units", units)
-                                    put("brief_time", Formatting.hhmm(briefTime))
-                                    put("auto_apply_advisor_targets", autoApply)
-                                    if (notifyService.isEmpty()) put("notify_service", JsonNull) else put("notify_service", notifyService)
-                                    model.trim().takeIf { it.isNotEmpty() }?.let { put("model", it) }
-                                }
-                                app.saveSettings(body)
-                                app.value.settings?.let { applySettings(it) }
-                                runCatching { app.client.targets() }.getOrNull()?.let { applyTargets(it) }
-                            } catch (e: Throwable) { alertTitle = "Couldn't save preferences"; alertMessage = ApiError.wrap(e).message } finally { savingPrefs = false }
-                        }
+                    SwitchRow("Let the advisor fine-tune temperature and humidity", autoApply) { autoApply = it }
+                    LabeledField("Monthly advisor budget", budget, { budget = it }, placeholder = "40", numeric = true, suffix = "US$")
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { advancedOpen = !advancedOpen }.padding(vertical = 10.dp, horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("Advanced (tent setup)", style = MaterialTheme.typography.bodyLarge, color = c.text, modifier = Modifier.weight(1f))
+                        Text(if (advancedOpen) "Hide" else "Show", style = MaterialTheme.typography.labelLarge, color = c.brand)
                     }
+                    if (advancedOpen) {
+                        PickerRow("Extra phone for every alert", if (notifyService.isEmpty()) "Nobody extra" else Formatting.phoneName(notifyService),
+                            listOf("" to "Nobody extra") + notifyOptions.map { it to Formatting.phoneName(it) }) { notifyService = it }
+                        val models = (ui.settings?.modelsAvailable ?: emptyList()).ifEmpty { listOfNotNull(model.ifEmpty { null }) }
+                        if (models.isNotEmpty()) PickerRow("Advisor model", model.ifEmpty { "—" }, models.map { it to it }) { model = it }
+                    }
+                    ActionRow("Save", loading = savingPrefs) { scope.launch { savePrefs() } }
                     ui.settings?.let { s ->
                         Column(Modifier.padding(horizontal = 4.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             s.timezone?.let { Text("Timezone: $it", style = MaterialTheme.typography.bodySmall, color = c.textSecondary) }
                             if (s.safetyTempMinC != null && s.safetyTempMaxC != null) Text("Safety limits: ${Formatting.number(s.safetyTempMinC)}–${Formatting.number(s.safetyTempMaxC)}°C", style = MaterialTheme.typography.bodySmall, color = c.textSecondary)
                             s.advisorMonthUsd?.let { Text("Advisor spend this month: $" + String.format(java.util.Locale.US, "%.2f", it) + " USD", style = MaterialTheme.typography.bodySmall, color = c.textSecondary) }
-                            s.controlIntervalS?.let { Text("Control loop every ${Formatting.number(it)}s", style = MaterialTheme.typography.bodySmall, color = c.textSecondary) }
                         }
                     }
                 }
+                Footnote("These apply to the whole tent, for both of you. Each plant's own phone is set under Plants.")
             }
             Spacer(Modifier.height(32.dp))
         }
@@ -541,7 +561,13 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
     // Dialogs
     pendingStage?.let { s ->
         ConfirmDialog("Change stage to ${Formatting.capitalize(s)}?",
-            "This records today as the start of the new stage, resets targets to that stage's defaults, and tells the advisor.",
+            "Temperature and humidity go to the new stage's settings, today is recorded as its start, and the advisor is told." + when (s) {
+                "flower" -> " The light switches to 12 hours on and 12 off by itself: never turn it on during the dark hours."
+                "veg" -> " The light stays on 18 hours a day."
+                "drying" -> " The light stays off from now on."
+                "curing" -> " Lights, humidifier and exhaust go idle."
+                else -> ""
+            },
             "Change stage",
             onConfirm = {
                 scope.launch {
@@ -554,6 +580,29 @@ private fun SettingsMain(app: AppState, onBack: () -> Unit, onEditPlant: (Int) -
                 }
             },
             onDismiss = { pendingStage = null })
+    }
+    if (confirmReset) ConfirmDialog("Reset targets to the stage defaults?", "Your own changes and the advisor's tweaks for this stage are dropped.", "Reset", destructive = true,
+        onConfirm = {
+            scope.launch {
+                savingTargets = true
+                try { applyTargets(app.client.resetTargets()); app.refreshStatus() } catch (e: Throwable) { alertTitle = "Couldn't reset targets"; alertMessage = ApiError.wrap(e).message } finally { savingTargets = false }
+            }
+        },
+        onDismiss = { confirmReset = false })
+    if (confirmSetupAgain) ConfirmDialog("Set this phone up again?", "GrowOp forgets how to reach the tent on this phone. Scan the setup QR code again afterwards.", "Set up again", destructive = true,
+        onConfirm = { app.disconnect(); onBack() },
+        onDismiss = { confirmSetupAgain = false })
+    if (showLightPicker) {
+        val start = Formatting.parseHHmm(lightOn) ?: LocalTime.of(6, 0)
+        val lp = rememberTimePickerState(initialHour = start.hour, initialMinute = start.minute, is24Hour = true)
+        AlertDialog(
+            onDismissRequest = { showLightPicker = false },
+            containerColor = c.card,
+            title = { Text("Lights on at") },
+            text = { Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { TimePicker(state = lp) } },
+            confirmButton = { TextButton(onClick = { lightOn = Formatting.hhmm(LocalTime.of(lp.hour, lp.minute)); showLightPicker = false }) { Text("OK") } },
+            dismissButton = { TextButton(onClick = { showLightPicker = false }) { Text("Cancel") } },
+        )
     }
     if (showTimePicker) {
         val tp = rememberTimePickerState(initialHour = briefTime.hour, initialMinute = briefTime.minute, is24Hour = true)
