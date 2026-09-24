@@ -2,7 +2,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from grow_brain.controller import (ControlContext, DeviceInput, SensorSnapshot, decide, learn_gain, light_window)
+from grow_brain.controller import (ControlContext, DeviceInput, SensorSnapshot, decide, exchange_plan, humidity_aim, learn_gain,
+                                   light_window)
 from grow_brain.devices import automap, suggest_role
 from grow_brain.targets import Targets, apply_overrides, stage_defaults, vpd_kpa
 
@@ -211,11 +212,11 @@ def test_standby_turns_everything_off_but_respects_overrides():
 
 
 def test_humidifier_pulses_toward_the_band():
-    # veg band 55-65, target = 57. From 48: deficit 9 → 360 s at 1.5 pts/min → capped at 300 s
+    # veg band 55-65: aim a third of the way in, 58.3. From 48: deficit 10.3 → capped at 300 s
     d = decide(_ctx(25.0, 48.0))
     assert d["humidifier"].desired is True and "300 s pulse" in d["humidifier"].reason and d["humidifier"].tag == "humidifier"
-    # from 55.5: deficit 1.5 → 60 s minimum pulse
-    assert "60 s pulse" in decide(_ctx(25.0, 55.5))["humidifier"].reason
+    # from 57.0: deficit 1.3 → 60 s minimum pulse
+    assert "60 s pulse" in decide(_ctx(25.0, 57.0))["humidifier"].reason
     # inside the band: nothing
     assert decide(_ctx(25.0, 58.0))["humidifier"].desired is False
     # mid-pulse with a stale reading: keep going until the planned time
@@ -226,7 +227,7 @@ def test_humidifier_pulses_toward_the_band():
                     on_readings={"humidifier": 48.0}, on_tags={"humidifier": "humidifier"}))
     assert d["humidifier"].desired is False and d["humidifier"].tag == "humidifier_done"
     # the sensor caught up mid-pulse and shows the target: stop early
-    d = decide(_ctx(25.0, 57.5, states={"humidifier": "on"}, switched={"humidifier": NOW - timedelta(seconds=100)},
+    d = decide(_ctx(25.0, 58.5, states={"humidifier": "on"}, switched={"humidifier": NOW - timedelta(seconds=100)},
                     on_readings={"humidifier": 48.0}, on_tags={"humidifier": "humidifier"}))
     assert d["humidifier"].desired is False and d["humidifier"].tag == "humidifier_done"
     # resting after a pulse even though the reading is still low; ready again after LAG_S
@@ -257,11 +258,19 @@ def test_exhaust_waits_for_a_real_humidity_excess():
     assert decide(_ctx(25.0, 64.5, states={"exhaust_fan": "on"}))["exhaust_fan"].desired is False
 
 
-def test_seedlings_get_shorter_air_exchange():
+def test_fresh_air_swaps_are_sized_to_the_tent():
+    # seedlings need about 3 min of fresh air an hour; at 2 % RH lost per minute of swap, 90 s swaps (≈3 points
+    # each) every 30 min. Later stages keep 5 min every 20. A tent that barely loses humidity gets rarer, longer swaps.
+    assert exchange_plan("seedling", 2.0) == (90.0, 1800.0)
+    assert exchange_plan("veg", 2.0) == (300.0, 1200.0)
+    assert exchange_plan("seedling", 1.0) == (180.0, 3600.0)
+    assert exchange_plan("seedling", 6.0) == (90.0, 1800.0)       # never shorter than 90 s
+    # with no record of the last run, swaps follow the clock: on at 12:00:30, off by 12:02
     ctx = _ctx(25.0, 70.0, stage="seedling")
-    ctx.now_local = ctx.now_local.replace(minute=2)   # minute 2 of the 30-minute period → 3-minute pulse is on
-    assert decide(ctx)["exhaust_fan"].desired is True and "3 min every 30" in decide(ctx)["exhaust_fan"].reason
-    ctx.now_local = ctx.now_local.replace(minute=4)   # would still be on under the old 5-of-20 rule
+    ctx.now_local = ctx.now_local.replace(minute=0, second=30)
+    d = decide(ctx)["exhaust_fan"]
+    assert d.desired is True and "90 s every 30 min" in d.reason and d.tag == "exhaust_duty" and d.basis == 70.0
+    ctx.now_local = ctx.now_local.replace(minute=2)
     assert decide(ctx)["exhaust_fan"].desired is False
 
 
@@ -276,19 +285,66 @@ def test_humidifier_waits_while_the_exhaust_runs():
     assert d["humidifier"].desired is True
 
 
-def test_air_exchange_skipped_when_the_exhaust_just_ran():
-    at = NOW.replace(minute=1)   # inside the 3-minute window
-    ctx = _ctx(25.0, 70.0, stage="seedling", switched={"exhaust_fan": at - timedelta(minutes=4)})
-    ctx.now_local = at
-    assert decide(ctx)["exhaust_fan"].desired is False
-    ctx = _ctx(25.0, 70.0, stage="seedling", switched={"exhaust_fan": at - timedelta(minutes=15)})
-    ctx.now_local = at
-    assert decide(ctx)["exhaust_fan"].desired is True
-    # a running exchange is not cut short by its own start time
-    ctx = _ctx(25.0, 70.0, stage="seedling", states={"exhaust_fan": "on"}, switched={"exhaust_fan": at - timedelta(seconds=60)},
-               on_tags={"exhaust_fan": "exhaust_duty"})
-    ctx.now_local = at
-    assert decide(ctx)["exhaust_fan"].desired is True
+def test_fresh_air_is_counted_from_the_last_exhaust_run():
+    # the exhaust stopped 15 min ago (for any reason: a cooling pulse swaps air too) → next swap only after 28.5 min
+    assert decide(_ctx(25.0, 70.0, stage="seedling", switched={"exhaust_fan": NOW - timedelta(minutes=15)}))["exhaust_fan"].desired is False
+    assert decide(_ctx(25.0, 70.0, stage="seedling", switched={"exhaust_fan": NOW - timedelta(minutes=29)}))["exhaust_fan"].desired is True
+    # a running swap keeps going for its 90 s, then stops
+    run = dict(stage="seedling", states={"exhaust_fan": "on"}, on_tags={"exhaust_fan": "exhaust_duty"}, on_readings={"exhaust_fan": 70.0})
+    assert decide(_ctx(25.0, 70.0, switched={"exhaust_fan": NOW - timedelta(seconds=60)}, **run))["exhaust_fan"].desired is True
+    assert decide(_ctx(25.0, 70.0, switched={"exhaust_fan": NOW - timedelta(seconds=95)}, **run))["exhaust_fan"].desired is False
+
+
+def test_a_swap_waits_for_fresh_mist_to_settle():
+    due = {"exhaust_fan": NOW - timedelta(minutes=29)}
+    ctx = _ctx(25.0, 70.0, stage="seedling", switched={**due, "humidifier": NOW - timedelta(seconds=60)})
+    assert decide(ctx)["exhaust_fan"].desired is False          # the humidifier stopped a minute ago
+    ctx = _ctx(25.0, 70.0, stage="seedling", states={"humidifier": "on"}, switched={**due, "humidifier": NOW - timedelta(seconds=30)},
+               on_tags={"humidifier": "humidifier"}, on_readings={"humidifier": 69.0})
+    assert decide(ctx)["exhaust_fan"].desired is False          # still misting
+    ctx = _ctx(25.0, 70.0, stage="seedling", switched={"exhaust_fan": NOW - timedelta(minutes=40), "humidifier": NOW - timedelta(seconds=60)})
+    assert decide(ctx)["exhaust_fan"].desired is True           # but not forever: 10 min overdue goes anyway
+
+
+def test_humidifier_refills_right_after_a_swap():
+    # seedling band 60-75, aim 64. The swap started at 64 % and ran 95 s: at 2 %/min the air is now about 60.8 %,
+    # even though the lagging sensor still says 63.5 %. Refill straight away, sized from the prediction.
+    ending = dict(stage="seedling", states={"exhaust_fan": "on"}, switched={"exhaust_fan": NOW - timedelta(seconds=95)},
+                  on_tags={"exhaust_fan": "exhaust_duty"}, on_readings={"exhaust_fan": 64.0})
+    d = decide(_ctx(25.0, 63.5, **ending))
+    assert d["exhaust_fan"].desired is False
+    h = d["humidifier"]
+    assert h.desired is True and h.tag == "humidifier_ff" and abs(h.basis - 60.83) < 0.05 and "127 s pulse" in h.reason
+    # the refill runs its planned length even when the (lagging) sensor already reads the aim...
+    running = dict(stage="seedling", states={"humidifier": "on"}, switched={"humidifier": NOW - timedelta(seconds=100),
+                   "exhaust_fan": NOW - timedelta(seconds=100)}, on_tags={"humidifier": "humidifier_ff"}, on_readings={"humidifier": 60.83})
+    assert decide(_ctx(25.0, 64.5, **running))["humidifier"].desired is True
+    # ...and then ends with its own tag, so the runtime can learn from how it turned out
+    running["switched"]["humidifier"] = NOW - timedelta(seconds=130)
+    h = decide(_ctx(25.0, 62.0, **running))["humidifier"]
+    assert h.desired is False and h.tag == "humidifier_ff_done"
+    # no refill when the tent was high enough that the swap left it inside the aim
+    ending["on_readings"] = {"exhaust_fan": 70.0}
+    assert decide(_ctx(25.0, 69.0, **ending))["humidifier"].desired is False
+    # no refill while a hand override keeps the exhaust running
+    ending["on_readings"], ending["overrides"] = {"exhaust_fan": 64.0}, {"exhaust_fan": "on"}
+    assert decide(_ctx(25.0, 63.5, **ending))["humidifier"].desired is False
+
+
+def test_humidity_aim_sits_inside_the_band():
+    from grow_brain.targets import stage_defaults as sd
+    assert humidity_aim(sd("seedling"), 3.0) == 64.0      # 60-75: min + swap dip + 1
+    assert humidity_aim(sd("seedling"), 9.0) == 65.0      # never more than a third of the way in
+    assert humidity_aim(sd("veg"), 0.5) == 57.0           # at least 2 points in
+    assert humidity_aim(sd("flower"), 9.0, "flower") == 47.0   # flower: a floor just inside the minimum (mould)
+    # seedling tent at 63.5 %: under the aim's start point (63) not yet...
+    assert decide(_ctx(25.0, 63.5, stage="seedling", switched={"exhaust_fan": NOW - timedelta(minutes=5)}))["humidifier"].desired is False
+    # ...at 62.8 % a pulse starts (the old rule waited for 61 %)
+    d = decide(_ctx(25.0, 62.8, stage="seedling", switched={"exhaust_fan": NOW - timedelta(minutes=5)}))["humidifier"]
+    assert d.desired is True and "under the 64% aim" in d.reason
+    # at night there are no swaps to leave room for: back to just inside the minimum
+    d = decide(_ctx(25.0, 62.8, stage="seedling", lights_on=False, switched={"exhaust_fan": NOW - timedelta(minutes=5)}))["humidifier"]
+    assert d.desired is False and "within" in d.reason
 
 
 def test_latched_overheat_keeps_the_light_off_even_below_the_limit_and_with_a_dead_sensor():

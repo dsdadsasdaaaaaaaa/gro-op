@@ -639,3 +639,37 @@ async def test_settings_reply_includes_budget_and_models(client):
     assert s["advisor_budget_usd"] == 40.0 and s["humidifier_tank_hours"] == 4.0 and "claude-opus-5" in s["models_available"]
     s = (await c.put("/api/settings", json={"advisor_budget_usd": 25})).json()
     assert s["advisor_budget_usd"] == 25
+
+
+async def test_refill_after_a_swap_teaches_the_swap_drop(client):
+    c, ha, store, controller = client
+    from datetime import timedelta
+    from grow_brain.controller import LAG_S, ControlContext, Decision, SensorSnapshot
+    from grow_brain.store import utcnow
+    from grow_brain.targets import stage_defaults
+    t = stage_defaults("seedling")
+    now = utcnow()
+    ctx = ControlContext(now_local=now, stage="seedling", targets=t, day_targets=t, light_scheduled_on=True, lights_on=True,
+                         sensor=SensorSnapshot(24.5, 61.0, 1.0, None, now, False), safety_temp_max_c=35.0,
+                         safety_temp_min_c=12.0, exhaust_ducted=True, paused=False)
+    # a 90 s fresh-air swap ends, then its 2-minute refill ends
+    controller.on_tag["exhaust_fan"] = "exhaust_duty"
+    controller._note_switch("exhaust_fan", Decision("exhaust_fan", False, "swap done"), ctx, now - timedelta(seconds=90), now)
+    controller.on_tag["humidifier"], controller.on_reading["humidifier"] = "humidifier_ff", 61.0
+    controller._note_switch("humidifier", Decision("humidifier", False, "refill done", tag="humidifier_ff_done"), ctx,
+                            now, now + timedelta(seconds=120))
+    smp = controller._pending_samples[-1]
+    assert smp["role"] == "exchange" and smp["aim"] == 64.0 and abs(smp["swap_min"] - 1.5) < 0.01
+    # a sensor-lag later the tent reads 62 %, two points short of the aim: the swap removes more than assumed
+    smp["ended"] = utcnow() - timedelta(seconds=LAG_S + 10)
+    controller.sensor = SensorSnapshot(24.5, 62.0, 1.0, None, utcnow(), False)
+    await controller._learn(ctx)
+    assert controller.learned["exchange_rh_drop_per_min"] == 2.5        # one step, capped at 0.5
+    assert (await store.get_kv("learned"))["exchange_rh_drop_per_min"] == 2.5
+    evs = [e["message"] for e in (await c.get("/api/events", params={"limit": 20})).json()["events"]]
+    assert any(m.startswith("Learned: a fresh-air swap lowers humidity about 2.5") for m in evs)
+    # a refill that overshoots nudges it back down
+    controller._pending_samples.append({**smp, "ended": utcnow() - timedelta(seconds=LAG_S + 10), "on_at": utcnow()})
+    controller.sensor = SensorSnapshot(24.5, 65.0, 1.0, None, utcnow(), False)
+    await controller._learn(ctx)
+    assert controller.learned["exchange_rh_drop_per_min"] == 2.17

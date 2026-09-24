@@ -43,7 +43,6 @@ HUM_PULSE_S = (60, 300)   # shortest / longest humidifier pulse
 COOL_PULSE_S = (120, 360)  # shortest / longest exhaust cooling pulse
 WAY_TOO_HOT_C = 1.5       # this far above max the exhaust runs continuously instead of pulsing
 RH_EXHAUST_MARGIN = 3.0   # exhaust only dumps humidity this far above the max (mist settles on its own)
-DUTY_SKIP_S = 600         # skip a scheduled air exchange if the exhaust ran (for any reason) within this long
 UNAVAILABLE_ALERT_S = 180  # a mapped plug unreachable this long gets its own alert
 LOOP_FAIL_ALERT = 5        # consecutive failed control cycles before an alert
 LATCH_MIN_S = 900          # a tripped hard limit holds at least this long
@@ -51,9 +50,16 @@ CLIMATE_CHECK_S = 600     # how often to ask "can this tent actually hold its ta
 CLIMATE_DUTY_LIMIT = 0.40  # exhaust on more than this share of the last hour = the light is too hot for the band
 RH_CRITICAL = 85.0   # bud-rot territory; always dehumidify/exhaust above this
 STALE_AFTER_S = 30 * 60
-EXHAUST_DUTY_ON_MIN = 5
-EXHAUST_DUTY_PERIOD_MIN = 20
-EXHAUST_DUTY_SEEDLING = (3, 30)  # seedlings use little CO2; fewer pulses keep humidity up
+# Fresh air: minutes of exhaust per hour each stage needs (seedlings use almost no CO2; later stages
+# also need the exhaust for heat and humidity, which counts too). Any exhaust run resets the clock.
+FRESH_AIR_MIN_PER_H = {"seedling": 3.0}
+FRESH_AIR_DEFAULT_MIN_PER_H = 15.0
+SWAP_DIP_PTS = 3.0             # size each fresh-air swap so it costs about this much humidity...
+SWAP_S = (90, 300)             # ...within these limits
+SWAP_MIN_PERIOD_MIN = 20       # and never more than three swaps an hour (plug relays)
+SWAP_OVERDUE_S = 600           # a swap waits for fresh mist to settle, but not longer than this
+MIST_SETTLE_S = 120            # don't swap out mist that is still in the air
+EXCHANGE_DROP_DEFAULT = 2.0    # % RH lost per minute of fresh-air swap; learned from how each refill turns out
 
 
 @dataclass
@@ -98,6 +104,7 @@ class Decision:
     reason: str
     force: bool = False
     tag: Optional[str] = None  # pulse bookkeeping: "<what>" when starting a pulse, "<what>_done" when ending one
+    basis: Optional[float] = None  # the reading a pulse is sized from, when that isn't the sensor's current value
 
 
 @dataclass
@@ -117,6 +124,7 @@ class ControlContext:
     standby: bool = False
     hum_gain: float = HUM_GAIN_DEFAULT    # learned humidifier strength, % RH per minute
     cool_gain: float = COOL_GAIN_DEFAULT  # learned exhaust cooling, °C per minute
+    exchange_drop: float = EXCHANGE_DROP_DEFAULT  # learned humidity lost per minute of fresh-air swap
     safety_latch: Optional[str] = None    # "hot" / "cold": a hard limit tripped and the tent hasn't recovered yet
 
 
@@ -178,9 +186,9 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
     have = lambda r: r in ctx.devices and ctx.devices[r].entity_id
     is_on = lambda r: ctx.devices[r].state == "on" if have(r) else False
 
-    def set_(role, desired, reason, force=False, tag=None):
+    def set_(role, desired, reason, force=False, tag=None, basis=None):
         if have(role):
-            d[role] = Decision(role, desired, reason, force, tag)
+            d[role] = Decision(role, desired, reason, force, tag, basis)
 
     fresh = not s.stale and temp is not None and rh is not None
     hot = ctx.safety_latch == "hot" or (fresh and temp >= ctx.safety_temp_max_c)
@@ -249,20 +257,32 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
     # --- exhaust: cooling pulses, humidity dump, plus a baseline air-exchange duty while lights on ---
     ex_tag = ctx.devices["exhaust_fan"].on_tag if "exhaust_fan" in ctx.devices else None
     exhaust_humid = rh > t.humidity_max + RH_EXHAUST_MARGIN or (is_on("exhaust_fan") and ex_tag == "exhaust_humid" and rh > t.humidity_max)
-    duty_on, duty_period = EXHAUST_DUTY_SEEDLING if ctx.stage == "seedling" else (EXHAUST_DUTY_ON_MIN, EXHAUST_DUTY_PERIOD_MIN)
-    minute_of_period = (ctx.now_local.hour * 60 + ctx.now_local.minute) % duty_period
     growing = ctx.stage not in ("curing", "done")
     ex = ctx.devices.get("exhaust_fan")
-    # A cooling pulse already exchanged the air: don't dump the humidity a second time.
-    recently_ran = ex is not None and ex.last_switched is not None and \
-        (ctx.now_local - ex.last_switched).total_seconds() < DUTY_SKIP_S
-    duty_window = (ctx.lights_on or ctx.stage == "drying") and minute_of_period < duty_on and growing
-    duty = duty_window and ((is_on("exhaust_fan") and ex is not None and ex.on_tag == "exhaust_duty") or not recently_ran)
+    # Fresh air in short swaps sized to this tent, counted from the last time the exhaust ran for any reason
+    # (a cooling pulse already swapped the air, so it isn't dumped a second time).
+    swap_s, period_s = exchange_plan(ctx.stage, ctx.exchange_drop)
+    since_ex = (ctx.now_local - ex.last_switched).total_seconds() if ex is not None and ex.last_switched else None
+    window = (ctx.lights_on or ctx.stage == "drying") and growing
+    hum_dev = ctx.devices.get("humidifier")
+    if is_on("exhaust_fan") and ex_tag == "exhaust_duty":
+        duty = window and (since_ex is None or since_ex < swap_s)
+    elif since_ex is None:
+        # no record of the exhaust's last run (fresh install): swap on the clock until there is one
+        sec_of_day = ctx.now_local.hour * 3600 + ctx.now_local.minute * 60 + ctx.now_local.second
+        duty = window and not is_on("exhaust_fan") and sec_of_day % period_s < swap_s
+    else:
+        due = since_ex >= period_s - swap_s
+        misting = hum_dev is not None and bool(hum_dev.entity_id) and (hum_dev.state == "on" or (
+            hum_dev.last_switched is not None and (ctx.now_local - hum_dev.last_switched).total_seconds() < MIST_SETTLE_S))
+        overdue = since_ex >= period_s - swap_s + SWAP_OVERDUE_S
+        duty = window and not is_on("exhaust_fan") and due and (not misting or overdue)
+    swap_text = f"{swap_s / 60:g} min" if swap_s % 60 == 0 else f"{swap_s:.0f} s"
     ducted_note = "" if ctx.exhaust_ducted else " (not ducted outside yet: limited effect)"
     cooling = temp > t.temp_max_c or (is_on("exhaust_fan") and ex is not None and ex.on_tag == "exhaust_cool")
     cool = None
     if cooling and ex is not None and temp < t.temp_max_c + WAY_TOO_HOT_C:
-        start_temp = ex.on_reading if ex.on_reading is not None else temp
+        start_temp = ex.on_reading if ex.on_reading is not None and ex.on_tag == "exhaust_cool" else temp
         cool = _pulse(ex, ctx.now_local, temp - t.temp_max_c + 0.5, start_temp - t.temp_max_c + 0.5,
                       ctx.cool_gain, COOL_PULSE_S, "exhaust_cool", s.updated_at)
     if rh >= RH_CRITICAL:
@@ -276,7 +296,7 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
     elif too_cold and not too_humid:
         set_("exhaust_fan", False, f"{temp:.1f}°C below min {t.temp_min_c:g}°C, keeping heat in")
     elif duty:
-        set_("exhaust_fan", True, f"fresh-air exchange ({duty_on} min every {duty_period})", tag="exhaust_duty")
+        set_("exhaust_fan", True, f"fresh-air swap ({swap_text} every {period_s / 60:.0f} min)", tag="exhaust_duty", basis=rh)
     else:
         set_("exhaust_fan", False, f"{temp:.1f}°C / {rh:.1f}% RH within targets")
     if "exhaust_fan" in d:
@@ -305,9 +325,13 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
         set_("humidifier", False, "too humid")
     else:
         set_("dehumidifier", False, f"RH {rh:.1f}% within {t.humidity_min:g}–{t.humidity_max:g}%")
-        # Humidifier: pulse, then wait for the slow sensor, topping up to just inside the band.
-        # (No pre-loading before an air exchange: the exchange replaces the tent air, so that water goes straight out.)
-        start_below, target, why = t.humidity_min + 1.0, t.humidity_min + 2.0, "below min"
+        # Humidifier: pulse, then wait for the slow sensor, topping up to an aim far enough inside the band that a
+        # fresh-air swap doesn't take the tent below the minimum. Right after a swap it refills straight away, sized
+        # from what the swap is known to remove, because the sensor takes minutes to show the drop.
+        # (No pre-loading before a swap: the swap replaces the tent air, so that water would go straight out.)
+        # (no swaps at night, so nothing to leave room for: the aim drops back to just inside the minimum)
+        target = humidity_aim(t, ctx.exchange_drop * swap_s / 60.0 if window else 0.0, ctx.stage)
+        start_below, why = target - 1.0, f"under the {target:g}% aim"
         hum = ctx.devices.get("humidifier")
         ex_dec = d.get("exhaust_fan")
         ex_dev = ctx.devices.get("exhaust_fan")
@@ -317,8 +341,26 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
             exhaust_now = is_on("exhaust_fan")
         else:
             exhaust_now = ex_dec.desired if ex_dec is not None and ex_dec.desired is not None else is_on("exhaust_fan")
+        # the swap ends this cycle (and nothing, like a hand override or a pause, keeps the exhaust running)
+        swap_ending = (ex_dev is not None and ex_dev.state == "on" and ex_dev.on_tag == "exhaust_duty"
+                       and ex_dec is not None and ex_dec.desired is False and not exhaust_now)
         if hum is None or not hum.entity_id:
             pass
+        elif is_on("humidifier") and hum.on_tag == "humidifier_ff":
+            # the refill runs its planned length: the lagging sensor may not show the swap's drop yet
+            basis = hum.on_reading if hum.on_reading is not None else rh
+            on, note, tag = _pulse(hum, ctx.now_local, 0.0, target - basis, ctx.hum_gain, HUM_PULSE_S, "humidifier_ff", s.updated_at)
+            set_("humidifier", on, f"refilling after the fresh-air swap ({note})", tag=tag)
+        elif swap_ending and not is_on("humidifier"):
+            before = ex_dev.on_reading if ex_dev.on_reading is not None else rh
+            swapped_min = (since_ex if since_ex is not None else swap_s) / 60.0
+            predicted = min(rh, before - ctx.exchange_drop * swapped_min)
+            if predicted < target - 0.5:
+                secs = max(HUM_PULSE_S[0], min(HUM_PULSE_S[1], (target - predicted) / max(ctx.hum_gain, 0.01) * 60.0))
+                set_("humidifier", True, f"refilling after the fresh-air swap: about {predicted:.0f}% now, aiming for "
+                                         f"{target:g}% ({secs:.0f} s pulse)", tag="humidifier_ff", basis=predicted)
+            else:
+                set_("humidifier", False, f"RH {rh:.1f}%: the fresh-air swap didn't need a refill")
         elif is_on("humidifier") and rh >= target:
             set_("humidifier", False, f"RH {rh:.1f}% reached {target:g}%", tag="humidifier_done")
         elif not is_on("humidifier") and rh < start_below and exhaust_now:
@@ -345,6 +387,27 @@ def _hot_safety(ctx: ControlContext, set_, temp: Optional[float]) -> None:
     set_("heater", False, why, force=True)
     set_("humidifier", False, why, force=True)
     set_("dehumidifier", False, why + " (a dehumidifier adds heat)", force=True)
+
+
+def exchange_plan(stage: str, drop_per_min: float) -> tuple[float, float]:
+    """(swap seconds, period seconds) for the baseline fresh-air swap: enough fresh air for the stage, in swaps
+    short enough that each costs about SWAP_DIP_PTS of humidity, and never more than three an hour."""
+    need = FRESH_AIR_MIN_PER_H.get(stage, FRESH_AIR_DEFAULT_MIN_PER_H)
+    swap_min = max(SWAP_DIP_PTS / max(drop_per_min, 0.3), need * SWAP_MIN_PERIOD_MIN / 60.0)
+    swap_s = round(min(max(swap_min * 60.0, SWAP_S[0]), SWAP_S[1]) / 10.0) * 10.0
+    period_s = max(SWAP_MIN_PERIOD_MIN * 60.0, swap_s * 60.0 / need)
+    return swap_s, period_s
+
+
+def humidity_aim(t: Targets, swap_dip: float, stage: str = "seedling") -> float:
+    """Where the humidifier fills to: far enough inside the band that a fresh-air swap doesn't take the tent below
+    the minimum, but never more than a third of the way in. From flower on it stays just inside the minimum:
+    buds want the drier side of the band (mould), and the humidifier is only a floor there."""
+    if stage in ("flower", "flush", "drying"):
+        return round(t.humidity_min + 2.0, 1)
+    band = max(0.0, t.humidity_max - t.humidity_min)
+    margin = min(max(2.0, swap_dip + 1.0), max(2.0, band / 3.0))
+    return round(t.humidity_min + margin, 1)
 
 
 def _pulse(dev: DeviceInput, now: datetime, deficit_now: float, deficit_at_start: float, gain_per_min: float,
@@ -427,6 +490,7 @@ class Controller:
         self.on_tag: dict[str, str] = {}
         self.learned: dict = {}            # {"humidifier_pts_per_min": x, "exhaust_c_per_min": y}
         self._pending_samples: list[dict] = []
+        self._last_swap_min: Optional[float] = None   # how long the last fresh-air swap ran
         self._restored = False
         self._climate_checked_at: Optional[datetime] = None
         self._climate_alert = False
@@ -563,6 +627,7 @@ class Controller:
             light_scheduled_on=scheduled_on, lights_on=lights_on, sensor=self.sensor,
             hum_gain=float(self.learned.get("humidifier_pts_per_min") or HUM_GAIN_DEFAULT),
             cool_gain=float(self.learned.get("exhaust_c_per_min") or COOL_GAIN_DEFAULT),
+            exchange_drop=float(self.learned.get("exchange_rh_drop_per_min") or EXCHANGE_DROP_DEFAULT),
             safety_temp_max_c=float(settings["safety_temp_max_c"]), safety_temp_min_c=float(settings["safety_temp_min_c"]),
             exhaust_ducted=bool(profile.get("exhaust_ducted")), paused=bool(await self.paused_until()),
             devices=devices, standby=await self.standby(),
@@ -727,6 +792,8 @@ class Controller:
             iv = max(min_iv, 300) if role in ("dehumidifier", "cooler") else min_iv
             if role == "humidifier":
                 iv = min(iv, 60)  # an ultrasonic humidifier is happy to pulse; this is what makes the pulses short
+            elif role == "exhaust_fan" and not dec.desired and dev.on_tag == "exhaust_duty":
+                iv = min(iv, 60)  # fresh-air swaps are sized in seconds; the fan doesn't mind
             last = self.last_switched.get(role)
             if last and not dec.force and (now - last).total_seconds() < iv:
                 self.last_reasons[role] = dec.reason + " (waiting for minimum switch interval)"
@@ -837,6 +904,8 @@ class Controller:
     # ---- pulse learning: how strong are the humidifier and the exhaust in *this* tent? ----
     def _note_switch(self, role: str, dec: Decision, ctx: ControlContext, on_at: Optional[datetime], now: datetime) -> None:
         reading = self.sensor.humidity if role == "humidifier" else self.sensor.temp_c
+        if dec.basis is not None:
+            reading = dec.basis
         if dec.desired:
             if reading is not None:
                 self.on_reading[role] = reading
@@ -845,6 +914,16 @@ class Controller:
             return
         start = self.on_reading.pop(role, None)
         tag = self.on_tag.pop(role, None)
+        if role == "exhaust_fan" and tag == "exhaust_duty" and on_at is not None:
+            self._last_swap_min = (now - on_at).total_seconds() / 60.0
+        if role == "humidifier" and tag == "humidifier_ff" and dec.tag == "humidifier_ff_done" and on_at is not None:
+            swap_s, _ = exchange_plan(ctx.stage, ctx.exchange_drop)
+            self._pending_samples.append({
+                "role": "exchange", "aim": humidity_aim(ctx.targets, ctx.exchange_drop * swap_s / 60.0, ctx.stage),
+                "swap_min": self._last_swap_min or swap_s / 60.0, "on_at": on_at, "ended": now,
+                "lights_on": ctx.lights_on,
+            })
+            return
         if dec.tag in ("humidifier_done", "exhaust_cool_done") and start is not None and on_at is not None \
                 and tag in ("humidifier", "exhaust_cool"):
             minutes = (now - on_at).total_seconds() / 60.0
@@ -866,6 +945,23 @@ class Controller:
                 continue
             if self.sensor.updated_at is not None and self.sensor.updated_at <= smp["ended"]:
                 keep.append(smp)          # no reading since the pulse ended yet
+                continue
+            if smp["role"] == "exchange":
+                # How did the refill after a fresh-air swap turn out? Short of the aim: the swap removes more than
+                # assumed; past it: less. Nudge the learned drop (this also soaks up the slow drift after a refill).
+                ex_last = self.last_switched.get("exhaust_fan")
+                if (ex_last and ex_last > smp["on_at"]) or self.sensor.humidity is None or ctx.lights_on != smp["lights_on"]:
+                    continue
+                cur = float(self.learned.get("exchange_rh_drop_per_min") or EXCHANGE_DROP_DEFAULT)
+                step = max(-0.5, min(0.5, 0.5 * (smp["aim"] - self.sensor.humidity) / max(smp["swap_min"], 0.5)))
+                new = round(min(6.0, max(0.3, cur + step)), 2)
+                if new != self.learned.get("exchange_rh_drop_per_min"):
+                    first = "exchange_rh_drop_per_min" not in self.learned
+                    self.learned["exchange_rh_drop_per_min"] = new
+                    changed = True
+                    if first:
+                        await self.store.add_event("info", "system", "Learned: a fresh-air swap lowers humidity about "
+                                                                     f"{new:.1f} points per minute")
                 continue
             if smp["role"] == "humidifier":
                 ex_last = self.last_switched.get("exhaust_fan")

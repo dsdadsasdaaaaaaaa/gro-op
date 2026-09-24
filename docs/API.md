@@ -7,7 +7,7 @@ All timestamps are ISO-8601 UTC strings. All temperatures are returned in BOTH �
 Errors: non-2xx with JSON `{"detail": "human readable message"}`.
 
 ## GET /api/health   (no auth)
-`{"ok": true, "version": "0.8.4", "ha_connected": true, "advisor_enabled": true, "control": "ok", "last_cycle_at": "...", "consecutive_failures": 0}`.
+`{"ok": true, "version": "0.8.5", "ha_connected": true, "advisor_enabled": true, "control": "ok", "last_cycle_at": "...", "consecutive_failures": 0}`.
 Returns **503** with `ok:false` when the control loop has stopped or is stuck (used by the Supervisor watchdog; turn the add-on's Watchdog toggle on).
 
 ## GET /api/status
@@ -218,7 +218,7 @@ Brief:
 ## POST /api/control/start → `{"standby": false}` — fully automatic again: clears standby, pause and all manual overrides.
 Status includes `"control_paused_until": null | "..."` and `"standby": true|false`. `alerts[]` items carry `kind`; safety/device/climate/system problems stay listed until they clear themselves, advisor warnings for 24 h. Safety, sensor, plug and climate alerts are also pushed to every plant owner's phone.
 
-Status also includes `"learned": {"humidifier_pts_per_min": 1.8, "exhaust_c_per_min": 0.3}` (0.6.0): the controller runs the humidifier and the exhaust cooling in **pulses** sized to the deficit, waits five minutes for the slow tent sensor, and learns each device's strength from every pulse. Keys are absent until the first clean measurement.
+Status also includes `"learned": {"humidifier_pts_per_min": 1.8, "exhaust_c_per_min": 0.3, "exchange_rh_drop_per_min": 2.3}` (0.6.0; the swap drop since 0.8.5): the controller runs the humidifier and the exhaust cooling in **pulses** sized to the deficit, waits five minutes for the slow tent sensor, and learns each device's strength from every pulse. Keys are absent until the first clean measurement.
 ## GET /api/plan → the grow roadmap (phases with status done/current/upcoming, dates, what/watch_for/environment).
 
 ## Plants (v0.2.0): two plants, two people, one shared tent
@@ -282,4 +282,9 @@ Every request may carry `X-Device-Id: <random id per phone/browser>`; it keeps t
 - `models_available`: the models `model` may be set to.
 - `humidifier_tank_hours` (default 4): hours of misting one tank lasts.
 - `admin_notify_service`: the phone that gets "update the add-on" notices (default: the first plant's phone).
+
+**Humidity and fresh air (0.8.5)**
+- Fresh air comes in short swaps sized so each costs about 3 points of humidity (from the learned `exchange_rh_drop_per_min`), enough minutes per hour for the stage (seedling 3, later 15), at most three an hour, counted from the last time the exhaust ran for any reason, and never while fresh mist is still settling.
+- The humidifier fills to an aim a few points inside the band (seedling/veg: minimum + the swap's dip + 1, at most a third of the way in; flower/flush/drying: minimum + 2), and refills straight after each swap, sized from the predicted (not the lagging) humidity.
+- After each refill the add-on compares where the tent ended up with the aim and nudges the learned swap drop, so the refills size themselves to the tent.
 
