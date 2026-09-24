@@ -221,3 +221,50 @@ def test_sdk_accepts_the_arguments_the_advisor_sends():
         assert name in params, name
     assert "fallbacks" in params or any(p.kind == p.VAR_KEYWORD for p in params.values())
     assert hasattr(client, "with_options")
+
+
+async def test_a_new_camera_check_replaces_the_old_warning(env):
+    store, adv, fake = env
+    import io
+    from PIL import Image
+    buf = io.BytesIO(); Image.new("RGB", (64, 48), (40, 90, 40)).save(buf, "JPEG")
+
+    class Cam:
+        async def snapshot(self, max_age_s=0):
+            return buf.getvalue()
+
+        async def info(self):
+            return None
+
+        async def latest_frame_for_advisor(self):
+            return None
+    adv.camera = Cam()
+    await store.add_event("warn", "advisor", "Camera check: Camera can't see either plant")
+    fake.next = PhotoAnalysisOut.model_validate(DEFAULTS[PhotoAnalysisOut])   # healthy, nothing to report
+    await adv.camera_check()
+    open_warns = [e for e in await store.events(50, min_level="warn") if e["message"].startswith("Camera check")]
+    assert open_warns == []
+    # a check that does find something shows only today's finding
+    fake.next = PhotoAnalysisOut.model_validate({**DEFAULTS[PhotoAnalysisOut], "health_score": 5,
+                                                 "findings": [{"title": "Soil looks dry", "severity": "warn", "detail": "x"}]})
+    await adv.camera_check()
+    await adv.camera_check()
+    open_warns = [e["message"] for e in await store.events(50, min_level="warn") if e["message"].startswith("Camera check")]
+    assert open_warns == ["Camera check: Soil looks dry"]
+
+
+
+async def test_camera_check_replaces_the_previous_warning(env):
+    store, adv, fake = env
+    import io
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 48), (40, 120, 40)).save(buf, "JPEG")
+
+    async def snap(max_age_s=0):
+        return buf.getvalue()
+    adv.camera = SimpleNamespace(snapshot=snap)
+    await store.add_event("warn", "advisor", "Camera check: Camera can't see the plants")
+    await adv.camera_check()      # the stub's answer: healthy, nothing wrong
+    left = [e for e in await store.events(50, min_level="warn") if e["message"].startswith("Camera check")]
+    assert not left

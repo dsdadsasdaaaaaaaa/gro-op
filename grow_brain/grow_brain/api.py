@@ -693,9 +693,30 @@ async def create_log(body: LogCreate, request: Request):
     return {"entry": entry, "advice": advice}
 
 
+DOME_OFF_DETAIL = ("Lift the clear cup or bag off once the first true leaves (the first jagged pair, not the round starter "
+                   "leaves) are open. Leaving it on longer invites mould at the soil line. No dome on this cup? Just tick this off.")
+
+
+async def _dome_reminder(st, plant_id: Optional[int]) -> Optional[int]:
+    """'Take the dome off …' four days out, once per plant (never a second copy while one is open)."""
+    plant = await st.store.get_plant(plant_id) if plant_id else None
+    title = f"Take the dome off {plant['name'] if plant else 'the seedlings'}"
+    if title in {x["title"] for x in await st.store.tasks("open")}:
+        return None
+    tz = st.controller.tz(await st.controller.settings())
+    due = (datetime.now(tz).date() + timedelta(days=4)).isoformat()
+    t = await st.store.add_task(title, DOME_OFF_DETAIL, due, "normal", "system", plant_id)
+    return t["id"]
+
+
 async def _after_log(st, kind: str, plant_id: Optional[int]) -> list[int]:
     """Follow-ups the app handles itself, so nobody has to remember them. Returns the ids of tasks it added."""
     added: list[int] = []
+    if kind == "planted" and plant_id:
+        # every seedling starts under a dome here, so every planting gets the reminder to take it off
+        tid = await _dome_reminder(st, plant_id)
+        if tid:
+            added.append(tid)
     if kind == "transplant":
         profile = await st.controller.profile()
         if profile.get("stage") == "seedling":
@@ -711,7 +732,7 @@ async def _after_log(st, kind: str, plant_id: Optional[int]) -> list[int]:
 
 # A tick that is undone within this long also takes back what the tick added (its log line and follow-up tasks).
 UNDO_WINDOW_S = 600
-_DOME_ON = re.compile(r"\b(put|place|cover|dome on)\b.*\bdome\b|\bdome\b.*\b(on|over)\b")
+_DOME_ON = re.compile(r"\b(put|place|set)\b.*\bdome\b|\bcover\b|\bdome (on|over)\b")
 
 
 @router.get("/log", dependencies=auth)
@@ -745,17 +766,10 @@ async def complete_task(tid: int, request: Request):
         entry = await st.store.add_log_entry(kind, None, None, "task", f"Done: {title}", t.get("plant_id"))
         added = await _after_log(st, kind, t.get("plant_id"))
         # Only "put the dome on" jobs get the reminder to take it off again (not "check the dome for condensation").
-        if _DOME_ON.search(low) and "off" not in low:
-            plant = await st.store.get_plant(t["plant_id"]) if t.get("plant_id") else None
-            whose = f"{plant['name']}" if plant else "the seedlings"
-            follow = f"Take the dome off {whose}"
-            if follow not in {x["title"] for x in await st.store.tasks("open")}:
-                tz = st.controller.tz(await st.controller.settings())
-                due = (datetime.now(tz).date() + timedelta(days=4)).isoformat()
-                ft = await st.store.add_task(follow, "Lift the clear cup or bag off once the first true leaves "
-                                             "(the first jagged pair, not the round starter leaves) are open. Leaving it on longer "
-                                             "invites mould at the soil line.", due, "normal", "system", t.get("plant_id"))
-                added.append(ft["id"])
+        if _DOME_ON.search(low) and "dome" in low and "off" not in low:
+            tid2 = await _dome_reminder(st, t.get("plant_id"))
+            if tid2:
+                added.append(tid2)
         # Remembered briefly so an Undo can take these back; older entries are dropped as new ones arrive.
         effects = {k: v for k, v in (await st.store.get_kv("task_done_effects", {}) or {}).items()
                    if time.time() - float(v.get("at") or 0) <= UNDO_WINDOW_S}
@@ -1028,7 +1042,9 @@ async def camera_analyse(body: CameraAnalyse, request: Request):
                                                 "health_score": 0, "findings": [], "actions": [], "photo_requests": [], "tasks": []})
     else:
         try:
-            await st.advisor.analyse_photo(pid, path, "image/jpeg", None, "Live snapshot from the fixed tent camera (wide view of the whole tent)." + (f" Grower's note: {note}" if note else ""), body.plant_id)
+            a = await st.advisor.analyse_photo(pid, path, "image/jpeg", None, "Live snapshot from the fixed tent camera (wide view of the whole tent)." + (f" Grower's note: {note}" if note else ""), body.plant_id)
+            if not any((f or {}).get("severity") in ("warn", "alert") for f in (a or {}).get("findings") or []):
+                await st.store.resolve_alerts("advisor", "Camera check")   # a clean fresh look replaces the morning's warning
         except AdvisorError as e:
             await st.store.set_photo_analysis(pid, {"summary": str(e), "health_score": 0, "findings": [], "actions": [], "photo_requests": [], "tasks": []})
     return _photo_api(await st.store.get_photo(pid))

@@ -7,7 +7,7 @@ All timestamps are ISO-8601 UTC strings. All temperatures are returned in BOTH �
 Errors: non-2xx with JSON `{"detail": "human readable message"}`.
 
 ## GET /api/health   (no auth)
-`{"ok": true, "version": "0.8.3", "ha_connected": true, "advisor_enabled": true, "control": "ok", "last_cycle_at": "...", "consecutive_failures": 0}`.
+`{"ok": true, "version": "0.8.4", "ha_connected": true, "advisor_enabled": true, "control": "ok", "last_cycle_at": "...", "consecutive_failures": 0}`.
 Returns **503** with `ok:false` when the control loop has stopped or is stuck (used by the Supervisor watchdog; turn the add-on's Watchdog toggle on).
 
 ## GET /api/status
@@ -265,7 +265,8 @@ Every request may carry `X-Device-Id: <random id per phone/browser>`; it keeps t
 - LogEntry gains `advice_steps` and `urgency`. Ticking a task writes a `note` entry with `context: "task"` and `note: "Done: <title>"`.
 
 **Tasks**
-- `POST /api/tasks/{id}/complete` may add follow-ups (a "put the dome on" task schedules "Take the dome off …" four days later).
+- `POST /api/tasks/{id}/complete` may add follow-ups. Every planting (a `planted` log entry, or ticking a "Plant … seed" task) and every "put the dome on" task schedules "Take the dome off <plant>" four days later, once per plant.
+- Each daily camera check replaces the previous one's warning; a clean "look now" (`POST /api/camera/analyse`) clears it too.
 - `POST /api/tasks/{id}/reopen` within 10 minutes of the tick (the apps' Undo) also removes that tick's "Done:" log line and any follow-up task it created that is still open.
 
 **Chat**

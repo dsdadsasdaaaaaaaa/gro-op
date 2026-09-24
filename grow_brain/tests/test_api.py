@@ -533,22 +533,38 @@ async def test_quick_log_task_followups_chat_authors_and_refill(client):
     # logging is instant and free unless the advisor is asked
     r = (await c.post("/api/log", json={"kind": "water", "value": 0.05, "unit": "L", "plant_id": ps[0]["id"]})).json()
     assert "next daily brief" in r["advice"]["summary"]
-    # ticking "Plant ... seed" records the planting; ticking a dome task schedules taking it off
+    # ticking "Plant ... seed" records the planting, and every planting gets its dome reminder
     t = (await c.post("/api/tasks", json={"title": "Plant Levi's seed when its root shows", "plant_id": ps[0]["id"]})).json()
     await c.post(f"/api/tasks/{t['id']}/complete")
     assert any(e["kind"] == "planted" for e in (await c.get("/api/log")).json()["entries"])
-    d = (await c.post("/api/tasks", json={"title": "Put a clear dome over Levi's cup", "plant_id": ps[0]["id"]})).json()
+    def domes():
+        return [x for x in tasks_now if x["title"].startswith("Take the dome off")]
+    tasks_now = (await c.get("/api/tasks")).json()["tasks"]
+    assert [x["title"] for x in domes()] == ["Take the dome off Levi's plant"]
+    # ...a dome task for the same plant doesn't add a second copy
+    d0 = (await c.post("/api/tasks", json={"title": "Put a clear dome over Levi's cup", "plant_id": ps[0]["id"]})).json()
+    await c.post(f"/api/tasks/{d0['id']}/complete")
+    tasks_now = (await c.get("/api/tasks")).json()["tasks"]
+    assert len(domes()) == 1
+    # a dome put on Dad's cup schedules taking it off; an Undo right after the tick takes that back with its log line
+    d = (await c.post("/api/tasks", json={"title": "Put a clear dome over Dad's cup", "plant_id": ps[1]["id"]})).json()
     await c.post(f"/api/tasks/{d['id']}/complete")
-    assert any(x["title"].startswith("Take the dome off") for x in (await c.get("/api/tasks")).json()["tasks"])
-    # an Undo right after the tick takes back its "Done:" log line and the follow-up it made
+    tasks_now = (await c.get("/api/tasks")).json()["tasks"]
+    assert "Take the dome off Dad's plant" in [x["title"] for x in domes()]
     await c.post(f"/api/tasks/{d['id']}/reopen")
-    titles = [x["title"] for x in (await c.get("/api/tasks")).json()["tasks"]]
-    assert d["title"] in titles and not any(x.startswith("Take the dome off") for x in titles)
+    tasks_now = (await c.get("/api/tasks")).json()["tasks"]
+    assert d["title"] in [x["title"] for x in tasks_now] and [x["title"] for x in domes()] == ["Take the dome off Levi's plant"]
     assert not any((e.get("note") or "") == f"Done: {d['title']}" for e in (await c.get("/api/log")).json()["entries"])
     # checking on the dome is not putting one on
-    k = (await c.post("/api/tasks", json={"title": "Check the dome for condensation"})).json()
-    await c.post(f"/api/tasks/{k['id']}/complete")
-    assert not any(x["title"].startswith("Take the dome off") for x in (await c.get("/api/tasks")).json()["tasks"])
+    for title in ("Check the dome for condensation", "Check the dome for condensation on the lid"):
+        k = (await c.post("/api/tasks", json={"title": title, "plant_id": ps[1]["id"]})).json()
+        await c.post(f"/api/tasks/{k['id']}/complete")
+    tasks_now = (await c.get("/api/tasks")).json()["tasks"]
+    assert [x["title"] for x in domes()] == ["Take the dome off Levi's plant"]
+    # logging a planting from the Log tab does the same for Dad's plant
+    await c.post("/api/log", json={"kind": "planted", "plant_id": ps[1]["id"]})
+    tasks_now = (await c.get("/api/tasks")).json()["tasks"]
+    assert sorted(x["title"] for x in domes()) == ["Take the dome off Dad's plant", "Take the dome off Levi's plant"]
     # transplanting while still a seedling asks for the stage change
     await c.post("/api/log", json={"kind": "transplant", "plant_id": ps[0]["id"]})
     assert any(x["title"] == "Switch the stage to Veg" for x in (await c.get("/api/tasks")).json()["tasks"])

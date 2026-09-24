@@ -1,3 +1,3 @@
-**Build:** `cd "/Users/levisilverberg/gro op/android" && JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home ./gradlew assembleDebug` → `app/build/outputs/apk/debug/app-debug.apk` (JDK 17 required; the default Java on this Mac is 26).
+**Build:** `cd android && JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home ./gradlew assembleDebug` → `app/build/outputs/apk/debug/app-debug.apk` (JDK 17 required; the default Java on this Mac is 26).
 **Install on the Samsung phone:** get `app-debug.apk` onto the phone (email it to yourself, Google Drive, or a USB cable), open it from the My Files app, allow "install unknown apps" when asked, then tap Install.
 **Connecting:** "Same Wi‑Fi" mode only works while the phone is on the home network (it talks straight to `http://<host>:8099`); use "Through Home Assistant" (Nabu Casa address + long-lived token + API key) to use the app away from home.

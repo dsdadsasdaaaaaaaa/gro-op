@@ -482,6 +482,7 @@ class Advisor:
         await self.store.set_photo_analysis(pid, analysis)
         serious = [f for f in out.findings if f.severity in ("warn", "alert")]
         urgent = [f for f in out.findings if f.severity == "alert"]
+        await self.store.resolve_alerts("advisor", "Camera check")   # today's check replaces yesterday's findings
         if serious or out.health_score < 6:
             msg = "; ".join(f.title for f in serious) or out.summary
             await self.store.add_event("warn", "advisor", f"Camera check: {msg}")
