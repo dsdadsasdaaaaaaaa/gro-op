@@ -6,6 +6,7 @@
 //   HA_TOKEN            Home Assistant long-lived access token (admin)
 //   GROW_API_KEY        the add-on's api_key
 //   DASHBOARD_PASSWORD  what the dashboard's "key" field must contain
+//   DASHBOARD_PASSWORD_DAD  optional second password (Dad's own), accepted the same way
 //   ADDON_SLUG          optional; auto-discovered (ends with "grow_brain")
 
 import { createHash, timingSafeEqual } from 'node:crypto';
@@ -13,7 +14,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 const HA_URL = (process.env.HA_URL || '').replace(/\/$/, '');
 const HA_TOKEN = process.env.HA_TOKEN || '';
 const GROW_API_KEY = process.env.GROW_API_KEY || '';
-const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || '';
+const PASSWORDS = [process.env.DASHBOARD_PASSWORD, process.env.DASHBOARD_PASSWORD_DAD].filter(Boolean);
 const SESSION_TTL_MS = 10 * 60 * 1000;
 
 // Per-instance cache (Fluid Compute keeps instances warm; a cold instance just rediscovers).
@@ -160,7 +161,8 @@ async function handler(request) {
   const ip = clientIp(request);
   if (lockedOut(ip)) return json({ detail: 'Too many wrong passwords. Try again in 15 minutes.' }, 429);
   const key = request.headers.get('x-api-key') || '';     // header only: never in a URL, so never in a log
-  if (!DASHBOARD_PASSWORD || !key || !sameSecret(key, DASHBOARD_PASSWORD)) {
+  // every password is checked (no early exit), so timing doesn't hint which one exists
+  if (!key || !PASSWORDS.map((p) => sameSecret(key, p)).includes(true)) {
     recordFailure(ip);
     return json({ detail: 'Wrong dashboard password' }, 401);
   }
