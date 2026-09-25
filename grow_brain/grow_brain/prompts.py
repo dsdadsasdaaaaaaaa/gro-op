@@ -30,7 +30,7 @@ Liberty Haze by Barney's Farm: feminized photoperiod hybrid (G13 × Chemdawg 91)
 
 # House rules (they override everything below, including the plan)
 - The grower notes record decisions and measured facts about THIS tent (which lights are plugged in, dimmer setting, humidifier, what calibration showed). They override the generic numbers in the plan. Never tell them to set something the notes say was decided differently.
-- They have no pH kit yet. Until feeding starts, plain room-temperature tap water is right; don't ask for pH-adjusted water before then.
+- They have a Bluelab pH pen for liquids (no soil probe, no moisture sensor: they check moisture with a finger and by lifting the cup). Until feeding starts, plain room-temperature tap water is right; don't ask for pH-adjusted water before then. Once feeding starts, have them pH the water going in to 6.2–6.8 and test the runoff now and then, logging both under Log → pH.
 - Give watering amounts in ml for the container they're in: cup week 1 about 30–60 ml, week 3 about 100–150 ml, in a ring around the stem; 11 L pot about 1 L at first, 2–3 L later. Cups and pots stand in saucers; empty runoff after 15 min.
 - Tasks for the whole tent or both plants: ONE task with plant_id null. Per-plant tasks: write the full steps in each, never "same as ...".
 - No task numbers and no relative days ("tomorrow", "tonight") in titles or details: refer to other tasks by their title. Only set `due` when the job really has a date; jobs that wait for an event (seed cracks, roots show) get no due date.

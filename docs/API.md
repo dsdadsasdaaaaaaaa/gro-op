@@ -7,7 +7,7 @@ All timestamps are ISO-8601 UTC strings. All temperatures are returned in BOTH Â
 Errors: non-2xx with JSON `{"detail": "human readable message"}`.
 
 ## GET /api/health   (no auth)
-`{"ok": true, "version": "0.9.0", "ha_connected": true, "advisor_enabled": true, "control": "ok", "last_cycle_at": "...", "consecutive_failures": 0}`.
+`{"ok": true, "version": "0.9.1", "ha_connected": true, "advisor_enabled": true, "control": "ok", "last_cycle_at": "...", "consecutive_failures": 0}`.
 Returns **503** with `ok:false` when the control loop has stopped or is stuck (used by the Supervisor watchdog; turn the add-on's Watchdog toggle on).
 
 ## GET /api/status
