@@ -506,6 +506,7 @@ async def set_stage(body: StageChange, request: Request):
     old = await st.store.get_kv("targets_override", None) or {}
     await st.store.set_kv("targets_override", {"values": {}, "source": "stage_default", "light_on_time": old.get("light_on_time", "06:00")})
     await st.store.add_event("info", "system", f"Stage changed to {body.stage}; targets reset to stage defaults")
+    await followups.stage_started(st.store, st.controller, body.stage)   # the stage's dated jobs (topping, defoliation, ...)
     return profile.model_dump()
 
 

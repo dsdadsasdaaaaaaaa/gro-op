@@ -409,6 +409,23 @@ async def test_a_tank_that_runs_dry_teaches_the_tank_size(client):
     assert (await c.get("/api/status")).json()["humidifier_tank"]["tank_hours"] == 4.0
 
 
+async def test_changing_stage_lays_out_the_training_jobs(client):
+    c, ha, store, controller = client
+    ps = await _plants_with_phones(c)
+    await c.post("/api/grow/stage", json={"stage": "veg"})
+    tasks = (await c.get("/api/tasks")).json()["tasks"]
+    tops = [t for t in tasks if t["title"].startswith("Top above the 5th node")]
+    assert sorted(t["plant_id"] for t in tops) == sorted(p["id"] for p in ps)
+    assert all(t["created_by"] == "system" and t["due"] for t in tops)
+    assert any(t["title"] == "Put up the trellis net" and t["plant_id"] is None for t in tasks)
+    await c.post("/api/grow/stage", json={"stage": "veg"})           # again: no second copies
+    again = (await c.get("/api/tasks")).json()["tasks"]
+    assert len([t for t in again if t["title"].startswith("Top above")]) == 2
+    await c.post("/api/grow/stage", json={"stage": "flower"})
+    titles = [t["title"] for t in (await c.get("/api/tasks")).json()["tasks"]]
+    assert any(t.startswith("Lollipop the lower third") for t in titles) and any(t.startswith("Day-21 defoliation") for t in titles)
+
+
 # ------------------------------------------------------------------ safety hardening (0.7.0)
 
 async def _plants_with_phones(c):
@@ -717,8 +734,8 @@ async def test_refill_after_a_swap_teaches_the_swap_drop(client):
     from datetime import timedelta
     from grow_brain.controller import LAG_S, ControlContext, Decision, SensorSnapshot
     from grow_brain.store import utcnow
-    from grow_brain.targets import stage_defaults
-    t = stage_defaults("seedling")
+    from grow_brain.targets import Targets
+    t = Targets(21.0, 27.0, 60.0, 75.0, 0.5, 1.0, "06:00", 18)     # fixed band, not the tunable table
     now = utcnow()
     ctx = ControlContext(now_local=now, stage="seedling", targets=t, day_targets=t, light_scheduled_on=True, lights_on=True,
                          sensor=SensorSnapshot(24.5, 61.0, 1.0, None, now, False), safety_temp_max_c=35.0,
@@ -757,8 +774,8 @@ async def test_an_empty_tank_teaches_the_humidifier_nothing(client):
     from datetime import timedelta
     from grow_brain.controller import LAG_S, ControlContext, SensorSnapshot
     from grow_brain.store import utcnow
-    from grow_brain.targets import stage_defaults
-    t = stage_defaults("seedling")
+    from grow_brain.targets import Targets
+    t = Targets(21.0, 27.0, 60.0, 75.0, 0.5, 1.0, "06:00", 18)     # fixed band, not the tunable table
     now = utcnow()
     ctx = ControlContext(now_local=now, stage="seedling", targets=t, day_targets=t, light_scheduled_on=True, lights_on=True,
                          sensor=SensorSnapshot(24.5, 60.0, 1.0, None, now, False), safety_temp_max_c=35.0,

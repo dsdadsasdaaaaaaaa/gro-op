@@ -50,7 +50,10 @@ async def env(tmp_path: Path):
     ha = HAClient("http://127.0.0.1:1", "x")
     notifier = Notifier(ha, store)
     controller = Controller(store, ha, "UTC", notifier)
-    await store.set_kv("grow_profile", {"stage": "veg", "start_date": "2026-09-01", "stage_started": "2026-09-10"})
+    from datetime import date, timedelta
+    ago = lambda d: (date.today() - timedelta(days=d)).isoformat()
+    # well into veg, so the targets sit at the settled late-veg band (55–65 %) whatever today's date is
+    await store.set_kv("grow_profile", {"stage": "veg", "start_date": ago(60), "stage_started": ago(40)})
     await store.set_device("temperature_sensor", "sensor.t")
     await store.set_device("light", "switch.l")
     await store.add_plant(name="Levi's plant", owner="Levi", start_date="2026-09-19", notify_service="notify.levi")
@@ -315,3 +318,10 @@ async def test_a_first_sprout_is_logged_announced_and_moves_the_dome_date(env):
     await adv._apply(PhotoAnalysisOut.model_validate({**DEFAULTS[PhotoAnalysisOut], "sprouted": [2, 99]}), settings, "camera_check")
     assert not any("sprout" in t["title"].lower() for t in await store.tasks("open"))
     assert sorted(e["plant_id"] for e in await store.log_entries(20) if e["kind"] == "sprouted") == [1, 2]
+
+
+async def test_the_advisor_sees_the_light_power_this_phase_wants(env):
+    store, adv, fake = env
+    ctx, _ = await adv._context()
+    assert "Light power at the light plug" in ctx and "this phase wants about 350–441 W" in ctx
+

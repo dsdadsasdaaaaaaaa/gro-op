@@ -24,7 +24,7 @@ from .devices import ROLE_BY_NAME
 from .models import BriefOut, ChatOut, LogAdviceOut, PhotoAnalysisOut, TargetChange
 from .prompts import SYSTEM_PROMPT, units_instruction
 from .store import Store, iso, parse_iso, utcnow
-from .targets import ADJUSTABLE_BY_ADVISOR, BOUNDS, c_to_f
+from .targets import ADJUSTABLE_BY_ADVISOR, BOUNDS, c_to_f, light_power_target
 
 log = logging.getLogger(__name__)
 T = TypeVar("T", bound=BaseModel)
@@ -144,6 +144,13 @@ class Advisor:
             lines.append("- SENSOR STALE / MISSING — automation is in safe mode")
         lines.append(f"- Air {tf(sensor.temp_c)}, RH {sensor.humidity if sensor.humidity is not None else '–'}%, VPD {sensor.vpd_kpa if sensor.vpd_kpa is not None else '–'} kPa" + (f", CO2 {sensor.co2:.0f} ppm" if sensor.co2 else ""))
         lines.append(f"- Targets (day band, source={targets.source}): temp {tf(targets.temp_min_c)}–{tf(targets.temp_max_c)}, RH {targets.humidity_min:g}–{targets.humidity_max:g}%, VPD {targets.vpd_min}–{targets.vpd_max} kPa, light {targets.light_hours:g} h from {targets.light_on_time}; night band is ~{targets.night_temp_drop_c:g}° cooler. {targets.note}")
+        lpt = light_power_target(profile.get("stage") or "", day_in_stage)
+        if lpt:
+            w = self.controller.power_w("light", await self.store.get_device_map())
+            now_w = "unknown" if w is None else ("off right now (dark hours)" if w < 15 else f"{w:.0f} W")
+            lines.append(f"- Light power at the light plug: {now_w}; this phase wants about {lpt[0]:.0f}–{lpt[1]:.0f} W ({lpt[2]}). "
+                         "If it's more than ~10 % off while the lights are on, say exactly what to change (dimmer, which light to plug "
+                         "in); the app confirms it on the plug.")
         paused = await self.controller.paused_until()
         if paused:
             lines.append(f"- Automation PAUSED until {paused}")

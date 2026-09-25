@@ -7,7 +7,7 @@ All timestamps are ISO-8601 UTC strings. All temperatures are returned in BOTH �
 Errors: non-2xx with JSON `{"detail": "human readable message"}`.
 
 ## GET /api/health   (no auth)
-`{"ok": true, "version": "0.9.2", "ha_connected": true, "advisor_enabled": true, "control": "ok", "last_cycle_at": "...", "consecutive_failures": 0}`.
+`{"ok": true, "version": "0.9.3", "ha_connected": true, "advisor_enabled": true, "control": "ok", "last_cycle_at": "...", "consecutive_failures": 0}`.
 Returns **503** with `ok:false` when the control loop has stopped or is stuck (used by the Supervisor watchdog; turn the add-on's Watchdog toggle on).
 
 ## GET /api/status
@@ -275,6 +275,10 @@ Every request may carry `X-Device-Id: <random id per phone/browser>`; it keeps t
 **Advisor records**
 - Brief and chat replies may carry `plantings: [{"plant_id","kind": "planted"|"transplant","date"}]`: what the advisor recorded in the log from a conversation (dated the day it happened; a record of the same kind on another day is corrected, not doubled). The plan counts seedling days from these.
 - Photo analyses (uploads, look-now, the daily camera check) may carry `sprouted: [plant_id]`: the first time a seedling is seen through the soil. The app logs a `sprouted` entry, pushes to both phones, re-dates that plant's "Take the dome off" reminder to 5 days later, and closes the daily sprout-check job once every plant is up. LogEntry kinds gain `sprouted`.
+
+**Stages (0.9.3)**
+- Stage targets are per phase and ease over 3 days (seedling 22–26 °C / 65–75 %; veg 60–70 % easing to 55–65 % after two weeks; flower 50–60 % → 45–52 % from day 21 → 40–48 % from day 49 with cooler nights; drying 16–20 °C / 55–62 %).
+- `POST /api/grow/stage` also lays out that stage's dated jobs as system tasks (veg: topping, low-stress training, trellis net, the flip check; flower: lollipop, day-21 defoliation, trichome checks; flush; drying).
 
 **Plants and notifications**
 - `GET /api/plants?include_archived=true`; `POST /api/plants/{id}/restore` un-archives.

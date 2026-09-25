@@ -7,6 +7,18 @@ from grow_brain.controller import (ControlContext, DeviceInput, SensorSnapshot, 
 from grow_brain.devices import automap, suggest_role
 from grow_brain.targets import Targets, apply_overrides, stage_defaults, vpd_kpa
 
+# The control-logic tests run against fixed bands, so retuning the stage table doesn't change what they test.
+_FIXED = {
+    "seedling": Targets(21.0, 27.0, 60.0, 75.0, 0.5, 1.0, "06:00", 18, note="test seedling"),
+    "veg": Targets(23.0, 28.0, 55.0, 65.0, 0.8, 1.2, "06:00", 18, note="test veg"),
+    "flower": Targets(22.0, 27.0, 45.0, 55.0, 1.0, 1.4, "06:00", 12, note="test flower"),
+}
+
+
+def fixed_targets(stage: str) -> Targets:
+    from dataclasses import replace
+    return replace(_FIXED[stage]) if stage in _FIXED else stage_defaults(stage)
+
 
 def test_vpd_reasonable():
     # 25°C / 60% RH is a classic ~1.0 kPa veg VPD (leaf 1°C cooler)
@@ -47,7 +59,7 @@ def _ctx(temp, rh, stage="veg", lights_on=True, states=None, paused=False, overr
     switched, on_readings, on_tags = switched or {}, on_readings or {}, on_tags or {}
     devices = {r: DeviceInput(r, f"switch.{r}", states.get(r, "off"), True, switched.get(r), overrides.get(r), None,
                               on_readings.get(r), on_tags.get(r)) for r in roles}
-    day = stage_defaults(stage)
+    day = fixed_targets(stage)
     t = day if lights_on else day.for_night()
     return ControlContext(
         now_local=datetime(2026, 9, 20, 12, 7, tzinfo=timezone.utc), stage=stage, targets=t, day_targets=day,
@@ -332,11 +344,10 @@ def test_humidifier_refills_right_after_a_swap():
 
 
 def test_humidity_aim_sits_inside_the_band():
-    from grow_brain.targets import stage_defaults as sd
-    assert humidity_aim(sd("seedling"), 3.0) == 64.0      # 60-75: min + swap dip + 1
-    assert humidity_aim(sd("seedling"), 9.0) == 65.0      # never more than a third of the way in
-    assert humidity_aim(sd("veg"), 0.5) == 57.0           # at least 2 points in
-    assert humidity_aim(sd("flower"), 9.0, "flower") == 47.0   # flower: a floor just inside the minimum (mould)
+    assert humidity_aim(fixed_targets("seedling"), 3.0) == 64.0      # 60-75: min + swap dip + 1
+    assert humidity_aim(fixed_targets("seedling"), 9.0) == 65.0      # never more than a third of the way in
+    assert humidity_aim(fixed_targets("veg"), 0.5) == 57.0           # at least 2 points in
+    assert humidity_aim(fixed_targets("flower"), 9.0, "flower") == 47.0   # flower: a floor just inside the minimum (mould)
     # seedling tent at 63.5 %: under the aim's start point (63) not yet...
     assert decide(_ctx(25.0, 63.5, stage="seedling", switched={"exhaust_fan": NOW - timedelta(minutes=5)}))["humidifier"].desired is False
     # ...at 62.8 % a pulse starts (the old rule waited for 61 %)
@@ -410,3 +421,25 @@ def test_humidity_run_does_not_latch_other_exhaust_runs_and_night_floor():
 
 def test_curing_leaves_the_humidifier_idle():
     assert decide(_ctx(20.0, 40.0, stage="curing"))["humidifier"].desired is False
+
+
+def test_textbook_targets_ease_between_phases():
+    sd = stage_defaults
+    s = sd("seedling")
+    assert (s.temp_min_c, s.temp_max_c, s.humidity_min, s.humidity_max) == (22.0, 26.0, 65.0, 75.0)
+    assert sd("veg", 0).humidity_min == 60.0 and sd("veg", 20).humidity_min == 55.0
+    assert 55.0 < sd("veg", 15).humidity_min < 60.0                     # easing, not a jump
+    first = sd("flower", 0)
+    assert first.light_hours == 12 and 50.0 < first.humidity_min < 55.0   # 12/12 at once, climate eases in
+    assert sd("flower", 3).humidity_min == 50.0
+    assert sd("flower", 30).humidity_max == 52.0 and sd("flower", 60).humidity_max == 48.0
+    assert sd("flower", 60).night_temp_drop_c == 5.0                     # cooler nights while ripening
+    assert sd("drying").temp_max_c == 20.0 and sd("drying").light_hours == 0
+
+
+def test_light_power_targets_follow_the_phase():
+    from grow_brain.targets import light_power_target
+    assert light_power_target("seedling")[:2] == (150.0, 190.0)
+    assert light_power_target("veg", 3)[1] < light_power_target("veg", 20)[1]
+    assert light_power_target("flower", 10)[0] == 400.0
+    assert light_power_target("drying") is None

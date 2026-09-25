@@ -54,3 +54,66 @@ async def after_log(store, controller, kind: str, plant_id: Optional[int]) -> li
                                                 "back in and turn the big one up first.", None, "high", "system", None)
                 added.append(t["id"])
     return added
+
+
+# The max-yield program: jobs each stage starts, as (days after the stage change, one per plant?, title, detail).
+STAGE_JOBS: dict[str, list[tuple[int, bool, str, str]]] = {
+    "veg": [
+        (12, True, "Top above the 5th node",
+         "When the plant has 5–6 nodes (pairs of leaves along the main stem), cut the main stem just above the 5th node "
+         "with clean scissors. Two main tops grow from there. Optional for even more tops: once each new top has 3 nodes, "
+         "top those too. Skip it for a day or two if the plant looks stressed."),
+        (16, True, "Start low-stress training",
+         "About two days after topping: gently bend the new tops outward and tie them to the pot rim with soft plant ties. "
+         "Adjust the ties every 2–3 days so the plant grows flat and wide instead of tall. Bend, never snap."),
+        (18, False, "Put up the trellis net",
+         "Stretch a trellis net across the tent about 20–25 cm above the pot rims. As tops reach it, tuck them under and "
+         "outward to the next square so every top ends up at the same height under the light."),
+        (28, False, "Is the net 70 % full? Time to flip",
+         "Flip to flower when the net is about 70 % full (the plants roughly double in the first 3 weeks of flower): "
+         "Settings → Change stage → Flower, and the light switches to 12 hours by itself. Not full yet? Tick this off and "
+         "check again in a few days."),
+    ],
+    "flower": [
+        (2, True, "Lollipop the lower third",
+         "Remove the small branches and leaves on the bottom third of the plant, below the net: they never get enough light "
+         "to make real buds and only steal energy from the tops."),
+        (21, True, "Day-21 defoliation",
+         "Remove the big fan leaves that shade bud sites, and anything new growing below the net. Take at most 20–30 % of "
+         "the leaves, spread evenly."),
+        (49, True, "Start checking trichomes",
+         "Every 2–3 days, look at the trichomes on the buds (not the small sugar leaves) with the loupe: clear = wait, "
+         "mostly cloudy = peak, 10–15 % amber = harvest window. Photos help the advisor judge it."),
+    ],
+    "flush": [
+        (0, False, "Plain water only until harvest",
+         "No more nutrients: water with plain water to a little runoff until harvest. Yellowing leaves now are normal."),
+    ],
+    "drying": [
+        (7, False, "Check if the buds are dry",
+         "Bend a small stem: if it snaps instead of bending, trim the buds and put them in jars with a 62 % humidity pack. "
+         "If it still bends, check again every day or two."),
+    ],
+}
+
+
+async def stage_started(store, controller, stage: str) -> list[int]:
+    """Lay out the stage's jobs with their dates, one per plant where each plant needs it done."""
+    jobs = STAGE_JOBS.get(stage) or []
+    if not jobs:
+        return []
+    tz = controller.tz(await controller.settings())
+    today = datetime.now(tz).date()
+    plants = await store.plants()
+    open_titles = {t["title"] for t in await store.tasks("open")}
+    added: list[int] = []
+    for offset, per_plant, title, detail in jobs:
+        due = (today + timedelta(days=offset)).isoformat()
+        for plant in (plants if per_plant and plants else [None]):
+            full = f"{title}: {plant['name']}" if plant else title
+            if full in open_titles:
+                continue
+            t = await store.add_task(full, detail, due, "normal", "system", plant["id"] if plant else None)
+            open_titles.add(full)
+            added.append(t["id"])
+    return added
