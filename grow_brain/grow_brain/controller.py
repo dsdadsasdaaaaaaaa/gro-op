@@ -1112,7 +1112,7 @@ class Controller:
                 tk["prev"] = None
                 await self.store.set_kv("humidifier_tank_prev", None)
         now = utcnow()
-        if hum.state == "on" and self.last_cycle_at:
+        if hum.state == "on" and self.last_cycle_at and not tk["dry"]:   # an empty tank isn't misting
             tk["run_s"] += min(600.0, max(0.0, (now - self.last_cycle_at).total_seconds()))
             await self.store.set_kv("humidifier_run_s", tk["run_s"])
         hours = float((await self.settings()).get("humidifier_tank_hours") or 4.0)
@@ -1133,6 +1133,25 @@ class Controller:
         await self.store.set_kv("humidifier_refill_task", task["id"])
         await self.notifier.send("tank", f"Refill the humidifier tank: {why}.", hours=12, title="Grow tent", everyone=True)
         await self.store.add_event("warn", "device", f"Humidifier tank is probably low: {why}. Refill it.")
+
+    async def _learn_tank_size(self, tk: dict) -> Optional[float]:
+        """The tank just ran dry: the misting since the last refill is what one tank holds. Keep it (averaged with
+        earlier measurements, since fills vary) as the tank size, so the 'refill soon' reminder comes at the right time."""
+        if not tk.get("refill_at"):
+            return None          # counting didn't start at a refill: the number would mean nothing
+        hours = round(max(0.0, tk["run_s"] - HUMIDIFIER_POWER_GRACE_S) / 3600.0, 2)
+        if not 1.0 <= hours <= 24.0:
+            return None
+        measured = list(await self.store.get_kv("humidifier_tank_measured", []) or [])
+        settings = await self.store.get_kv("settings", {}) or {}
+        old = float(settings.get("humidifier_tank_hours") or hours)
+        new = round(hours if not measured else 0.5 * old + 0.5 * hours, 1)
+        settings["humidifier_tank_hours"] = new
+        await self.store.set_kv("settings", settings)
+        await self.store.set_kv("humidifier_tank_measured", (measured + [{"at": iso(utcnow()), "hours": hours}])[-10:])
+        await self.store.add_event("info", "device", f"Learned: a full humidifier tank lasts about {new:g} h of misting "
+                                                     f"(this one ran dry after {hours:.1f} h).")
+        return hours
 
     async def refilled(self, why: str = "Marked as refilled") -> None:
         await self._tank_reset(why)
@@ -1283,7 +1302,9 @@ class Controller:
                 if low and not tk["dry"]:
                     tk["dry"] = True
                     await self.store.set_kv("humidifier_dry", True)
-                    msg = "Humidifier tank is probably empty: it is switched on but drawing no power. Refill it."
+                    lasted = await self._learn_tank_size(tk)
+                    msg = "Humidifier tank is probably empty: it is switched on but drawing no power. Refill it." + (
+                        f" This tank lasted {lasted:.1f} h of misting." if lasted else "")
                     await self.notifier.send("power:humidifier", msg, hours=12, title="Grow tent", everyone=True)
                     await self.store.add_event("warn", "device", "Humidifier is switched on but drawing only "
                                                                  f"{w:g} W: tank empty or unplugged?")

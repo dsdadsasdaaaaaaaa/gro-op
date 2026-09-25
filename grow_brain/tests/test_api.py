@@ -378,6 +378,37 @@ async def test_humidifier_tank_tracking(client):
     assert (await c.get("/api/status")).json()["humidifier_tank"]["tank_hours"] == 2.5
 
 
+async def test_a_tank_that_runs_dry_teaches_the_tank_size(client):
+    c, ha, store, controller = client
+    from datetime import timedelta
+    await controller.refilled("Filled to the top")
+    ha.state["switch.grow_humidifier"] = "on"
+    controller.last_switched["humidifier"] = datetime.now(timezone.utc)
+    await controller.cycle()
+    # 3.6 h of misting later the plug is on but draws nothing: the tank ran dry
+    controller._tank["run_s"] = 3.6 * 3600
+    controller._on_since["humidifier"] = datetime.now(timezone.utc) - timedelta(minutes=2)
+    await controller.cycle()
+    tank = (await c.get("/api/status")).json()["humidifier_tank"]
+    assert tank["dry"] is True and tank["tank_hours"] == 3.6
+    evs = [e["message"] for e in (await c.get("/api/events", params={"limit": 20})).json()["events"]]
+    assert any(m.startswith("Learned: a full humidifier tank lasts about 3.6 h") for m in evs)
+    # an empty tank's pulses don't count as misting
+    run = controller._tank["run_s"]
+    controller.last_cycle_at = datetime.now(timezone.utc) - timedelta(seconds=30)
+    await controller.cycle()
+    assert controller._tank["run_s"] == run
+    # refilled, and the next tank lasts 4.4 h: the size moves halfway toward it
+    ha.humid_w = 16.0
+    await controller.cycle()                                  # misting again: counted as a refill
+    assert (await c.get("/api/status")).json()["humidifier_tank"]["dry"] is False
+    ha.humid_w = 0.0
+    controller._tank["run_s"] = 4.4 * 3600
+    controller._on_since["humidifier"] = datetime.now(timezone.utc) - timedelta(minutes=2)
+    await controller.cycle()
+    assert (await c.get("/api/status")).json()["humidifier_tank"]["tank_hours"] == 4.0
+
+
 # ------------------------------------------------------------------ safety hardening (0.7.0)
 
 async def _plants_with_phones(c):
