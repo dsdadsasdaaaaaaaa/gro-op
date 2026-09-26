@@ -325,3 +325,16 @@ async def test_the_advisor_sees_the_light_power_this_phase_wants(env):
     ctx, _ = await adv._context()
     assert "Light power at the light plug" in ctx and "this phase wants about 350–441 W" in ctx
 
+
+def test_reworded_photo_requests_count_as_the_same_picture():
+    from grow_brain.advisor import _same_photo, _words
+    assert _same_photo(_words("Close-up of the soil surface in Dad's cup"), _words("Dad's cup soil surface, dome lifted for 30 seconds"))
+    assert not _same_photo(_words("Whole plant from the side"), _words("Top of the canopy from directly above"))
+
+
+async def test_the_advisor_knows_the_humidifier_plug_measures_power(env):
+    store, adv, fake = env
+    await store.set_device("humidifier", "switch.h")
+    ctx, _ = await adv._context()
+    assert "Humidifier water: misted" in ctx and "Its plug measures power" in ctx
+

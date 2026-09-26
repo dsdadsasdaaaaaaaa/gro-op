@@ -134,7 +134,19 @@ class Advisor:
             if role in dmap:
                 st = self.controller.states.get(dmap[role], {})
                 reason = self.controller.last_reasons.get(role, "")
-                lines.append(f"- {rd.label}: {st.get('state', '?')}" + (f" ({reason})" if reason else ""))
+                w = self.controller.power_w(role, dmap) if rd.kind == "switch" else None
+                watts = f", drawing {w:g} W" if w is not None else ""
+                lines.append(f"- {rd.label}: {st.get('state', '?')}{watts}" + (f" ({reason})" if reason else ""))
+        tank = await self.controller.tank_status()
+        if tank:
+            measured = await self.store.get_kv("humidifier_tank_measured", []) or []
+            size = (f"{tank['tank_hours']:g} h, measured from {len(measured)} empty tank(s)" if measured
+                    else f"{tank['tank_hours']:g} h, an assumption until the tank runs dry once")
+            lines.append(f"- Humidifier water: misted {tank['run_hours_since_refill']:g} h since the last refill; tank size {size}; "
+                         + ("EMPTY right now (the plug is on but draws no power)" if tank.get("dry") else
+                            f"about {tank['percent_left']} % left by that estimate")
+                         + ". Its plug measures power: when it stays on but draws almost nothing, the tank has run dry, and "
+                           "the app notices within a minute, tells both phones and learns the real tank size.")
         missing = [rd.label for role, rd in ROLE_BY_NAME.items() if role not in dmap and rd.kind == "switch"]
         if missing:
             lines.append(f"- NOT available: {', '.join(missing)}")
@@ -317,11 +329,14 @@ class Advisor:
                 continue
             created_tasks.append(await self.store.add_task(td.title, td.detail, td.due, td.priority, "advisor", pid))
             open_titles.append((pid, words))
-        open_pr_titles = {(p.get("plant_id"), p["title"].strip().lower()) for p in await self.store.photo_requests("open")}
+        open_prs = [(p.get("plant_id"), _words(p["title"])) for p in await self.store.photo_requests("open")]
         for pd in getattr(out, "photo_requests", []) or []:
             key = (pid_of(pd), pd.title.strip().lower())
-            if key in open_pr_titles:
+            words = _words(pd.title)
+            # the same picture already asked for (even worded differently) → don't ask twice
+            if any(op == key[0] and _same_photo(words, ow) for op, ow in open_prs):
                 continue
+            open_prs.append((key[0], words))
             created_prs.append(await self.store.add_photo_request(pd.title, pd.instructions, pd.reason, key[0]))
         for pn in getattr(out, "plant_notes", []) or []:
             plant = plants.get(pn.plant_id)
@@ -705,9 +720,15 @@ _OPPOSITES = (("up", "down"), ("off", "on"), ("raise", "lower"), ("more", "less"
               ("open", "close"), ("add", "remove"), ("higher", "lower"), ("warmer", "cooler"))
 
 
-def _similar(a: set[str], b: set[str]) -> bool:
+def _similar(a: set[str], b: set[str], threshold: float = 0.5) -> bool:
     if not a or not b:
         return a == b
     if any((x in a and y in b) or (y in a and x in b) for x, y in _OPPOSITES):
         return False                       # "turn the light down" is not the same job as "turn the light up"
-    return len(a & b) / len(a | b) >= 0.5
+    return len(a & b) / len(a | b) >= threshold
+
+
+def _same_photo(a: set[str], b: set[str]) -> bool:
+    """Photo titles get reworded more than jobs ("Close-up of the soil surface in Dad's cup" / "Dad's cup soil surface,
+    dome lifted"): the same subject is enough, i.e. three key words in common."""
+    return len(a & b) >= 3 and _similar(a, b, 0.35)

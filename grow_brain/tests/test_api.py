@@ -781,6 +781,9 @@ async def test_an_empty_tank_teaches_the_humidifier_nothing(client):
                          sensor=SensorSnapshot(24.5, 60.0, 1.0, None, now, False), safety_temp_max_c=35.0,
                          safety_temp_min_c=12.0, exhaust_ducted=True, paused=False)
     controller.learned["humidifier_pts_per_min"] = 2.0
+    # the fixture's first cycle starts a clock-timed fresh-air swap in the first 90 s of each half hour; that exhaust
+    # run would (rightly) spoil every sample below, so start from a tent where the exhaust hasn't run
+    controller.last_switched.pop("exhaust_fan", None)
 
     def pulse(**kw):
         return {"role": "humidifier", "start": 60.0, "minutes": 1.0, "on_at": utcnow() - timedelta(seconds=LAG_S + 70),
