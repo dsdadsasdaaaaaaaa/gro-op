@@ -526,6 +526,21 @@ async def test_null_settings_cannot_disable_safety(client):
     assert r.status_code == 422
 
 
+def test_an_unreachable_light_gets_advice_for_the_time_of_day():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from grow_brain.controller import _stuck_advice
+    from grow_brain.targets import Targets
+    t = Targets(22.0, 26.0, 65.0, 75.0, 0.4, 0.8, "06:00", 18)
+    day = SimpleNamespace(now_local=datetime(2026, 9, 27, 9, 30, tzinfo=timezone.utc), day_targets=t)
+    night = SimpleNamespace(now_local=datetime(2026, 9, 27, 2, 0, tzinfo=timezone.utc), day_targets=t)
+    assert "right for now: nothing to do" in _stuck_advice("light", "on", day) and "(00:00)" in _stuck_advice("light", "on", day)
+    assert "switch it off at the plug by hand" in _stuck_advice("light", "on", night)
+    assert "check the plug" in _stuck_advice("light", "off", day)
+    assert "over-mist" in _stuck_advice("humidifier", "on", day)
+    assert "harmless" in _stuck_advice("exhaust_fan", "on", day)
+
+
 async def test_unreachable_plug_and_ignored_commands_are_reported(client):
     c, ha, store, controller = client
     await _plants_with_phones(c)
@@ -538,9 +553,11 @@ async def test_unreachable_plug_and_ignored_commands_are_reported(client):
     ha.notifications.clear()
     await controller.cycle()
     assert any("Humidifier plug isn't responding" in n and "switch it off at the plug" in n for n in ha.notifications)
+    ha.notifications.clear()
     ha.state["switch.grow_humidifier"] = "off"
     await controller.cycle()
     assert not any("Humidifier plug" in a["message"] for a in (await c.get("/api/status")).json()["alerts"])
+    assert any("Humidifier plug is responding again" in n for n in ha.notifications)      # the all-clear
     # a plug that answers 200 but never actually switches
     real_turn = ha.turn
 

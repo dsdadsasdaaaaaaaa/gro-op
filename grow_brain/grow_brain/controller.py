@@ -152,6 +152,26 @@ def parse_hhmm(s, default: str = "06:00") -> tuple[int, int]:
 
 # ---------------------------------------------------------------- light schedule
 
+def _stuck_advice(role: str, last: Optional[str], ctx: "ControlContext") -> str:
+    """What an unreachable plug means right now, so nobody switches off a light that should be on."""
+    if role == "light":
+        t = ctx.day_targets
+        should_be_on, change = light_window(ctx.now_local, t.light_on_time, t.light_hours)
+        if last == "on" and should_be_on:
+            return (f" It was last ON, which is right for now: nothing to do. If it's still out at lights-off "
+                    f"({change:%H:%M}), switch the light off at the plug by hand.")
+        if last == "on":
+            return " It was last ON during the dark hours: switch it off at the plug by hand until it's back."
+        if last == "off" and should_be_on:
+            return " It was last OFF during lights-on hours: check the plug and its power."
+        return " It was last off, which is right for now."
+    if last == "on":
+        if role == "humidifier":
+            return " It was last ON: switch it off at the plug by hand until it's back, so it can't over-mist."
+        return " It was last on; that's harmless for a while."
+    return " It was last off." if last == "off" else ""
+
+
 def light_window(now_local: datetime, on_time: str, hours: float) -> tuple[bool, datetime]:
     """Return (should_be_on, next_change_local). The photoperiod is counted in real hours, so a DST change
     doesn't stretch or shrink a day to 17 or 19 h, and an on-time in the repeated November hour doesn't blink."""
@@ -499,6 +519,7 @@ class Controller:
         self.safety_latch: Optional[dict] = None   # {"kind": "hot"|"cold", "since": iso}
         self._unavail_since: dict[str, datetime] = {}
         self._unavail_alerted: set[str] = set()
+        self._unavail_pushed: set[str] = set()      # outages the phones were told about (they get the all-clear too)
         self._last_known: dict[str, str] = {}
         self._cmd: dict[str, dict] = {}          # role → {"desired": bool, "tries": n} while a command hasn't taken effect
         self._cmd_alerted: set[str] = set()
@@ -884,6 +905,10 @@ class Controller:
                     self._unavail_alerted.discard(role)
                     await self.store.resolve_alerts("device", f"{ROLE_BY_NAME[role].label} plug")
                     await self.store.add_event("info", "device", f"{ROLE_BY_NAME[role].label} plug is responding again.")
+                    if role in self._unavail_pushed:
+                        self._unavail_pushed.discard(role)
+                        await self.notifier.send(f"available:{role}", f"{ROLE_BY_NAME[role].label} plug is responding again: "
+                                                 "Grow Brain is back in control of it.", everyone=True)
                 continue
             since = self._unavail_since.setdefault(role, now)
             if role in self._unavail_alerted or (now - since).total_seconds() < UNAVAILABLE_ALERT_S:
@@ -894,13 +919,10 @@ class Controller:
                 msg = (f"{label} plug ({eid}) no longer exists in Home Assistant, so Grow Brain can't switch it. "
                        f"It may have been renamed or re-paired: ask Levi to check.")
             else:
-                last = self._last_known.get(role)
-                msg = f"{label} plug isn't responding in Home Assistant, so Grow Brain can't switch it."
-                if last == "on":
-                    msg += " It was last ON: switch it off at the plug by hand until it's back."
-                elif last == "off":
-                    msg += " It was last off."
-            await self.notifier.send(f"unavailable:{role}", msg, hours=6, everyone=True)
+                msg = f"{label} plug isn't responding in Home Assistant, so Grow Brain can't switch it." + \
+                    _stuck_advice(role, self._last_known.get(role), ctx)
+            if await self.notifier.send(f"unavailable:{role}", msg, hours=6, everyone=True):
+                self._unavail_pushed.add(role)
             await self.store.add_event("alert" if role in ("light", "humidifier") else "warn", "device", msg)
 
     # ---- pulse learning: how strong are the humidifier and the exhaust in *this* tent? ----
