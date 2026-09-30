@@ -30,8 +30,11 @@ ENERGY_TODAY_SUFFIXES = ("_today_s_consumption", "_today_consumption", "_energy_
 ENERGY_MONTH_SUFFIXES = ("_this_month_s_consumption", "_month_consumption", "_energy_month")
 ENERGY_TOTAL_SUFFIXES = ("_energy", "_total_energy", "_energy_total", "_total_consumption")  # cumulative meters (Matter, Shelly...)
 LOW_POWER_W = {"light": 15.0, "exhaust_fan": 3.0, "intake_fan": 2.0, "circulation_fan": 2.0, "circulation_fan_2": 2.0,
-               "humidifier": 3.0, "dehumidifier": 20.0, "heater": 20.0, "cooler": 30.0}
+               "humidifier": 3.0, "dehumidifier": 20.0, "heater": 5.0, "cooler": 30.0}
 POWER_GRACE_S = 180
+# Heaters (and heat mats) have their own thermostat: switched on but idle for a while is normal. Only a heater that
+# hasn't drawn power for this long while switched on is unplugged, off at its own switch, or set too low.
+HEATER_POWER_GRACE_S = 2 * 3600
 HUMIDIFIER_POWER_GRACE_S = 45   # pulses are 60-300 s, so check early
 
 TEMP_HYST = 1.0      # °C
@@ -520,6 +523,7 @@ class Controller:
         self._unavail_since: dict[str, datetime] = {}
         self._unavail_alerted: set[str] = set()
         self._unavail_pushed: set[str] = set()      # outages the phones were told about (they get the all-clear too)
+        self._last_draw: dict[str, datetime] = {}   # when each plug last drew real power
         self._last_known: dict[str, str] = {}
         self._cmd: dict[str, dict] = {}          # role → {"desired": bool, "tries": n} while a command hasn't taken effect
         self._cmd_alerted: set[str] = set()
@@ -1315,8 +1319,15 @@ class Controller:
                 continue
             self._on_since.setdefault(role, now)
             w = self.power_w(role, dmap)
-            grace = HUMIDIFIER_POWER_GRACE_S if role == "humidifier" else POWER_GRACE_S
-            if w is None or (now - self._on_since[role]).total_seconds() < grace:
+            start = self._on_since[role]
+            if w is not None and w >= LOW_POWER_W.get(role, 3.0):
+                self._last_draw[role] = now
+                if role == "heater" and self._power_warned.pop(role, None):
+                    await self.store.resolve_alerts("device", f"{ROLE_BY_NAME[role].label} is switched on but drawing")
+            if role == "heater":
+                start = max(start, self._last_draw.get(role, start))   # idle on its own thermostat: count from the last draw
+            grace = {"humidifier": HUMIDIFIER_POWER_GRACE_S, "heater": HEATER_POWER_GRACE_S}.get(role, POWER_GRACE_S)
+            if w is None or (now - start).total_seconds() < grace:
                 continue
             low = w < LOW_POWER_W.get(role, 3.0)
             if role == "humidifier":
@@ -1339,7 +1350,8 @@ class Controller:
                 if last and (now - last).total_seconds() < 3600:
                     continue
                 label = ROLE_BY_NAME[role].label
-                hint = {"light": "driver or light dead, or unplugged?"}.get(role, "unplugged or broken?")
+                hint = {"light": "driver or light dead, or unplugged?",
+                        "heater": "unplugged, switched off at the heater, or its own thermostat set too low?"}.get(role, "unplugged or broken?")
                 msg = f"{label} is switched on but drawing only {w:g} W: {hint}"
                 await self.notifier.send(f"power:{role}", msg, hours=6, title="Grow tent", everyone=True)
                 await self.store.add_event("warn", "device", msg)

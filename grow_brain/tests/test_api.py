@@ -541,6 +541,27 @@ def test_an_unreachable_light_gets_advice_for_the_time_of_day():
     assert "harmless" in _stuck_advice("exhaust_fan", "on", day)
 
 
+async def test_a_heater_idling_on_its_own_thermostat_is_not_an_alarm(client):
+    c, ha, store, controller = client
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    power = "sensor.tent_heater_current_consumption"
+    controller.states = {"switch.tent_heater": {"entity_id": "switch.tent_heater", "state": "on", "attributes": {}},
+                         power: {"entity_id": power, "state": "0.0", "attributes": {"unit_of_measurement": "W"}}}
+    dmap = {"heater": "switch.tent_heater"}
+    controller._on_since["heater"] = now - timedelta(hours=3)
+    controller._last_draw["heater"] = now - timedelta(minutes=30)       # its thermostat ran it half an hour ago
+    await controller._power_watchdog(dmap)
+    assert "heater" not in controller._power_warned
+    controller._last_draw.pop("heater")                                   # switched on for 3 h, never drew power
+    await controller._power_watchdog(dmap)
+    warns = [e["message"] for e in await store.events(20, min_level="warn")]
+    assert any("Heater is switched on but drawing only 0 W: unplugged, switched off at the heater" in m for m in warns)
+    controller.states[power]["state"] = "22.0"                           # a heat mat warming up again
+    await controller._power_watchdog(dmap)
+    assert not any("Heater is switched on" in e["message"] for e in await store.events(20, min_level="warn"))
+
+
 async def test_unreachable_plug_and_ignored_commands_are_reported(client):
     c, ha, store, controller = client
     await _plants_with_phones(c)
