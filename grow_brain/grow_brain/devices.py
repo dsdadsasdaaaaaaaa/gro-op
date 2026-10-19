@@ -35,8 +35,8 @@ ROLES: list[RoleDef] = [
     RoleDef("heater", "Heater", "switch", False, "Raises temperature when it is below target.",
             ("heater", "space heater"), negative=("overheat", "preheat", "active", "mode", "mat", "pad")),
     RoleDef("heat_mat", "Germination mat", "switch", False,
-            "Warms the seeds and seedling roots on its own thermostat. On while germinating and in the seedling stage, "
-            "off from veg (and whenever the tent overheats).",
+            "Warms the seeds while they germinate outside the tent (seedling stage, tent still in standby); off once the "
+            "tent is started and from veg on. With a seed thermometer mapped, Grow Brain is its thermostat.",
             ("germination mat", "seedling mat", "heat mat", "heating mat", "propagation mat", "seed mat", "heating pad"),
             negative=("overheat", "preheat", "active", "mode")),
     RoleDef("cooler", "AC / cooler", "switch", False, "Lowers temperature when it is above target.",
@@ -49,6 +49,10 @@ ROLES: list[RoleDef] = [
             ("vpd", "vapor", "vapour")),
     RoleDef("co2_sensor", "CO2 sensor", "sensor", False, "Optional CO2 sensor.",
             ("co2", "carbon")),
+    RoleDef("seed_temperature_sensor", "Seed thermometer", "sensor", False,
+            "Optional. A thermometer lying beside the seeds on the germination mat (a second Govee works). With it, "
+            "Grow Brain switches the mat to hold the seeds at 24.5–26.5 °C.",
+            ("seed", "germination", "propagation")),
 ]
 
 ROLE_BY_NAME = {r.role: r for r in ROLES}

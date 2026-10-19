@@ -30,7 +30,7 @@ The Govee cradle is cut for a 41 × 41 × 14 mm sensor with 1 mm of slack; if yo
 | When | What | Cost | Why |
 |---|---|---|---|
 | Now | **M5Stack ATOM Lite** + USB-C cable + any USB charger, flashed as a Bluetooth proxy | ~CA$20–30 | The Govee hygrometer reaches Home Assistant over Bluetooth through the tent wall and drops out, which puts the tent in safe mode. A proxy beside the tent forwards it over Wi-Fi. Flash it from Chrome or Edge at esphome.github.io/bluetooth-proxies (plug it in by USB, Connect, pick M5Stack Atom Lite, enter the Wi-Fi; no code), then click Configure on the new device in Home Assistant. The sensor names stay the same. |
-| Now | A smart plug with **its own app** (e.g. Wyze Plug) for the Home Assistant box | ~CA$15 | Lets you power-cycle the box from anywhere when Home Assistant hangs. Must not be controlled through Home Assistant. |
+| Now | Check the Home Assistant box's power settings | free | The box reports a battery, so it looks like a laptop: a smart plug can't restart it (the battery keeps it running). Make sure it never sleeps or suspends, lid closed or not, and keep it plugged in. |
 | Veg ~day 12 | 8–10 `lst_soil_peg`, soft plant ties | ~CA$8 | Topping + low-stress training spreads the plant flat under the light: more tops at the same height = more bud. |
 | Veg ~day 18 | Trellis net for a 3×3 ft (90 cm) tent + 4 `trellis_net_hook` | ~CA$12 | Holds every top at the same height and supports the buds in flower. |
 | Transplant | 6 `pot_foot` | filament | Drainage and air under the 11 L pots. |

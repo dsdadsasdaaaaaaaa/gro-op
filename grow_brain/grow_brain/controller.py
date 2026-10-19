@@ -36,6 +36,7 @@ POWER_GRACE_S = 180
 # hasn't drawn power for this long while switched on is unplugged, off at its own switch, or set too low.
 HEATER_POWER_GRACE_S = 2 * 3600
 HUMIDIFIER_POWER_GRACE_S = 45   # pulses are 60-300 s, so check early
+SEED_ON_BELOW_C, SEED_OFF_ABOVE_C = 24.5, 26.5   # seeds germinate best at 24-27 °C
 
 TEMP_HYST = 1.0      # °C
 RH_HYST = 4.0        # % RH (dehumidifier)
@@ -129,6 +130,8 @@ class ControlContext:
     cool_gain: float = COOL_GAIN_DEFAULT  # learned exhaust cooling, °C per minute
     exchange_drop: float = EXCHANGE_DROP_DEFAULT  # learned humidity lost per minute of fresh-air swap
     safety_latch: Optional[str] = None    # "hot" / "cold": a hard limit tripped and the tent hasn't recovered yet
+    seed_sensor_mapped: bool = False      # a thermometer lies beside the seeds on the germination mat
+    seed_temp_c: Optional[float] = None   # its reading, None when it has nothing recent
 
 
 # ---------------------------------------------------------------- times of day
@@ -418,12 +421,27 @@ def _hot_safety(ctx: ControlContext, set_, temp: Optional[float]) -> None:
 
 
 def _heat_mat(ctx: ControlContext, set_) -> None:
-    """The germination mat runs while the seeds germinate and through the seedling stage (its own thermostat holds
-    the soil temperature), and is off from veg on: the big pots are too big for it and the roots no longer need it."""
-    if ctx.stage == "seedling":
-        set_("heat_mat", True, "germinating / seedling: keeps the seeds and roots warm (its own thermostat sets the temperature)")
+    """The germination mat warms the seeds while they germinate outside the tent: seedling stage with the tent still in
+    standby. Starting the tent (the cups move in under the light) or any later stage turns it off. The mat has no
+    thermostat of its own (it runs 5-11 °C above the room): with a seed thermometer mapped Grow Brain holds the seeds at
+    24.5-26.5 °C, without one it runs non-stop, as it would on its own."""
+    if ctx.stage != "seedling" or not ctx.standby:
+        set_("heat_mat", False, "the seedlings are in the tent now: the mat is only for germinating" if ctx.stage == "seedling"
+             else f"{ctx.stage}: the mat is only for germinating")
+        return
+    if not ctx.seed_sensor_mapped:
+        set_("heat_mat", True, "germinating: no seed thermometer, so it runs non-stop (keep a folded towel between the mat and the seeds)")
+        return
+    t = ctx.seed_temp_c
+    if t is None:
+        set_("heat_mat", False, "germinating, but the seed thermometer isn't reporting: off to be safe", force=True)
+    elif t < SEED_ON_BELOW_C:
+        set_("heat_mat", True, f"seeds at {t:g}°C: warming them to {SEED_ON_BELOW_C:g}–{SEED_OFF_ABOVE_C:g}°C")
+    elif t > SEED_OFF_ABOVE_C:
+        set_("heat_mat", False, f"seeds at {t:g}°C: warm enough", force=t >= SEED_OFF_ABOVE_C + 2)
     else:
-        set_("heat_mat", False, f"{ctx.stage}: the mat is only for germination and seedlings")
+        mat = ctx.devices.get("heat_mat")
+        set_("heat_mat", bool(mat and mat.state == "on"), f"seeds at {t:g}°C, in range")
 
 
 def exchange_plan(stage: str, drop_per_min: float) -> tuple[float, float]:
@@ -680,7 +698,23 @@ class Controller:
             exhaust_ducted=bool(profile.get("exhaust_ducted")), paused=bool(await self.paused_until()),
             devices=devices, standby=await self.standby(),
             safety_latch=(self.safety_latch or {}).get("kind"),
+            seed_sensor_mapped=bool(dmap.get("seed_temperature_sensor")), seed_temp_c=self._seed_temp(dmap),
         )
+
+    def _seed_temp(self, dmap: dict[str, str]) -> Optional[float]:
+        """The thermometer beside the seeds, °C, or None when it has nothing recent enough to switch the mat on."""
+        st = self.states.get(dmap.get("seed_temperature_sensor") or "")
+        if not st or st.get("state") in ("unavailable", "unknown", "", None):
+            return None
+        try:
+            v = float(st["state"])
+        except (TypeError, ValueError):
+            return None
+        ts = parse_iso(st.get("last_reported") or st.get("last_updated"))
+        if not ts or (utcnow() - ts).total_seconds() >= STALE_AFTER_S:
+            return None
+        unit = (st.get("attributes") or {}).get("unit_of_measurement") or ""
+        return round(f_to_c(v) if "F" in unit else v, 1)
 
     def _read_sensors(self, dmap: dict[str, str]) -> SensorSnapshot:
         snap = SensorSnapshot()
@@ -1368,7 +1402,9 @@ class Controller:
                     await self.store.resolve_alerts("device", f"{ROLE_BY_NAME[role].label} is switched on but drawing")
             if role in ("heater", "heat_mat"):
                 start = max(start, self._last_draw.get(role, start))   # idle on its own thermostat: count from the last draw
-            grace = {"humidifier": HUMIDIFIER_POWER_GRACE_S, "heater": HEATER_POWER_GRACE_S, "heat_mat": HEATER_POWER_GRACE_S}.get(role, POWER_GRACE_S)
+            # a mat on its own thermostat idles like a heater; one Grow Brain switches by the seed thermometer always draws
+            mat_grace = POWER_GRACE_S if dmap.get("seed_temperature_sensor") else HEATER_POWER_GRACE_S
+            grace = {"humidifier": HUMIDIFIER_POWER_GRACE_S, "heater": HEATER_POWER_GRACE_S, "heat_mat": mat_grace}.get(role, POWER_GRACE_S)
             if w is None or (now - start).total_seconds() < grace:
                 continue
             low = w < LOW_POWER_W.get(role, 3.0)

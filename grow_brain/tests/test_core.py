@@ -451,16 +451,24 @@ def _with_mat(ctx, state="off"):
     return ctx
 
 
-def test_the_germination_mat_runs_for_seeds_and_seedlings_only():
+def test_the_germination_mat_warms_the_seeds_until_the_tent_starts():
     from dataclasses import replace
-    seedling = _with_mat(_ctx(21.0, 60.0, stage="seedling"))
-    assert decide(seedling)["heat_mat"].desired is True
-    # germinating in a towel while the tent itself is in standby: everything off except the mat
+    # germinating outside the tent, tent in standby: everything off except the mat, which runs non-stop on its own
     standby = replace(_with_mat(_ctx(19.0, 50.0, stage="seedling")), standby=True)
     d = decide(standby)
     assert d["heat_mat"].desired is True and d["light"].desired is False and d["humidifier"].desired is False
-    # the sensor dropping out doesn't touch it: it runs on its own thermostat
-    assert decide(_with_mat(_ctx(None, None, stage="seedling", stale=True)))["heat_mat"].desired is True
-    assert decide(_with_mat(_ctx(24.0, 60.0, stage="veg")))["heat_mat"].desired is False
-    hot = decide(_with_mat(_ctx(36.0, 60.0, stage="seedling"), "on"))
-    assert hot["heat_mat"].desired is False and hot["heat_mat"].force
+    # the tent sensor dropping out doesn't matter: the mat isn't in the tent
+    assert decide(replace(_with_mat(_ctx(None, None, stage="seedling", stale=True)), standby=True))["heat_mat"].desired is True
+    # the cups moved in and the tent started, or a later stage: the mat is off
+    assert decide(_with_mat(_ctx(24.0, 60.0, stage="seedling"), "on"))["heat_mat"].desired is False
+    assert decide(replace(_with_mat(_ctx(24.0, 60.0, stage="veg")), standby=True))["heat_mat"].desired is False
+    # with a seed thermometer, the app is the mat's thermostat
+    def seeds(t, state="off"):
+        return decide(replace(_with_mat(_ctx(19.0, 50.0, stage="seedling"), state), standby=True,
+                              seed_sensor_mapped=True, seed_temp_c=t))["heat_mat"]
+    assert seeds(23.0).desired is True
+    assert seeds(27.0, "on").desired is False and not seeds(27.0, "on").force
+    assert seeds(29.0, "on").force                                  # well over: off straight away
+    assert seeds(25.5, "on").desired is True and seeds(25.5, "off").desired is False   # in the band: left as it is
+    gone = seeds(None, "on")
+    assert gone.desired is False and gone.force                    # no reading: off rather than cook them

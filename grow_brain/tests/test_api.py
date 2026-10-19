@@ -562,6 +562,29 @@ async def test_a_heater_idling_on_its_own_thermostat_is_not_an_alarm(client):
     assert not any("Heater is switched on" in e["message"] for e in await store.events(20, min_level="warn"))
 
 
+async def test_a_seed_thermometer_turns_the_app_into_the_mats_thermostat(client):
+    c, ha, store, controller = client
+    ha.state["switch.grow_mat"] = "off"
+    ha.sensors["sensor.seed_temp"] = ("22.0", "°C", "temperature")
+    await c.put("/api/devices/heat_mat", json={"entity_id": "switch.grow_mat"})
+    await c.put("/api/devices/seed_temperature_sensor", json={"entity_id": "sensor.seed_temp"})
+    await c.post("/api/control/standby")                     # germinating outside the tent
+    controller.last_switched.clear()
+    await controller.cycle()
+    assert ha.state["switch.grow_mat"] == "on" and ha.state["switch.grow_light"] == "off"
+    ha.sensors["sensor.seed_temp"] = ("29.0", "°C", "temperature")
+    await controller.cycle()
+    assert ha.state["switch.grow_mat"] == "off"
+    mat = next(d for d in (await c.get("/api/devices")).json()["devices"] if d["role"] == "heat_mat")
+    assert "seeds at 29" in mat["reason"]
+    # the first seedling is up: the cups go into the tent and the tent starts, the mat stays off
+    ha.sensors["sensor.seed_temp"] = ("20.0", "°C", "temperature")
+    await c.post("/api/control/start")
+    controller.last_switched.clear()
+    await controller.cycle()
+    assert ha.state["switch.grow_mat"] == "off"
+
+
 async def test_a_restarted_grow_ignores_the_last_grows_planting(client):
     c, ha, store, controller = client
     ps = await _plants_with_phones(c)
