@@ -598,6 +598,7 @@ async def test_a_new_grow_starts_over_without_faking_the_journal(client):
     # the old jobs are put away without a journal line, so nothing counts as planted or transplanted
     assert sorted(r["tasks_closed"]) == sorted(j["id"] for j in jobs[:3])
     assert {t["id"] for t in (await c.get("/api/tasks")).json()["tasks"]} == {jobs[3]["id"], refill}
+    assert await store.get_kv("grow_kept_tasks") == sorted([jobs[3]["id"], refill])
     assert len(await store.log_entries(100)) == journal
     for p in ps:
         plan = (await c.get("/api/plan", params={"plant_id": p["id"]})).json()
@@ -610,6 +611,36 @@ async def test_a_new_grow_starts_over_without_faking_the_journal(client):
     await c.post("/api/log", json={"kind": "planted", "plant_id": ps[0]["id"]})
     assert (await c.get("/api/plan", params={"plant_id": ps[0]["id"]})).json()["planted_on"] == today
     assert (await c.post("/api/grow/new", json={"strain": ""})).status_code == 422
+
+
+async def test_the_heartbeat_pings_only_while_the_tent_is_being_controlled(client):
+    c, ha, store, controller = client
+    pings = []
+
+    async def fake_get(url):
+        pings.append(url)
+    controller._heartbeat_get = fake_get
+    await controller.cycle()
+    assert pings == []                                              # nothing configured: nothing pinged
+    assert (await c.put("/api/settings", json={"heartbeat_url": "hc-ping.com/abc"})).status_code == 422
+    r = await c.put("/api/settings", json={"heartbeat_url": " https://hc-ping.com/abc "})
+    assert r.json()["heartbeat_url"] == "https://hc-ping.com/abc"
+    await controller.cycle()
+    await controller.cycle()
+    assert pings == ["https://hc-ping.com/abc"]                     # at most once a minute
+    from datetime import timedelta
+    controller._heartbeat_at -= timedelta(seconds=61)
+    real = ha.get_states
+
+    async def down():
+        raise RuntimeError("Home Assistant is down")
+    ha.get_states = down
+    await controller.cycle()
+    assert pings == ["https://hc-ping.com/abc"]                     # no ping while the tent isn't being controlled
+    ha.get_states = real
+    await controller.cycle()
+    assert len(pings) == 2
+    assert (await c.put("/api/settings", json={"heartbeat_url": ""})).json()["heartbeat_url"] is None
 
 
 async def test_unreachable_plug_and_ignored_commands_are_reported(client):

@@ -198,7 +198,8 @@ class Advisor:
         lines += ["", "## Open tasks"]
         tasks = await self.store.tasks("open")
         lines += [f"- #{t['id']} [{pname.get(t.get('plant_id'), 'tent')}] {t['title']}" + (f" (due {t['due']})" if t["due"] else "") for t in tasks] or ["- none"]
-        recent_done = [t for t in await self.store.tasks("done", limit=40) if t["created_at"] >= started
+        kept = set(await self.store.get_kv("grow_kept_tasks", []) or [])    # older jobs carried into this grow
+        recent_done = [t for t in await self.store.tasks("done", limit=40) if (t["created_at"] >= started or t["id"] in kept)
                        and t.get("completed_at") and t["completed_at"] >= (datetime.now(timezone.utc) - timedelta(hours=72)).isoformat()[:19]]
         if recent_done:
             lines += ["", "## Done in the last 3 days (don't ask for these again)"]

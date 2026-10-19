@@ -520,6 +520,7 @@ class Controller:
         self._safety_reported: Optional[str] = None
         self._task: Optional[asyncio.Task] = None
         self.last_cycle_at: Optional[datetime] = None
+        self._heartbeat_at: Optional[datetime] = None
         self._on_since: dict[str, datetime] = {}
         self._power_warned: dict[str, datetime] = {}
         self._energy_baselines: dict[tuple[str, str], float] = {}
@@ -800,7 +801,26 @@ class Controller:
                             tuple(sorted(self._unavail_alerted)), tuple(sorted(self._cmd_alerted))):
             await self._save_flags()
         await self._safe(self._daily_prune(ctx), "prune")
+        await self._safe(self._heartbeat(_s), "heartbeat")
         self.last_cycle_at = utcnow()
+
+    # ---- heartbeat: Home Assistant going down takes Grow Brain and its phone alerts with it, so nothing here can say so.
+    # A healthchecks.io-style address in settings.heartbeat_url is pinged after every good cycle (at most once a minute);
+    # that service raises the alarm when the pings stop. ----
+    async def _heartbeat(self, settings: dict) -> None:
+        url = (settings.get("heartbeat_url") or "").strip()
+        if not url.startswith("https://"):
+            return
+        now = utcnow()
+        if self._heartbeat_at and (now - self._heartbeat_at).total_seconds() < 60:
+            return
+        self._heartbeat_at = now
+        await self._heartbeat_get(url)
+
+    async def _heartbeat_get(self, url: str) -> None:
+        import httpx
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.get(url)
 
     async def _daily_prune(self, ctx: ControlContext) -> None:
         today = ctx.now_local.date().isoformat()

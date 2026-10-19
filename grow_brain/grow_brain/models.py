@@ -119,6 +119,7 @@ class SettingsModel(BaseModel):
     advisor_budget_usd: float = 40.0
     humidifier_tank_hours: float = 4.0
     admin_notify_service: Optional[str] = None
+    heartbeat_url: Optional[str] = None
     models_available: list[str] = Field(default_factory=list)
 
 
@@ -136,6 +137,7 @@ class SettingsUpdate(BaseModel):
     humidifier_tank_hours: Optional[float] = None  # hours of misting one tank lasts
     advisor_budget_usd: Optional[float] = None     # monthly cap on Claude spend
     admin_notify_service: Optional[str] = None     # the phone that gets 'update the add-on' notices
+    heartbeat_url: Optional[str] = None            # a healthchecks.io-style address, pinged after every good cycle
     camera_entity: Optional[str] = None
     camera_capture_minutes: Optional[int] = None
     temp_offset_c: Optional[float] = None

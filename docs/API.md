@@ -7,7 +7,7 @@ All timestamps are ISO-8601 UTC strings. All temperatures are returned in BOTH Â
 Errors: non-2xx with JSON `{"detail": "human readable message"}`.
 
 ## GET /api/health   (no auth)
-`{"ok": true, "version": "0.10.1", "ha_connected": true, "advisor_enabled": true, "control": "ok", "last_cycle_at": "...", "consecutive_failures": 0}`.
+`{"ok": true, "version": "0.10.2", "ha_connected": true, "advisor_enabled": true, "control": "ok", "last_cycle_at": "...", "consecutive_failures": 0}`.
 Returns **503** with `ok:false` when the control loop has stopped or is stuck (used by the Supervisor watchdog; turn the add-on's Watchdog toggle on).
 
 ## GET /api/status
@@ -293,6 +293,7 @@ Every request may carry `X-Device-Id: <random id per phone/browser>`; it keeps t
 - `models_available`: the models `model` may be set to.
 - `humidifier_tank_hours` (default 4): hours of misting one tank lasts.
 - `admin_notify_service`: the phone that gets "update the add-on" notices (default: the first plant's phone).
+- `heartbeat_url` (0.10.2): a healthchecks.io-style `https://` ping link, called after every good control cycle (at most once a minute) and never while Home Assistant is unreachable, so that service can raise the alarm when the box goes down. Empty clears it.
 
 **Humidity and fresh air (0.8.5)**
 - Fresh air comes in short swaps sized so each costs about 3 points of humidity (from the learned `exchange_rh_drop_per_min`), enough minutes per hour for the stage (seedling 3, later 15), at most three an hour, counted from the last time the exhaust ran for any reason, and never while fresh mist is still settling.

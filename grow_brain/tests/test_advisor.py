@@ -379,7 +379,13 @@ async def test_a_new_grow_hides_the_last_grows_records_from_the_advisor(env):
     for p in await store.plants():
         await store.update_plant(p["id"], start_date=today)
     await store.set_task_status(job["id"], "done")
+    # a job carried over from before the restart and ticked now still shows as done, so the advisor doesn't re-add it
+    kept = await store.add_task("Lift the power strip off the tent floor", "", None, "normal", "user", None)
+    await store.db.execute("UPDATE tasks SET created_at=? WHERE id=?", (old, kept["id"]))
+    await store.db.commit()
+    await store.set_kv("grow_kept_tasks", [kept["id"]])
+    await store.set_task_status(kept["id"], "done")
     ctx, _ = await adv._context()
     assert "not planted yet (seed germinating)" in ctx and "planted in a 0.5 L cup" not in ctx
-    assert "Check Levi's cup for a sprout" not in ctx
+    assert "Check Levi's cup for a sprout" not in ctx and "Lift the power strip off the tent floor (done" in ctx
     assert "the cups look soggy" not in ctx and "Still no sprouts" not in ctx

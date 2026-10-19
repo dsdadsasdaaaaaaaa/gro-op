@@ -163,6 +163,7 @@ export function createSettings(ctx) {
       price: input({ type: 'number', step: '0.001', min: 0, inputmode: 'decimal', value: s.price_per_kwh ?? '', placeholder: '0.15' }), currency: input({ value: s.currency || 'CAD', maxlength: 4 }),
       capture: input({ type: 'number', min: 1, max: 240, value: s.camera_capture_minutes ?? 30 }),
       tank: input({ type: 'number', min: 0.5, max: 48, step: 0.5, value: s.humidifier_tank_hours ?? 4 }),
+      heartbeat: input({ type: 'url', value: s.heartbeat_url || '', placeholder: 'https://hc-ping.com/…' }),
     };
     const btn = saveBtn();
     replaceChildren(refs.prefs,
@@ -170,7 +171,8 @@ export function createSettings(ctx) {
         const body = { units: f.units.value, brief_time: f.brief_time.value, auto_apply_advisor_targets: f.auto.checked, advisor_budget_usd: Number(f.budget.value) || 40,
           timezone: f.timezone.value.trim(), notify_service: f.notify_service.value || null, admin_notify_service: f.admin.value || null, model: f.model.value,
           temp_offset_c: Number(f.temp_offset_c.value) || 0, humidity_offset: Number(f.humidity_offset.value) || 0, price_per_kwh: f.price.value === '' ? null : Number(f.price.value),
-          currency: f.currency.value.trim() || 'CAD', camera_capture_minutes: Number(f.capture.value) || 30, humidifier_tank_hours: Number(f.tank.value) || 4 };
+          currency: f.currency.value.trim() || 'CAD', camera_capture_minutes: Number(f.capture.value) || 30, humidifier_tank_hours: Number(f.tank.value) || 4,
+          heartbeat_url: f.heartbeat.value.trim() };
         settings = await api.put('/api/settings', body); ctx.setSettings(settings); renderPrefs(); renderTargets();
       }); } },
         h('p', { class: 'muted small' }, 'These apply to the whole tent, for both of you.'),
@@ -180,7 +182,8 @@ export function createSettings(ctx) {
             field('Extra phone for every alert', f.notify_service, { hint: 'Each plant\'s own phone already gets alerts' }), field('Update notices go to', f.admin),
             field('Humidifier tank lasts (h of misting)', f.tank), field('Timezone', f.timezone), field('Advisor model', f.model),
             field('Temp offset (°C)', f.temp_offset_c, { hint: 'Added to the raw sensor reading' }), field('Humidity offset (%)', f.humidity_offset),
-            field('Price per kWh', f.price), field('Currency', f.currency), field('Camera frame every (min)', f.capture))),
+            field('Price per kWh', f.price), field('Currency', f.currency), field('Camera frame every (min)', f.capture),
+            field('Heartbeat link', f.heartbeat, { hint: 'A healthchecks.io ping link. Pinged every minute while the tent is being controlled, so that service can tell you when the box goes down.' }))),
         h('div', { class: 'form-actions' }, btn)));
   }
 

@@ -536,6 +536,7 @@ async def new_grow(body: NewGrow, request: Request):
         await st.store.update_plant(p["id"], strain=profile.strain, breeder=profile.breeder, seed_type=profile.seed_type,
                                     start_date=today, notes="")
     keep = set(body.keep_task_ids) | {await st.store.get_kv("humidifier_refill_task")}   # an empty tank is still empty
+    await st.store.set_kv("grow_kept_tasks", sorted(k for k in keep if k is not None))      # still this grow's, once ticked
     closed = [t["id"] for t in await st.store.tasks("open", limit=1000) if t["id"] not in keep]
     for tid in closed:
         await st.store.set_task_status(tid, "done")
@@ -630,6 +631,11 @@ async def put_settings(body: SettingsUpdate, request: Request):
         raise HTTPException(422, "The overheat cut-off must be between 28 and 40 °C.")
     if "safety_temp_min_c" in upd and not (5 <= float(upd["safety_temp_min_c"]) <= 20):
         raise HTTPException(422, "The cold limit must be between 5 and 20 °C.")
+    if "heartbeat_url" in upd:
+        url = (upd["heartbeat_url"] or "").strip()
+        if url and not re.fullmatch(r"https://[^\s/]+/\S+", url):
+            raise HTTPException(422, "The heartbeat address must be a full https:// link (the ping link healthchecks.io shows).")
+        upd["heartbeat_url"] = url or None
     if "timezone" in upd:
         from zoneinfo import ZoneInfo
         try:
