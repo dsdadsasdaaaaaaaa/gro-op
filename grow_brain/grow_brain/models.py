@@ -47,6 +47,16 @@ class StageChange(BaseModel):
     stage: Stage
 
 
+class NewGrow(BaseModel):
+    """Start over with fresh seeds in the same tent (POST /api/grow/new)."""
+    strain: str = Field(..., min_length=1, max_length=80)
+    breeder: str = Field("", max_length=80)
+    seed_type: str = Field("feminized photoperiod", max_length=80)
+    expected_flower_days: Optional[int] = Field(None, ge=30, le=140)
+    notes: Optional[str] = Field(None, max_length=4000)   # the tent's notes; left as they are when not given
+    keep_task_ids: list[int] = []                          # open jobs that still apply (the tent's own, say)
+
+
 class PlantCreate(BaseModel):
     name: str
     owner: str = ""

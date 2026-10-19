@@ -597,6 +597,14 @@ class Controller:
         raw = await self.store.get_kv("grow_profile", None)
         return GrowProfile(**raw).model_dump() if raw else GrowProfile().model_dump()
 
+    async def grow_since(self, start_date: str | None = None) -> str:
+        """When this grow's records begin, as a UTC timestamp: local midnight of its start date (a plant's own when
+        given, else the tent's), or the moment a new grow was started, whichever is later. Anything older is the last
+        grow's history."""
+        day = _pdate(start_date or (await self.profile()).get("start_date"))
+        since = iso(datetime.combine(day, dtime.min, self.tz(await self.settings()))) if day else ""
+        return max(since, await self.store.get_kv("grow_started_at") or "")
+
     async def effective_targets(self, profile: dict | None = None, settings: dict | None = None) -> tuple[Targets, int, int]:
         """Day-band targets plus day counters (day_in_stage, day_total)."""
         profile = profile or await self.profile()

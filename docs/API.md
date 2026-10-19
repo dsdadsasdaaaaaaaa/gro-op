@@ -7,7 +7,7 @@ All timestamps are ISO-8601 UTC strings. All temperatures are returned in BOTH �
 Errors: non-2xx with JSON `{"detail": "human readable message"}`.
 
 ## GET /api/health   (no auth)
-`{"ok": true, "version": "0.10.0", "ha_connected": true, "advisor_enabled": true, "control": "ok", "last_cycle_at": "...", "consecutive_failures": 0}`.
+`{"ok": true, "version": "0.10.1", "ha_connected": true, "advisor_enabled": true, "control": "ok", "last_cycle_at": "...", "consecutive_failures": 0}`.
 Returns **503** with `ok:false` when the control loop has stopped or is stuck (used by the Supervisor watchdog; turn the add-on's Watchdog toggle on).
 
 ## GET /api/status
@@ -109,6 +109,9 @@ GrowProfile:
 }
 ```
 ## POST /api/grow/stage   Body `{"stage": "flower"}` → GrowProfile (records date, resets targets to stage defaults, tells advisor).
+## POST /api/grow/new   Start over with fresh seeds in the same tent (0.10.1)
+Body `{"strain": "Grifter", "breeder": "Heavy Dayze Genetics", "seed_type": "feminized photoperiod", "expected_flower_days": 66, "notes": "...", "keep_task_ids": [12]}` (only `strain` is required; `notes` replaces the tent notes when given) → `{"grow": GrowProfile, "plants": [Plant...], "tasks_closed": [ids], "photo_requests_skipped": [ids]}`.
+Today becomes day 1 of the seedling stage for the tent and every plant (strain, breeder and seed type copied to each plant, plant notes cleared) and the targets go back to the stage defaults. Every open task except `keep_task_ids` and a pending humidifier refill is closed **without** a journal line (ticking them would log "Done:" lines, and a "Plant … seed" or "Transplant …" tick would count as one). Open photo requests are skipped, the chat is cleared and advisor warnings are resolved. The journal, photos and briefs from before stay as history: the plan and the advisor only count what happens after the restart.
 
 ## GET /api/targets → Targets (as in status)
 ## PUT /api/targets  Body: any subset of the numeric/time fields → Targets (source becomes "manual")

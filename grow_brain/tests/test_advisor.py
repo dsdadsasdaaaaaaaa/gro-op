@@ -356,3 +356,30 @@ async def test_the_advisor_leaves_out_the_last_grows_log(env):
     await store.add_log_entry("planted", None, None, None, "old seed that never came up", 1, at="2026-01-02T12:00:00Z")
     ctx, _ = await adv._context()
     assert "old seed that never came up" not in ctx and "are left out" in ctx
+
+
+async def test_a_new_grow_hides_the_last_grows_records_from_the_advisor(env):
+    store, adv, fake = env
+    from datetime import date, timedelta
+    from grow_brain.store import iso, utcnow
+    old = (date.today() - timedelta(days=20)).isoformat() + "T12:00:00Z"
+    await store.add_log_entry("planted", None, None, None, "", 1, at=old)
+    job = await store.add_task("Check Levi's cup for a sprout", "", None, "normal", "advisor", 1)
+    photo = await store.add_photo(None, None, "old.jpg", 1)
+    await store.set_photo_analysis(photo, {"summary": "the cups look soggy", "health_score": 3})
+    await store.add_brief({"headline": "Still no sprouts", "summary": "Give it two more days."})
+    for table, rid in (("tasks", job["id"]), ("photos", photo)):
+        await store.db.execute(f"UPDATE {table} SET created_at=? WHERE id=?", (old, rid))
+    await store.db.execute("UPDATE briefs SET created_at=?", (old,))
+    await store.db.commit()
+    # the restart (as POST /api/grow/new does it): the old job is put away, every date starts today
+    today = date.today().isoformat()
+    await store.set_kv("grow_profile", {**await store.get_kv("grow_profile"), "stage": "seedling", "start_date": today, "stage_started": today})
+    await store.set_kv("grow_started_at", iso(utcnow()))
+    for p in await store.plants():
+        await store.update_plant(p["id"], start_date=today)
+    await store.set_task_status(job["id"], "done")
+    ctx, _ = await adv._context()
+    assert "not planted yet (seed germinating)" in ctx and "planted in a 0.5 L cup" not in ctx
+    assert "Check Levi's cup for a sprout" not in ctx
+    assert "the cups look soggy" not in ctx and "Still no sprouts" not in ctx

@@ -106,7 +106,8 @@ class Advisor:
                 dt = (today - _date.fromisoformat(p["start_date"])).days if p.get("start_date") else None
             except ValueError:
                 dt = None
-            mine = [e for e in entries_all if e.get("plant_id") in (p["id"], None)]
+            since = await self.controller.grow_since(p.get("start_date"))     # this plant's seed, not the last grow's
+            mine = [e for e in entries_all if e.get("plant_id") in (p["id"], None) and e["created_at"] >= since]
             planted = next((e["created_at"][:10] for e in reversed(mine) if e["kind"] == "planted"
                             or (e.get("context") or "").lower() in ("planted", "planting")), None)
             moved = next((e["created_at"][:10] for e in reversed(mine) if e["kind"] == "transplant"), None)
@@ -180,11 +181,11 @@ class Advisor:
 
         lines += ["", "## Grower's log (newest first)"]
         entries = await self.store.log_entries(25)
-        started = profile.get("start_date") or ""
-        older = [e for e in entries if e["created_at"][:10] < started]
-        entries = [e for e in entries if e["created_at"][:10] >= started]   # this grow only
+        started = await self.controller.grow_since()   # this grow only: older journal, jobs, photos and briefs are history
+        older = [e for e in entries if e["created_at"] < started]
+        entries = [e for e in entries if e["created_at"] >= started]
         if older:
-            lines.append(f"- (entries from before this grow started on {started} are left out)")
+            lines.append(f"- (entries from before this grow started on {profile.get('start_date') or started[:10]} are left out)")
         if not entries:
             lines.append("- nothing logged yet")
         for e in entries:
@@ -197,8 +198,8 @@ class Advisor:
         lines += ["", "## Open tasks"]
         tasks = await self.store.tasks("open")
         lines += [f"- #{t['id']} [{pname.get(t.get('plant_id'), 'tent')}] {t['title']}" + (f" (due {t['due']})" if t["due"] else "") for t in tasks] or ["- none"]
-        recent_done = [t for t in await self.store.tasks("done", limit=40)
-                       if t.get("completed_at") and t["completed_at"] >= (datetime.now(timezone.utc) - timedelta(hours=72)).isoformat()[:19]]
+        recent_done = [t for t in await self.store.tasks("done", limit=40) if t["created_at"] >= started
+                       and t.get("completed_at") and t["completed_at"] >= (datetime.now(timezone.utc) - timedelta(hours=72)).isoformat()[:19]]
         if recent_done:
             lines += ["", "## Done in the last 3 days (don't ask for these again)"]
             lines += [f"- [{pname.get(t.get('plant_id'), 'tent')}] {t['title']} (done {t['completed_at'][:16]})" for t in recent_done]
@@ -207,7 +208,7 @@ class Advisor:
         lines += [f"- #{p['id']} [{pname.get(p.get('plant_id'), 'tent')}] {p['title']} (asked {p['created_at'][:10]})" for p in prs] or ["- none"]
 
         lines += ["", "## Recent photo analyses"]
-        photos = [p for p in await self.store.photos(5) if p.get("analysis")]
+        photos = [p for p in await self.store.photos(5) if p.get("analysis") and p["created_at"] >= started]
         for p in photos:
             a = p["analysis"]
             lines.append(f"- {p['created_at'][:10]} [{pname.get(p.get('plant_id'), 'tent')}] health {a.get('health_score')}/10: {a.get('summary')}")
@@ -215,8 +216,8 @@ class Advisor:
             lines.append("- none yet")
 
         lines += ["", "## Recent briefs"]
-        for b in await self.store.recent_briefs(3):
-            lines.append(f"- {b['created_at'][:10]}: {b.get('headline')} — {b.get('summary', '')[:300]}")
+        briefs = [b for b in await self.store.recent_briefs(3) if b["created_at"] >= started]
+        lines += [f"- {b['created_at'][:10]}: {b.get('headline')} — {b.get('summary', '')[:300]}" for b in briefs] or ["- none yet"]
 
         lines += ["", "## Warnings/alerts (last 48 h)"]
         evs = await self.store.events(15, min_level="warn", hours=48)
@@ -375,8 +376,8 @@ class Advisor:
         if not plant_ids:
             return []
         entries = await self.store.log_entries(500)
-        already = {e.get("plant_id") for e in entries if e["kind"] == "sprouted"
-                   and e["created_at"][:10] >= ((plants.get(e.get("plant_id")) or {}).get("start_date") or "")}
+        since = {pid: await self.controller.grow_since(p.get("start_date")) for pid, p in plants.items()}
+        already = {e.get("plant_id") for e in entries if e["kind"] == "sprouted" and e["created_at"] >= since.get(e.get("plant_id"), "")}
         seen_by = "the tent camera" if source == "camera_check" else "a photo"
         new = []
         for pid in dict.fromkeys(plant_ids):
@@ -418,9 +419,9 @@ class Advisor:
             at = datetime.now(timezone.utc) if day == today else datetime(day.year, day.month, day.day, 12, tzinfo=tz)
             at_iso = iso(at.astimezone(timezone.utc))
             what = "Planted" if pl.kind == "planted" else "Moved to the big pot"
-            started = plants[pl.plant_id].get("start_date") or ""
+            started = await self.controller.grow_since(plants[pl.plant_id].get("start_date"))
             same = sorted((e for e in entries if e["kind"] == pl.kind and e.get("plant_id") == pl.plant_id
-                           and e["created_at"][:10] >= started), key=lambda e: e["created_at"])
+                           and e["created_at"] >= started), key=lambda e: e["created_at"])
             if same:
                 first = same[0]
                 ts = parse_iso(first["created_at"])

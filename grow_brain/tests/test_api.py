@@ -574,6 +574,44 @@ async def test_a_restarted_grow_ignores_the_last_grows_planting(client):
     assert (await c.get("/api/plan", params={"plant_id": pid})).json()["planted_on"] is not None
 
 
+async def test_a_new_grow_starts_over_without_faking_the_journal(client):
+    c, ha, store, controller = client
+    ps = await _plants_with_phones(c)
+    await store.add_log_entry("planted", None, None, None, "the old seed, which never came up", ps[0]["id"], at="2026-09-24T12:00:00Z")
+    jobs = [await store.add_task(title, "", None, "normal", by, pid) for title, by, pid in (
+        ("Plant Dad's seed when its root shows", "advisor", ps[1]["id"]), ("Transplant into the 11 L pots", "advisor", None),
+        ("Take the dome off Levi's plant", "system", ps[0]["id"]), ("Lift the power strip off the tent floor", "user", None))]
+    await store.add_photo_request("Close-up of Levi's cup", "x", "check", ps[0]["id"])
+    await store.add_chat("user", "why is nothing up?")
+    await store.add_event("warn", "advisor", "Camera check: no seedling in either cup")
+    await controller._tank_alert("it misted a lot")                  # the humidifier ran low before the restart
+    refill = await store.get_kv("humidifier_refill_task")
+    journal = len(await store.log_entries(100))
+    r = (await c.post("/api/grow/new", json={"strain": "Grifter", "breeder": "Heavy Dayze Genetics", "expected_flower_days": 66,
+                                             "notes": "3x3 tent", "keep_task_ids": [jobs[3]["id"]]})).json()
+    today = datetime.now(timezone.utc).date().isoformat()
+    g = (await c.get("/api/grow")).json()
+    assert (g["strain"], g["stage"], g["start_date"], g["stage_started"], g["expected_flower_days"], g["notes"]) == \
+        ("Grifter", "seedling", today, today, 66, "3x3 tent")
+    assert all((p["strain"], p["breeder"], p["start_date"], p["notes"]) == ("Grifter", "Heavy Dayze Genetics", today, "")
+               for p in (await c.get("/api/plants")).json()["plants"])
+    # the old jobs are put away without a journal line, so nothing counts as planted or transplanted
+    assert sorted(r["tasks_closed"]) == sorted(j["id"] for j in jobs[:3])
+    assert {t["id"] for t in (await c.get("/api/tasks")).json()["tasks"]} == {jobs[3]["id"], refill}
+    assert len(await store.log_entries(100)) == journal
+    for p in ps:
+        plan = (await c.get("/api/plan", params={"plant_id": p["id"]})).json()
+        assert plan["planted_on"] is None and plan["current_phase"] == "germination"
+    assert (await c.get("/api/photo-requests")).json()["requests"] == [] and len(r["photo_requests_skipped"]) == 1
+    assert (await c.get("/api/chat")).json()["messages"] == []
+    assert not any(e["message"].startswith("Camera check") for e in await store.events(50, min_level="warn"))
+    assert (await c.get("/api/status")).json()["humidifier_tank"]["refill_task_id"] == refill   # still as low as it was
+    # a seed planted after the restart counts, even the same day
+    await c.post("/api/log", json={"kind": "planted", "plant_id": ps[0]["id"]})
+    assert (await c.get("/api/plan", params={"plant_id": ps[0]["id"]})).json()["planted_on"] == today
+    assert (await c.post("/api/grow/new", json={"strain": ""})).status_code == 422
+
+
 async def test_unreachable_plug_and_ignored_commands_are_reported(client):
     c, ha, store, controller = client
     await _plants_with_phones(c)

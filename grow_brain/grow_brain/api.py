@@ -21,8 +21,8 @@ from .advisor import Advisor, AdvisorError
 from .controller import Controller, light_window, valid_hhmm
 from .devices import ROLE_BY_NAME, ROLES, SWITCH_ROLES, automap
 from .models import (CameraAnalyse, CameraSelect, ChatRequest, DeviceMapUpdate, GrowProfile, GrowProfileUpdate, LogCreate,
-                     OverrideRequest, PauseRequest, PlantCreate, PlantUpdate, SettingsModel, SettingsUpdate, StageChange,
-                     TargetsUpdate, TaskCreate)
+                     NewGrow, OverrideRequest, PauseRequest, PlantCreate, PlantUpdate, SettingsModel, SettingsUpdate,
+                     StageChange, TargetsUpdate, TaskCreate)
 from .store import Store, iso, parse_iso, utcnow
 from .plan import build_plan
 from .targets import STAGES, stage_defaults
@@ -286,9 +286,9 @@ async def plan(request: Request, plant_id: Optional[int] = None):
     entries = await st.store.log_entries(300)
     tz = c.tz(settings)
     planted_on = None
-    started = (plant or {}).get("start_date") or profile.get("start_date") or ""
+    started = await c.grow_since((plant or {}).get("start_date"))
     for e in sorted(entries, key=lambda e: e["created_at"]):
-        if e["created_at"][:10] < started:
+        if e["created_at"] < started:
             continue    # a previous grow in the same tent (or with the same plant) doesn't count
         if (e["kind"] in ("planted", "transplant") or (e.get("context") or "").lower() in ("planted", "planting")) \
                 and (plant is None or e.get("plant_id") in (None, plant["id"])):
@@ -511,6 +511,43 @@ async def set_stage(body: StageChange, request: Request):
     await st.store.add_event("info", "system", f"Stage changed to {body.stage}; targets reset to stage defaults")
     await followups.stage_started(st.store, st.controller, body.stage)   # the stage's dated jobs (topping, defoliation, ...)
     return profile.model_dump()
+
+
+@router.post("/grow/new", dependencies=auth)
+async def new_grow(body: NewGrow, request: Request):
+    """Start over with fresh seeds in the same tent: today is day 1 of the seedling stage for the tent and every plant.
+    The last grow's open jobs and photo requests are put away (without journal lines, so nothing counts as planted or
+    transplanted), its chat is cleared and its advisor warnings resolved. Its journal, photos and briefs stay as history
+    that no longer counts. Equipment, what the tent has learned, settings and a pending humidifier refill stay."""
+    st = request.app.state
+    c: Controller = st.controller
+    today = datetime.now(c.tz(await c.settings())).date().isoformat()
+    profile = GrowProfile(**await c.profile())
+    profile.strain, profile.breeder, profile.seed_type = body.strain.strip(), body.breeder.strip(), body.seed_type.strip()
+    profile.expected_flower_days = body.expected_flower_days or profile.expected_flower_days
+    if body.notes is not None:
+        profile.notes = body.notes.strip()
+    profile.stage, profile.start_date, profile.stage_started, profile.flower_start_date = "seedling", today, today, None
+    await st.store.set_kv("grow_profile", profile.model_dump())
+    await st.store.set_kv("grow_started_at", iso(utcnow()))     # anything earlier today was still the last grow
+    old = await st.store.get_kv("targets_override", None) or {}
+    await st.store.set_kv("targets_override", {"values": {}, "source": "stage_default", "light_on_time": old.get("light_on_time", "06:00")})
+    for p in await st.store.plants():
+        await st.store.update_plant(p["id"], strain=profile.strain, breeder=profile.breeder, seed_type=profile.seed_type,
+                                    start_date=today, notes="")
+    keep = set(body.keep_task_ids) | {await st.store.get_kv("humidifier_refill_task")}   # an empty tank is still empty
+    closed = [t["id"] for t in await st.store.tasks("open", limit=1000) if t["id"] not in keep]
+    for tid in closed:
+        await st.store.set_task_status(tid, "done")
+    skipped = [r["id"] for r in await st.store.photo_requests("open", limit=1000)]
+    for rid in skipped:
+        await st.store.set_photo_request_status(rid, "skipped")
+    await st.store.clear_chat()
+    await st.store.resolve_alerts("advisor", "")     # camera checks and advice about the last plants
+    await st.store.add_event("info", "system", f"New grow started: {profile.strain}, day 1 is {today}. The last grow's "
+                             f"{len(closed)} open job(s) and {len(skipped)} photo request(s) were put away.")
+    return {"grow": profile.model_dump(), "plants": await _plants_api(request), "tasks_closed": closed,
+            "photo_requests_skipped": skipped}
 
 
 @router.get("/targets", dependencies=auth)
