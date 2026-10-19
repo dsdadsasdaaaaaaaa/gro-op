@@ -33,7 +33,12 @@ ROLES: list[RoleDef] = [
     RoleDef("dehumidifier", "Dehumidifier", "switch", False, "Lowers humidity when it is above target.",
             ("dehumidifier", "dehumid", "dry")),
     RoleDef("heater", "Heater", "switch", False, "Raises temperature when it is below target.",
-            ("heater", "heat mat", "heating mat", "heating pad"), negative=("overheat", "preheat", "active", "mode")),
+            ("heater", "space heater"), negative=("overheat", "preheat", "active", "mode", "mat", "pad")),
+    RoleDef("heat_mat", "Germination mat", "switch", False,
+            "Warms the seeds and seedling roots on its own thermostat. On while germinating and in the seedling stage, "
+            "off from veg (and whenever the tent overheats).",
+            ("germination mat", "seedling mat", "heat mat", "heating mat", "propagation mat", "seed mat", "heating pad"),
+            negative=("overheat", "preheat", "active", "mode")),
     RoleDef("cooler", "AC / cooler", "switch", False, "Lowers temperature when it is above target.",
             ("ac", "a/c", "air con", "cooler", "cooling", "chiller")),
     RoleDef("temperature_sensor", "Temperature sensor", "sensor", True, "Air temperature inside the tent.",

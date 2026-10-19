@@ -338,3 +338,21 @@ async def test_the_advisor_knows_the_humidifier_plug_measures_power(env):
     ctx, _ = await adv._context()
     assert "Humidifier water: misted" in ctx and "Its plug measures power" in ctx
 
+
+async def test_the_advisor_is_told_about_the_strain_being_grown(env):
+    store, adv, fake = env
+    profile = await store.get_kv("grow_profile")
+    await store.set_kv("grow_profile", {**profile, "strain": "Grifter", "breeder": "Heavy Dayze Genetics"})
+    await adv.chat("hello", 1)
+    system = fake.calls[-1]["system"][0]["text"]
+    assert "Grifter by Heavy Dayze Genetics" in system and "Liberty Haze by" not in system
+    await store.set_kv("grow_profile", {**profile, "strain": "Blue Dream", "breeder": "Humboldt", "expected_flower_days": 63})
+    await adv.chat("hello again", 1)
+    assert "Blue Dream by Humboldt" in fake.calls[-1]["system"][0]["text"]
+
+
+async def test_the_advisor_leaves_out_the_last_grows_log(env):
+    store, adv, fake = env
+    await store.add_log_entry("planted", None, None, None, "old seed that never came up", 1, at="2026-01-02T12:00:00Z")
+    ctx, _ = await adv._context()
+    assert "old seed that never came up" not in ctx and "are left out" in ctx

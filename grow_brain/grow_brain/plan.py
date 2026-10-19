@@ -1,8 +1,8 @@
 """The grow plan: one source of truth for the phases of this grow.
 
 Used by GET /api/plan (the roadmap in the app) and pasted into the advisor's system prompt so the
-advice it gives matches what the app shows. Written for a first-time grower: one Liberty Haze in soil,
-a small cup first, then an 11 L pot, under an LED in a tent.
+advice it gives matches what the app shows. Written for first-time growers: two feminized photoperiod plants in soil
+(the strain is in the grow profile), germinated on a heat mat, a small cup first, then an 11 L pot, under an LED in a tent.
 """
 
 from __future__ import annotations
@@ -24,20 +24,24 @@ class Phase:
 
 
 PHASES: list[Phase] = [
-    Phase("germination", "Germination", "Paper towel until the taproot shows", 0, 3,
-          ["Keep the paper towel damp (not dripping) inside a zip bag or between two plates, in the dark at 22–26 °C.",
-           "Look once a day, no poking. Liberty Haze usually cracks in 24–72 h.",
-           "Meanwhile fill a small cup (0.4–0.5 L, 4–5 holes in the bottom) with light potting soil and moisten it with plain room-temperature tap water (no pH kit needed until feeding starts). Stand it in a saucer."],
-          ["Taproot 5–10 mm → plant it the same day, root down, 1 cm deep, cover lightly, mist the surface.",
-           "No crack after 5 days → soak 12 h again in a shot glass, then back in the towel."],
-          "22–26 °C, dark, damp"),
+    Phase("germination", "Germination", "Paper towel on the germination mat until the taproot shows", 0, 3,
+          ["Soak the seeds in a glass of room-temperature water for 12–18 h, then fold them into a damp (not dripping) paper towel inside a zip bag or a closed container.",
+           "Lay it on the germination mat: thermostat probe under the bag, set to 25 °C. Dark is fine. The tent can stay in standby; the app keeps the mat on.",
+           "Look morning and evening without unfolding more than you need to, and never touch the root: a broken taproot is the commonest reason a cracked seed never comes up. Most fresh seeds crack in 24–72 h.",
+           "Meanwhile fill two small cups (0.4–0.5 L, 4–5 holes in the bottom) with light potting soil, moisten them with plain room-temperature tap water, and stand them on the mat so the soil is warm when the seeds go in."],
+          ["Taproot 5–10 mm → plant it the same day: root DOWN, 0.5–1 cm deep (no deeper), cover loosely, mist the surface. Log it under Log → Planted.",
+           "No crack after 4 days → leave it on the mat 2–3 more days; still nothing after a week → that seed is a dud, start another."],
+          "25 °C on the mat, dark, damp"),
     Phase("seedling", "Seedling in a cup", "A small cup so the roots fill it fast and you can't overwater", 3, 21,
-          ["Plant in the small cup, not the big pot: roots clump into a tight ball and watering stays easy.",
+          ["Plant in the small cup, not the big pot: roots clump into a tight ball and watering stays easy. Start the tent (Start tent on Home) when the first seed goes into its cup.",
+           "The cups stay on the germination mat (thermostat 24 °C, probe in the edge of one cup's soil) until the transplant: warm roots come up and grow faster in a cool basement.",
+           "Until it comes up, keep the soil moist but never soaking: mist the surface if it dries, don't pour water in. Most seedlings break the surface 2–5 days after planting.",
            "Water only when the cup feels light (lift it right after watering and again when dry to learn the difference): about 30–60 ml in a ring around the stem in week 1, up to 100–150 ml by week 3. Overwatering is the #1 beginner killer.",
            "No nutrients yet: fresh soil feeds it for 2–3 weeks.",
            "Light: only the big light, hung high (60–70 cm above the cups) with its dimmer at about 75 % (the light plug shows about 175 W); the two small lights stay unplugged until the transplant. Hanging it higher doesn't cool the tent, dimming does. From week 2, lower it about 5 cm every few days.",
-           "Optional: a clear cup with two small air holes over each seedling for the first 3–5 days to hold humidity; take it off once the first true leaves (the first jagged pair, not the round starter leaves) open."],
-          ["Stretching, thin, leaning stem → not enough light: lower the light 5 cm or turn the dimmer up a little.",
+           "Optional: a clear cup with two small air holes over each cup to hold humidity until the seedling is up. Lift it once a day for a few seconds and wipe the fog off; take it off once the first true leaves (the first jagged pair, not the round starter leaves) open."],
+          ["Nothing up 7 days after planting → gently scrape away the top centimetre: a seed lying on its side or stuck in its shell can be freed and turned root-down.",
+           "Stretching, thin, leaning stem → not enough light: lower the light 5 cm or turn the dimmer up a little.",
            "Drooping with wet soil → overwatered; let it dry out.",
            "Roots showing at the drainage holes or 4–5 sets of leaves (about 3 weeks) → transplant to the 11 L pot.",
            "Before the transplant, have ready: two 11 L pots with holes, about 25 L of light potting soil, and two saucers."],
@@ -74,7 +78,7 @@ PHASES: list[Phase] = [
            "Photos: the advisor will ask for a bud close-up and a whole-plant shot each week."],
           ["Brown or grey spots inside a bud, or a bud that pulls apart mushy → bud rot: cut it out, drop RH, more airflow.",
            "Yellowing lower fan leaves late in this phase → normal; the plant is spending them."],
-          "21–26 °C day, 45–52 % RH (VPD 1.2–1.4), 12 h light"),
+          "21–26 °C day, 45–50 % RH (VPD 1.2–1.4), 12 h light"),
     Phase("flower_ripen", "Flower: ripening", "Weeks 8–9: colour, smell and trichomes", 98, 107,
           ["Stop misting or foliar anything. Keep RH low and air moving.",
            "Check trichomes with a 60× jeweller's loupe on the bud (not the leaf): clear = wait, mostly cloudy = peak, 10–15 % amber = harvest window.",
@@ -82,7 +86,7 @@ PHASES: list[Phase] = [
            "Reduce feed to half strength."],
           ["Most pistils orange and curled in + cloudy trichomes → start the flush.",
            "Sudden strong smell → check the exhaust duct is still attached; a carbon filter is the only thing that removes smell."],
-          "20–25 °C day with cooler nights, 40–48 % RH (VPD 1.3–1.6), 12 h light"),
+          "20–25 °C day with cooler nights, 40–45 % RH (VPD 1.3–1.6), 12 h light"),
     Phase("flush", "Flush", "The last 7 days: plain water only", 107, 114,
           ["Water with plain water only (pH 6.3–6.5 if you have a kit by then), to good runoff.",
            "Let the leaves yellow: that's the plant using its reserves.",

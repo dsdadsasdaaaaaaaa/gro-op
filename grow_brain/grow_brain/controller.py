@@ -30,7 +30,7 @@ ENERGY_TODAY_SUFFIXES = ("_today_s_consumption", "_today_consumption", "_energy_
 ENERGY_MONTH_SUFFIXES = ("_this_month_s_consumption", "_month_consumption", "_energy_month")
 ENERGY_TOTAL_SUFFIXES = ("_energy", "_total_energy", "_energy_total", "_total_consumption")  # cumulative meters (Matter, Shelly...)
 LOW_POWER_W = {"light": 15.0, "exhaust_fan": 3.0, "intake_fan": 2.0, "circulation_fan": 2.0, "circulation_fan_2": 2.0,
-               "humidifier": 3.0, "dehumidifier": 20.0, "heater": 5.0, "cooler": 30.0}
+               "humidifier": 3.0, "dehumidifier": 20.0, "heater": 5.0, "heat_mat": 3.0, "cooler": 30.0}
 POWER_GRACE_S = 180
 # Heaters (and heat mats) have their own thermostat: switched on but idle for a while is normal. Only a heater that
 # hasn't drawn power for this long while switched on is unplugged, off at its own switch, or set too low.
@@ -223,6 +223,7 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
     if ctx.standby:
         for role in ctx.devices:
             set_(role, False, "tent in standby")
+        _heat_mat(ctx, set_)          # seeds germinate on the mat while the tent itself is still off
         if hot:
             _hot_safety(ctx, set_, temp)
         elif rh_critical:
@@ -231,6 +232,9 @@ def decide(ctx: ControlContext) -> dict[str, Decision]:
         elif cold:
             set_("humidifier", False, "SAFETY: too cold", force=True)
         return _apply_overrides_and_pause(ctx, d)
+
+    # --- germination mat: by stage, on its own thermostat (an overheat below switches it off too) ---
+    _heat_mat(ctx, set_)
 
     # --- an overheat cut stays in force until the tent has really cooled, even if the sensor drops out ---
     if hot and not fresh:
@@ -408,8 +412,18 @@ def _hot_safety(ctx: ControlContext, set_, temp: Optional[float]) -> None:
     set_("intake_fan", True, why + ", intake on", force=True)
     set_("cooler", True, why, force=True)
     set_("heater", False, why, force=True)
+    set_("heat_mat", False, why, force=True)
     set_("humidifier", False, why, force=True)
     set_("dehumidifier", False, why + " (a dehumidifier adds heat)", force=True)
+
+
+def _heat_mat(ctx: ControlContext, set_) -> None:
+    """The germination mat runs while the seeds germinate and through the seedling stage (its own thermostat holds
+    the soil temperature), and is off from veg on: the big pots are too big for it and the roots no longer need it."""
+    if ctx.stage == "seedling":
+        set_("heat_mat", True, "germinating / seedling: keeps the seeds and roots warm (its own thermostat sets the temperature)")
+    else:
+        set_("heat_mat", False, f"{ctx.stage}: the mat is only for germination and seedlings")
 
 
 def exchange_plan(stage: str, drop_per_min: float) -> tuple[float, float]:
@@ -1322,11 +1336,11 @@ class Controller:
             start = self._on_since[role]
             if w is not None and w >= LOW_POWER_W.get(role, 3.0):
                 self._last_draw[role] = now
-                if role == "heater" and self._power_warned.pop(role, None):
+                if role in ("heater", "heat_mat") and self._power_warned.pop(role, None):
                     await self.store.resolve_alerts("device", f"{ROLE_BY_NAME[role].label} is switched on but drawing")
-            if role == "heater":
+            if role in ("heater", "heat_mat"):
                 start = max(start, self._last_draw.get(role, start))   # idle on its own thermostat: count from the last draw
-            grace = {"humidifier": HUMIDIFIER_POWER_GRACE_S, "heater": HEATER_POWER_GRACE_S}.get(role, POWER_GRACE_S)
+            grace = {"humidifier": HUMIDIFIER_POWER_GRACE_S, "heater": HEATER_POWER_GRACE_S, "heat_mat": HEATER_POWER_GRACE_S}.get(role, POWER_GRACE_S)
             if w is None or (now - start).total_seconds() < grace:
                 continue
             low = w < LOW_POWER_W.get(role, 3.0)
@@ -1351,7 +1365,8 @@ class Controller:
                     continue
                 label = ROLE_BY_NAME[role].label
                 hint = {"light": "driver or light dead, or unplugged?",
-                        "heater": "unplugged, switched off at the heater, or its own thermostat set too low?"}.get(role, "unplugged or broken?")
+                        "heater": "unplugged, switched off at the heater, or its own thermostat set too low?",
+                        "heat_mat": "unplugged, or its thermostat set lower than the room?"}.get(role, "unplugged or broken?")
                 msg = f"{label} is switched on but drawing only {w:g} W: {hint}"
                 await self.notifier.send(f"power:{role}", msg, hours=6, title="Grow tent", everyone=True)
                 await self.store.add_event("warn", "device", msg)

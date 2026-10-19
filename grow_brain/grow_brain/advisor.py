@@ -22,7 +22,7 @@ from . import followups
 from .controller import Controller, light_window
 from .devices import ROLE_BY_NAME
 from .models import BriefOut, ChatOut, LogAdviceOut, PhotoAnalysisOut, TargetChange
-from .prompts import SYSTEM_PROMPT, units_instruction
+from .prompts import system_prompt, units_instruction
 from .store import Store, iso, parse_iso, utcnow
 from .targets import ADJUSTABLE_BY_ADVISOR, BOUNDS, c_to_f, light_power_target
 
@@ -180,6 +180,11 @@ class Advisor:
 
         lines += ["", "## Grower's log (newest first)"]
         entries = await self.store.log_entries(25)
+        started = profile.get("start_date") or ""
+        older = [e for e in entries if e["created_at"][:10] < started]
+        entries = [e for e in entries if e["created_at"][:10] >= started]   # this grow only
+        if older:
+            lines.append(f"- (entries from before this grow started on {started} are left out)")
         if not entries:
             lines.append("- nothing logged yet")
         for e in entries:
@@ -246,8 +251,9 @@ class Advisor:
             raise AdvisorError(f"This month's advisor budget (${budget:.0f}) is used up (${spent:.2f} spent). "
                                f"The tent keeps running on its own; raise the budget in Settings if you need more.")
         model = self.model_for(settings)
+        profile = await self.controller.profile()
         system = [
-            {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": system_prompt(profile), "cache_control": {"type": "ephemeral"}},
             {"type": "text", "text": units_instruction(settings.get("units", "c"))},
         ]
         messages = list(history or []) + [{"role": "user", "content": user_content}]
@@ -369,7 +375,8 @@ class Advisor:
         if not plant_ids:
             return []
         entries = await self.store.log_entries(500)
-        already = {e.get("plant_id") for e in entries if e["kind"] == "sprouted"}
+        already = {e.get("plant_id") for e in entries if e["kind"] == "sprouted"
+                   and e["created_at"][:10] >= ((plants.get(e.get("plant_id")) or {}).get("start_date") or "")}
         seen_by = "the tent camera" if source == "camera_check" else "a photo"
         new = []
         for pid in dict.fromkeys(plant_ids):
@@ -411,7 +418,9 @@ class Advisor:
             at = datetime.now(timezone.utc) if day == today else datetime(day.year, day.month, day.day, 12, tzinfo=tz)
             at_iso = iso(at.astimezone(timezone.utc))
             what = "Planted" if pl.kind == "planted" else "Moved to the big pot"
-            same = sorted((e for e in entries if e["kind"] == pl.kind and e.get("plant_id") == pl.plant_id), key=lambda e: e["created_at"])
+            started = plants[pl.plant_id].get("start_date") or ""
+            same = sorted((e for e in entries if e["kind"] == pl.kind and e.get("plant_id") == pl.plant_id
+                           and e["created_at"][:10] >= started), key=lambda e: e["created_at"])
             if same:
                 first = same[0]
                 ts = parse_iso(first["created_at"])

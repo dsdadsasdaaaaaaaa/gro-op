@@ -39,7 +39,7 @@ export function createSettings(ctx) {
     if (p?.notify_service && !notifyOpts.some((o) => o.value === p.notify_service)) notifyOpts.push({ value: p.notify_service, label: phoneName(p.notify_service) });
     const f = {
       name: input({ value: p?.name || '', required: true, placeholder: "Levi's plant" }), owner: input({ value: p?.owner || '', placeholder: 'Levi' }),
-      strain: input({ value: p?.strain ?? 'Liberty Haze' }), breeder: input({ value: p?.breeder ?? "Barney's Farm" }), seed_type: input({ value: p?.seed_type ?? 'feminized photoperiod' }),
+      strain: input({ value: p?.strain ?? grow?.strain ?? '' }), breeder: input({ value: p?.breeder ?? grow?.breeder ?? '' }), seed_type: input({ value: p?.seed_type ?? grow?.seed_type ?? 'feminized photoperiod' }),
       medium: select(MEDIA.map((m) => ({ value: m, label: capitalize(m) })), p?.medium || 'soil'), pot_size_l: input({ type: 'number', step: '0.5', min: 0, inputmode: 'decimal', value: p?.pot_size_l ?? 11 }),
       start_date: input({ type: 'date', value: p?.start_date || '' }), notify_service: select(notifyOpts, p?.notify_service || ''), notes: h('textarea', { class: 'input', rows: 2 }, p?.notes || ''),
     };

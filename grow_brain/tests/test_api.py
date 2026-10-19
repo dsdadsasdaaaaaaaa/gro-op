@@ -562,6 +562,18 @@ async def test_a_heater_idling_on_its_own_thermostat_is_not_an_alarm(client):
     assert not any("Heater is switched on" in e["message"] for e in await store.events(20, min_level="warn"))
 
 
+async def test_a_restarted_grow_ignores_the_last_grows_planting(client):
+    c, ha, store, controller = client
+    ps = await _plants_with_phones(c)
+    pid = ps[0]["id"]
+    await store.add_log_entry("planted", None, None, None, "old seed", pid, at="2026-09-24T12:00:00Z")
+    await c.put(f"/api/plants/{pid}", json={"start_date": "2026-10-19"})
+    plan = (await c.get("/api/plan", params={"plant_id": pid})).json()
+    assert plan["planted_on"] is None          # the new seed isn't in soil yet
+    await c.post("/api/log", json={"kind": "planted", "plant_id": pid})
+    assert (await c.get("/api/plan", params={"plant_id": pid})).json()["planted_on"] is not None
+
+
 async def test_unreachable_plug_and_ignored_commands_are_reported(client):
     c, ha, store, controller = client
     await _plants_with_phones(c)

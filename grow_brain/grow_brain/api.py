@@ -286,7 +286,10 @@ async def plan(request: Request, plant_id: Optional[int] = None):
     entries = await st.store.log_entries(300)
     tz = c.tz(settings)
     planted_on = None
+    started = (plant or {}).get("start_date") or profile.get("start_date") or ""
     for e in sorted(entries, key=lambda e: e["created_at"]):
+        if e["created_at"][:10] < started:
+            continue    # a previous grow in the same tent (or with the same plant) doesn't count
         if (e["kind"] in ("planted", "transplant") or (e.get("context") or "").lower() in ("planted", "planting")) \
                 and (plant is None or e.get("plant_id") in (None, plant["id"])):
             ts = parse_iso(e["created_at"])

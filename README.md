@@ -1,6 +1,6 @@
 # Grow Op
 
-A fully automated grow tent for one plant (Liberty Haze, Barney's Farm), run by your Home Assistant box,
+A fully automated grow tent for two plants (the strain is set in the app; currently Grifter by Heavy Dayze Genetics), run by your Home Assistant box,
 with a Claude-powered grow advisor and a native iPhone app so the only things you do by hand are the
 things a human has to do: water, feed, take a photo when asked, duct the exhaust.
 

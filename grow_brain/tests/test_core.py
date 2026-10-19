@@ -432,7 +432,7 @@ def test_textbook_targets_ease_between_phases():
     first = sd("flower", 0)
     assert first.light_hours == 12 and 50.0 < first.humidity_min < 55.0   # 12/12 at once, climate eases in
     assert sd("flower", 3).humidity_min == 50.0
-    assert sd("flower", 30).humidity_max == 52.0 and sd("flower", 60).humidity_max == 48.0
+    assert sd("flower", 30).humidity_max == 50.0 and sd("flower", 60).humidity_max == 45.0
     assert sd("flower", 60).night_temp_drop_c == 5.0                     # cooler nights while ripening
     assert sd("drying").temp_max_c == 20.0 and sd("drying").light_hours == 0
 
@@ -443,3 +443,24 @@ def test_light_power_targets_follow_the_phase():
     assert light_power_target("veg", 3)[1] < light_power_target("veg", 20)[1]
     assert light_power_target("flower", 10)[0] == 400.0
     assert light_power_target("drying") is None
+
+
+def _with_mat(ctx, state="off"):
+    from grow_brain.controller import DeviceInput
+    ctx.devices["heat_mat"] = DeviceInput("heat_mat", "switch.mat", state, True, None, None, None, None, None)
+    return ctx
+
+
+def test_the_germination_mat_runs_for_seeds_and_seedlings_only():
+    from dataclasses import replace
+    seedling = _with_mat(_ctx(21.0, 60.0, stage="seedling"))
+    assert decide(seedling)["heat_mat"].desired is True
+    # germinating in a towel while the tent itself is in standby: everything off except the mat
+    standby = replace(_with_mat(_ctx(19.0, 50.0, stage="seedling")), standby=True)
+    d = decide(standby)
+    assert d["heat_mat"].desired is True and d["light"].desired is False and d["humidifier"].desired is False
+    # the sensor dropping out doesn't touch it: it runs on its own thermostat
+    assert decide(_with_mat(_ctx(None, None, stage="seedling", stale=True)))["heat_mat"].desired is True
+    assert decide(_with_mat(_ctx(24.0, 60.0, stage="veg")))["heat_mat"].desired is False
+    hot = decide(_with_mat(_ctx(36.0, 60.0, stage="seedling"), "on"))
+    assert hot["heat_mat"].desired is False and hot["heat_mat"].force

@@ -1,6 +1,6 @@
 """Environmental targets per grow stage and VPD math.
 
-Defaults are tuned for Liberty Haze (Barney's Farm), a sativa-leaning photoperiod hybrid,
+Defaults are tuned for sativa-leaning feminized photoperiod hybrids (Grifter, Liberty Haze),
 grown in a small tent under LED. The advisor (Claude) may nudge these within safe bounds.
 """
 
@@ -104,7 +104,8 @@ def _blend(a: Targets, b: Targets, day: int, start: int, span: int = 3) -> Targe
 
 
 def stage_defaults(stage: str, day_in_stage: int = 0, light_on_time: str = "06:00") -> Targets:
-    """Textbook targets for each phase, led by VPD (Liberty Haze, a sativa-leaning hybrid, in soil under LED).
+    """Textbook targets for each phase, led by VPD (a sativa-leaning hybrid in soil under LED; flower humidity sits low
+    because the strain grown here is prone to mould).
     Within veg and flower the numbers move with the week, easing over 3 days instead of jumping."""
     lo = light_on_time
     seedling = Targets(22.0, 26.0, 65.0, 75.0, 0.4, 0.8, lo, 18, night_temp_drop_c=2.0,
@@ -115,9 +116,9 @@ def stage_defaults(stage: str, day_in_stage: int = 0, light_on_time: str = "06:0
                        note="Late veg: warm, a little drier for fast growth (VPD 0.9–1.2), 18/6")
     stretch = Targets(22.0, 27.0, 50.0, 60.0, 1.0, 1.3, lo, 12, night_temp_drop_c=3.0,
                       note="Flower weeks 1–3 (stretch): 12/12, humidity coming down (VPD 1.0–1.3)")
-    bulk = Targets(21.0, 26.0, 45.0, 52.0, 1.2, 1.4, lo, 12, night_temp_drop_c=4.0,
-                   note="Flower weeks 4–7 (bulking): RH ≤52 % against bud rot (VPD 1.2–1.4)")
-    ripen = Targets(20.0, 25.0, 40.0, 48.0, 1.3, 1.6, lo, 12, night_temp_drop_c=5.0,
+    bulk = Targets(21.0, 26.0, 45.0, 50.0, 1.2, 1.4, lo, 12, night_temp_drop_c=4.0,
+                   note="Flower weeks 4–7 (bulking): RH ≤50 % against bud rot (VPD 1.2–1.4)")
+    ripen = Targets(20.0, 25.0, 40.0, 45.0, 1.3, 1.6, lo, 12, night_temp_drop_c=5.0,
                     note="Flower week 8+ (ripening): cooler nights keep the terpenes, RH low (VPD 1.3–1.6)")
     if stage == "seedling":
         return seedling
