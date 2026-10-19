@@ -1,6 +1,6 @@
 """Parametric grow-tent parts for GrowOp, generated with manifold3d and exported as STL.
 
-Run:  ../.venv/bin/python make_parts.py
+Run (from this folder):  python make_parts.py   (needs manifold3d, trimesh, numpy)
 Everything is in millimetres. Print in PETG. Pole clips are made for POLE_SIZES (Levi's tent: 19 mm).
 """
 
@@ -320,7 +320,73 @@ def grove_clip(pole_d: float):
     return clip + blk
 
 
+# ================================================================ Yield program and Bluetooth proxy (Oct 2026)
+
+# ---------------------------------------------------------------- 12. Trellis-net hook for a corner pole
+
+def trellis_hook(pole_d: float):
+    """Snaps onto a corner pole with a notched tab pointing at the middle of the tent. Drop the net's corner cord
+    into the notch: the net pulls it toward the middle, against the tall end lip. Slides up the pole as the net goes up."""
+    height = 16.0
+    clip, r_out = pole_clip(pole_d, height=height, tab_len=20, tab_w=12)
+    x_notch = r_out + 9          # notch starts here
+    notch_w = 6.0                # fits a 2-5 mm cord or the net's own corner loop
+    return clip - box(notch_w, 14, height).translate([x_notch, -7, 6])          # open at the top, 6 mm floor
+
+
+# ---------------------------------------------------------------- 13. LST soil peg (shepherd's crook)
+
+def lst_peg(length: float = 110.0, width: float = 7.0, t: float = 4.5):
+    """Push it into the soil near the pot edge, hook up. Loop a soft plant tie round the branch, pull it down and
+    slip the tie into the crook: the branch pulls up, the tie seats in the bend and stays. Prints flat."""
+    shaft = box(length, width, t)
+    side = width / 2 ** 0.5
+    tip = box(side, side, t).rotate([0, 0, 45]).scale([3, 1, 1]).translate([length, 0, 0]) ^ box(20, width, t).translate([length, 0, 0])
+    head = box(8, width, t).translate([-8, 0, 0])
+    bridge = box(6, 10, t).translate([-8, width, 0])                    # crook top, 6 mm thick
+    finger = box(16, 4, t).translate([-8, width + 6, 0])                # comes back down beside the shaft: 6 mm gap
+    return shaft + tip + head + bridge + finger
+
+
+# ---------------------------------------------------------------- 14. Pot foot (three under each 11 L pot)
+
+def pot_foot():
+    """Lifts the pot 18 mm so runoff drains away and air reaches the bottom of the soil. Cross channels on top let
+    water out from under the pot. Stand them inside the saucer, three per pot near its edge."""
+    s_, h = 45.0, 18.0
+    body = box(s_, s_, h)
+    body = body - box(s_ + 2, 10, 7).translate([-1, (s_ - 10) / 2, h - 6])
+    body = body - box(10, s_ + 2, 7).translate([(s_ - 10) / 2, -1, h - 6])
+    for x in (0, s_):                                                    # chamfer the vertical corners
+        for y in (0, s_):
+            body = body - box(6, 6, h + 2).rotate([0, 0, 45]).translate([x, y - 4.24, -1])
+    return body
+
+
+# ---------------------------------------------------------------- 15. Bluetooth-proxy mount (M5Stack ATOM Lite)
+
+ATOM_LITE = (24.0, 24.0, 10.0)   # C008 ATOM Lite (classic ESP32, supported by ESPHome's one-click Bluetooth proxy)
+
+
+def atom_ziptie_mount():
+    """Plate with an ATOM Lite cradle: the unit pushes in past the corner lips, its USB-C side stays open.
+    Zip-tie it beside the tent near the Govee (a shelf leg, the tent's outside straps) or just stand it there."""
+    PL, PW, T = 44.0, 44.0, 3.0
+    Lo, Wo = cradle_footprint(ATOM_LITE[0], ATOM_LITE[1])
+    body = box(PL, PW, T) + unit_cradle(*ATOM_LITE).translate([(PL - Lo) / 2, (PW - Wo) / 2, 0])
+    slot_l, slot_w = 7.0, 3.2
+    for x in (4.0, PL - 4.0):
+        for y in (8.0, PW - 8.0):
+            body = body - box(slot_w, slot_l, T + 2).translate([x - slot_w / 2, y - slot_l / 2, -1])
+    return body
+
+
 if __name__ == "__main__":
+    for d in POLE_SIZES:
+        save(trellis_hook(d), f"trellis_net_hook_{d}mm")
+    save(lst_peg(), "lst_soil_peg")
+    save(pot_foot(), "pot_foot")
+    save(atom_ziptie_mount(), "bluetooth_proxy_atom_mount")
     for d in POLE_SIZES:
         save(govee_holder(d), f"govee_h5074_pole_holder_{d}mm")
         save(wyze_mount(d), f"wyze_cam_pole_mount_{d}mm")

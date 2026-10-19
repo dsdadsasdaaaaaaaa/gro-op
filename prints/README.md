@@ -18,8 +18,24 @@ Pole clips are made for **19 mm** poles (measured on this tent). Other sizes: ed
 | `leaf_sensor_stake_clip_<8,10,12>mm.stl` / `leaf_sensor_pole_clip_<pole>mm.stl` | Holds the NCIR unit looking **straight down**. Print the stake size that matches your bamboo stake (measure it with the paper-strip trick), push the unit in, then snap the clip on **upside down** so the pocket faces the leaves, a hand's width above them. | As oriented. No supports. Tiny print. |
 | `distance_sensor_light_mount.stl` | Plate for the ToF4M: push the unit into the cradle, zip-tie the plate to the light's frame or hanger bar with the sensor looking down at the plant. Slots run both ways so it straps to a bar in either direction; two screw holes if the light has threads. One per plant. | Flat. No supports. |
 | `grove_cable_clip_<pole>mm.stl` | Clip for the flat Grove ribbon cables: slide the ribbon in edge-first through the gap. Print 6. | Any orientation. |
+| `trellis_net_hook_<pole>mm.stl` | **Yield.** Snaps onto a corner pole with a notched tab pointing at the middle of the tent. Drop the trellis net's corner cord into the notch: the net pulls it against the tall end lip. Slide the hooks up as the net goes up (start 20–25 cm above the pot rims). Print 4 (8 for a second net layer). | As oriented (ring standing, notch up). No supports. |
+| `lst_soil_peg.stl` | **Yield.** Low-stress-training anchor for any pot: push it into the soil near the pot edge, hook end up. Loop a soft plant tie round a branch, pull it down and slip the tie into the crook; the branch pulls up and the tie stays seated in the bend. Print 8–10 before topping (veg day ~12). | Flat. No supports. 4 walls, 40 % infill. |
+| `pot_foot.stl` | Three under each 11 L pot, inside the saucer near its edge: lifts the pot 18 mm so runoff drains away instead of soaking back up, and air reaches the bottom roots. Print 6. | Flat. 4 walls, 30 % infill (each pot puts ~12 kg on three feet). |
+| `bluetooth_proxy_atom_mount.stl` | Holds an M5Stack **ATOM Lite** (the Bluetooth proxy that fixes the tent hygrometer's dropouts): push it in past the corner lips, USB-C side open. Zip-tie it just **outside** the tent, within a metre of the Govee (a shelf leg, the tent's outer straps), or stand it on the floor there. | Flat. No supports. |
 
-The Govee cradle is cut for a 41 × 41 × 14 mm sensor with 1 mm of slack; if yours measures differently, change `GOVEE_W`/`GOVEE_H`/`GOVEE_T` at the top of the script. Regenerate or resize anything with `../.venv/bin/python make_parts.py` (all dimensions are at the top of the file).
+The Govee cradle is cut for a 41 × 41 × 14 mm sensor with 1 mm of slack; if yours measures differently, change `GOVEE_W`/`GOVEE_H`/`GOVEE_T` at the top of the script. Regenerate or resize anything with `python make_parts.py` (needs manifold3d, trimesh, numpy) (all dimensions are at the top of the file).
+
+## Cheap upgrades (October 2026 plan)
+
+| When | What | Cost | Why |
+|---|---|---|---|
+| Now | **M5Stack ATOM Lite** + USB-C cable + any USB charger, flashed as a Bluetooth proxy | ~CA$20–30 | The Govee hygrometer reaches Home Assistant over Bluetooth through the tent wall and drops out, which puts the tent in safe mode. A proxy beside the tent forwards it over Wi-Fi. Flash it from Chrome or Edge at esphome.github.io/bluetooth-proxies (plug it in by USB, Connect, pick M5Stack Atom Lite, enter the Wi-Fi; no code), then click Configure on the new device in Home Assistant. The sensor names stay the same. |
+| Now | A smart plug with **its own app** (e.g. Wyze Plug) for the Home Assistant box | ~CA$15 | Lets you power-cycle the box from anywhere when Home Assistant hangs. Must not be controlled through Home Assistant. |
+| Veg ~day 12 | 8–10 `lst_soil_peg`, soft plant ties | ~CA$8 | Topping + low-stress training spreads the plant flat under the light: more tops at the same height = more bud. |
+| Veg ~day 18 | Trellis net for a 3×3 ft (90 cm) tent + 4 `trellis_net_hook` | ~CA$12 | Holds every top at the same height and supports the buds in flower. |
+| Transplant | 6 `pot_foot` | filament | Drainage and air under the 11 L pots. |
+| Transplant (optional) | **Blumat Tropf** gravity drip kit, 2 carriers per pot, fed from a bucket on a shelf above the pots | ~CA$60–90 | Waters by itself when the soil dries (ceramic sensors, no power, nothing to fail if Home Assistant is down). Fiddly to set up the first time and best with plain water or organic feeds; skip it if you'd rather keep watering by finger-test. |
+| Flip to flower | A CA$10 mechanical timer in series with the light plug, set 06:00–18:00 | ~CA$10 | Backstop: if the box dies with the light on, the timer still gives the plants their 12 h of dark. |
 
 ## Building a pot scale
 
